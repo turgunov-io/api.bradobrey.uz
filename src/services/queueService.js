@@ -84,14 +84,20 @@ const ensureBarberOwnsEntry = async (queueId, barberId) => {
 
 const fetchQueueForBarber = async (
   barberId,
-  statuses = ['waiting', 'called']
+  statuses = ['waiting', 'called'],
+  { fromDate, toDate } = {}
 ) => {
-  const data = await runQueueSelect((q) =>
-    q
+  const data = await runQueueSelect((q) => {
+    let query = q
       .eq('barber_id', barberId)
       .in('status', statuses)
-      .order('created_at', { ascending: true })
-  );
+      .order('created_at', { ascending: true });
+
+    if (fromDate) query = query.gte('created_at', fromDate);
+    if (toDate) query = query.lte('created_at', toDate);
+
+    return query;
+  });
   return data;
 };
 

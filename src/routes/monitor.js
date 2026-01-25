@@ -14,6 +14,7 @@ const {
 const router = express.Router();
 
 const allowedSources = ['point', 'site', 'admin'];
+const paymentMethods = ['cash', 'card', 'certificate'];
 
 const pickBarberWithShortestQueue = async (branchId) => {
   const { data: barbers, error: barbersError } = await supabase
@@ -134,6 +135,7 @@ router.post(
       barber_id: barberIdInput,
       branch_id: branchIdInput,
       source = 'point',
+      payment_method: paymentMethodInput,
     } = req.body || {};
 
     const serviceIds = Array.isArray(serviceId)
@@ -150,6 +152,10 @@ router.post(
 
     if (!allowedSources.includes(source)) {
       throw httpError(400, `source must be one of: ${allowedSources.join(', ')}`);
+    }
+
+    if (paymentMethodInput && !paymentMethods.includes(paymentMethodInput)) {
+      throw httpError(400, `payment_method must be one of: ${paymentMethods.join(', ')}`);
     }
 
     let branchId = branchIdInput || null;
@@ -225,6 +231,7 @@ router.post(
       service_ids: serviceIds,
       source,
       status: 'waiting',
+      payment_method: paymentMethodInput || null,
     };
 
     let inserted;
@@ -238,14 +245,21 @@ router.post(
 
     const isMissingServiceIdsError = (err) =>
       Boolean(err?.message?.toLowerCase().includes('service_ids'));
+    const isMissingPaymentMethodError = (err) =>
+      Boolean(err?.message?.toLowerCase().includes('payment_method'));
 
-    if (insertError && isMissingServiceIdsError(insertError)) {
+    if (insertError && (isMissingServiceIdsError(insertError) || isMissingPaymentMethodError(insertError))) {
+      const fallbackPayload = { ...insertPayload };
+      if (isMissingServiceIdsError(insertError)) {
+        delete fallbackPayload.service_ids;
+      }
+      if (isMissingPaymentMethodError(insertError)) {
+        delete fallbackPayload.payment_method;
+      }
+
       ({ data: inserted, error: insertError } = await supabase
         .from('queue_entries')
-        .insert({
-          ...insertPayload,
-          service_ids: undefined,
-        })
+        .insert(fallbackPayload)
         .select('id')
         .single());
     }
@@ -276,10 +290,11 @@ router.post(
     });
 
     res.status(201).json({
-      entry,
+      entry: { ...entry, payment_method: entry.payment_method || paymentMethodInput || null },
       eta_minutes: eta,
       selected_service_ids: serviceIds,
       services: selectedServices,
+      payment_method: entry.payment_method || paymentMethodInput || null,
     });
   })
 );
