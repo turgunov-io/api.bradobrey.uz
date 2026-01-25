@@ -15,6 +15,8 @@ const router = express.Router();
 
 const allowedSources = ['point', 'site', 'admin'];
 const paymentMethods = ['cash', 'card', 'certificate'];
+let serviceIdsColumnExists = true;
+let paymentMethodColumnExists = true;
 
 const pickBarberWithShortestQueue = async (branchId) => {
   const { data: barbers, error: barbersError } = await supabase
@@ -228,11 +230,17 @@ router.post(
       branch_id: branchId,
       barber_id: barberId,
       service_id: serviceIds[0], // store primary selected service
-      service_ids: serviceIds,
       source,
       status: 'waiting',
-      payment_method: paymentMethodInput || null,
     };
+
+    if (serviceIdsColumnExists) {
+      insertPayload.service_ids = serviceIds;
+    }
+
+    if (paymentMethodColumnExists) {
+      insertPayload.payment_method = paymentMethodInput || null;
+    }
 
     let inserted;
     let insertError;
@@ -252,9 +260,11 @@ router.post(
       const fallbackPayload = { ...insertPayload };
       if (isMissingServiceIdsError(insertError)) {
         delete fallbackPayload.service_ids;
+        serviceIdsColumnExists = false;
       }
       if (isMissingPaymentMethodError(insertError)) {
         delete fallbackPayload.payment_method;
+        paymentMethodColumnExists = false;
       }
 
       ({ data: inserted, error: insertError } = await supabase
