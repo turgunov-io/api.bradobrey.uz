@@ -49,7 +49,8 @@ create table if not exists queue_entries (
   created_at timestamp default now(),
   started_at timestamp,
   finished_at timestamp,
-  swapped_flag boolean default false
+  swapped_flag boolean default false,
+  payment_method text check (payment_method in ('cash', 'card', 'certificate'))
 );
 
 create table if not exists payments (
@@ -71,3 +72,23 @@ create table if not exists users (
 -- Helpful indexes for queue lookups
 create index if not exists idx_queue_entries_barber_status on queue_entries (barber_id, status, created_at);
 create index if not exists idx_queue_entries_branch_status on queue_entries (branch_id, status, created_at);
+
+-- Safety migrations for existing databases (no-op if columns already exist)
+do $$
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_name = 'queue_entries' and column_name = 'service_ids'
+  ) then
+    alter table queue_entries add column service_ids uuid[];
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_name = 'queue_entries' and column_name = 'payment_method'
+  ) then
+    alter table queue_entries add column payment_method text check (payment_method in ('cash', 'card', 'certificate'));
+  end if;
+end $$;
