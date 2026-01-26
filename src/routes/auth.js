@@ -159,7 +159,7 @@ router.post(
       if (branchOverride && branchOverride !== barber.branch_id) {
         const { data: updatedBarber, error: barberUpdateError } = await supabase
           .from('barbers')
-          .update({ branch_id: branchOverride })
+          .update({ branch_id: branchOverride, is_on_shift: true })
           .eq('id', user.id)
           .select(
             'id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization'
@@ -174,6 +174,21 @@ router.post(
         branchId = branchOverride;
       } else if (!branchId) {
         branchId = barber.branch_id || null;
+      } else if (!barber.is_on_shift || barber.branch_id !== branchId) {
+        const { data: updatedBarber, error: barberShiftError } = await supabase
+          .from('barbers')
+          .update({ branch_id: branchId, is_on_shift: true })
+          .eq('id', user.id)
+          .select(
+            'id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization'
+          )
+          .maybeSingle();
+
+        if (barberShiftError) {
+          throw httpError(500, barberShiftError.message);
+        }
+
+        barber = updatedBarber || barber;
       }
     }
 
