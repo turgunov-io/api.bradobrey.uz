@@ -85,3 +85,18 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `PATCH /api/services/:id` (admin_network, admin_branch)
 - `POST /api/services/:id/activate` (admin_network, admin_branch)
 - `POST /api/services/:id/deactivate` (admin_network, admin_branch)
+
+## AI prompt to recreate this project
+
+```
+Build an Express + Supabase backend for a barbershop live-queue system with JWT auth and Socket.io updates.
+- Entities: branches, barbers (id=users.id, phone, photo, specialization, is_authorized, is_on_shift), services (duration_minutes, base_price, is_active), clients (name, phone unique), queue_entries (client_id, branch_id, barber_id, service_id + service_ids[], status waiting|called|swapped|rejected|in_progress|completed|cancelled|no_show, source point|site|admin, payment_method cash|card|certificate, timestamps), payments (amount, method), media_assets (ads|music|kids|video, barber_id optional).
+- Auth: /api/auth/register, /api/auth/login (barber must supply branch_id), /api/auth/me. Token payload includes barberId and branchId.
+- Barber workspace: /api/barber/queue (today only, auto-reject stale via timeout_minutes, includes services, price, payment, eta), /api/barber/queue/:id/reject, /api/barber/queue/:id/swap, /api/barber/queue/:id (patch services/payment/client info), /api/barber/stats, /api/barber/history, /api/barber/profile (get/patch), /api/barber/shift/start, /api/barber/shift/stop, media CRUD /api/barber/media (list/create/update, scoped to barber or shared).
+- Queue actions (shared): /api/queue/:id/{call|start|complete|pause} as needed.
+- Client/kiosk: /api/monitor/barbers?branch_id=, /api/monitor/queue (enqueue client with service_ids array), /api/monitor/queue/:id/status, /api/monitor/queue/:id/cancel.
+- Services and branches CRUD for admins.
+- Realtime: broadcast queue:update to room branch:{branch_id}.
+- CORS configurable via env, server port 4000 default.
+Provide schema.sql with all tables/indexes and safety ALTERs, and .env example for SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, JWT_SECRET, CORS_ORIGIN.
+```
