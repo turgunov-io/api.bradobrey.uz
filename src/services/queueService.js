@@ -30,19 +30,19 @@ const runQueueSelect = async (filters, { single = false } = {}) => {
   let primary = supabase.from('queue_entries').select(queueSelectPrimary);
   primary = filters(primary);
 
-  let { data, error } = await (single ? primary.single() : primary);
+  let { data, error } = await (single ? primary.limit(1) : primary);
 
   if (error && isMissingServiceIdsError(error)) {
     let fallback = supabase.from('queue_entries').select(queueSelectFallback);
     fallback = filters(fallback);
-    ({ data, error } = await (single ? fallback.single() : fallback));
+    ({ data, error } = await (single ? fallback.limit(1) : fallback));
   }
 
   if (error) {
     throw httpError(500, error.message);
   }
 
-  return data;
+  return single && Array.isArray(data) ? data[0] || null : data;
 };
 
 const allowedStatuses = [
