@@ -541,8 +541,6 @@ router.get(
   })
 );
 
-
-
 router.post('/reject/user/:user_id', authenticateBarber, rejectByClient);
 router.post('/reject/:user_id', authenticateBarber, rejectByClient);
 

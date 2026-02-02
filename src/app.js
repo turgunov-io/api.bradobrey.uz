@@ -30,6 +30,12 @@ app.use('/api/monitor', monitorRoutes);
 app.use('/api/branches', branchRoutes);
 app.use('/api/services', serviceRoutes);
 
+app.get('/health', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 // eslint-disable-next-line no-unused-vars
