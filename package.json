@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "dev": "node src/server.js",
+    "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "build": "echo \"Netlify build step (no-op)\"",
     "test": "echo \"No automated tests configured\" && exit 0"
@@ -20,6 +20,7 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
+    "nodemon": "^3.1.11",
     "pm2": "^6.0.14",
     "serverless-http": "^3.2.0",
     "socket.io": "^4.8.3"

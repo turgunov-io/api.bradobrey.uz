@@ -4,12 +4,7 @@ const cors = require('cors');
 const express = require('express');
 const morgan = require('morgan');
 
-const authRoutes = require('./routes/auth');
-const barberRoutes = require('./routes/barber');
-const monitorRoutes = require('./routes/monitor');
-const queueRoutes = require('./routes/queue');
-const branchRoutes = require('./routes/branch');
-const serviceRoutes = require('./routes/service');
+const barbers = require('./routers/barbers');
 
 const app = express();
 
@@ -23,18 +18,13 @@ app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 app.use(morgan('dev'));
 
-app.use('/api/auth', authRoutes);
-app.use('/api/barber', barberRoutes);
-app.use('/api/queue', queueRoutes);
-app.use('/api/monitor', monitorRoutes);
-app.use('/api/branches', branchRoutes);
-app.use('/api/services', serviceRoutes);
 
 app.get('/health', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.use('/api/barbers', barbers);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
