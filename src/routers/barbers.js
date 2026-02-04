@@ -8,5 +8,6 @@ router.get("/me", (req, res) => barbers.me(req, res));
 router.get("/queue", (req, res) => barbers.myQueue(req, res));
 router.get("/queue/:id", (req, res) => barbers.getQueueById(req, res));
 router.patch("/queue/:id", (req, res) => barbers.updateQueue(req, res));
+router.get("/")
 
 module.exports = router;

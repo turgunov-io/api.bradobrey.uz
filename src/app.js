@@ -8,9 +8,16 @@ const barbers = require('./routers/barbers');
 
 const app = express();
 
-const corsOrigin = process.env.CORS_ORIGIN
+const extraOrigins = ['https://gleaming-manatee-c42221.netlify.app'];
+
+const envOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
   : '*';
+
+const corsOrigin =
+  envOrigins === '*'
+    ? '*'
+    : Array.from(new Set([...(envOrigins || []), ...extraOrigins]));
 
 app.set('corsOrigin', corsOrigin);
 
