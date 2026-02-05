@@ -1,0 +1,279 @@
+const { supabase } = require("../config/supabase");
+
+class Kiosk {
+    health(_req, res) {
+        return res.json({ status: "ok" });
+    }
+
+    async config(_req, res) {
+        const { data, error } = await supabase
+            .from("branches")
+            .select("id, name, address");
+
+        if (error || !data) {
+            return res.status(500).json({ error: error?.message || "Failed to load branches" });
+        }
+
+        return res.status(200).json({ entry: data });
+    }
+
+    async register(req, res) {
+        const { branch_id, device_name } = req.body || {};
+
+        if (!branch_id || !device_name) {
+            return res.status(400).json({ error: "branch_id and device_name are required" });
+        }
+
+        const { data: branch, error: branchError } = await supabase
+            .from("branches")
+            .select("id")
+            .eq("id", branch_id)
+            .maybeSingle();
+
+        if (branchError) {
+            return res.status(500).json({ error: branchError.message });
+        }
+        if (!branch) {
+            return res.status(404).json({ error: "Branch not found" });
+        }
+
+        const { error: deleteError } = await supabase
+            .from("kiosks")
+            .delete()
+            .eq("branch_id", branch_id);
+
+        if (deleteError) {
+            return res.status(500).json({ error: deleteError.message });
+        }
+
+        const { data: inserted, error: insertError } = await supabase
+            .from("kiosks")
+            .insert({
+                branch_id,
+                device_name,
+            })
+            .select("id, branch_id, device_name")
+            .maybeSingle();
+
+        if (insertError) {
+            return res.status(500).json({ error: insertError.message });
+        }
+
+        return res.status(201).json({ branch_id: inserted.branch_id });
+    }
+
+    async barbers(req, res) {
+        const { branch_id } = req.params || {};
+
+        if (!branch_id) {
+            return res.status(400).json({ error: "branch_id is required" });
+        }
+
+        const { data, error } = await supabase
+            .from("barbers")
+            .select("id, name, branch_id")
+            .eq("branch_id", branch_id);
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        return res.status(200).json({ barbers: data });
+    }
+
+    async services(req, res) {
+        const { data, error } = await supabase
+            .from("services")
+            .select("*");
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        if (!data) {
+            return res.status(404).json({ error: "No service found!" })
+        }
+
+        return res.status(200).json({ services: data });
+    }
+
+    async book(req, res) {
+        const {
+            branch_id,
+            barber_id,
+            service_id,
+            service_ids,
+            customer_name,
+            phone_number,
+            source = 'point',
+            payment_method = null,
+            certificate_code = null,
+        } = req.body || {};
+
+        if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids)) || !customer_name || !phone_number) {
+            return res.status(400).json({ error: "branch_id, barber_id, service_id/service_ids, customer_name, and phone_number are required" });
+        }
+
+        const serviceIds = Array.isArray(service_ids) && service_ids.length
+            ? service_ids
+            : service_id
+                ? [service_id]
+                : [];
+
+        const allowedSources = ['point', 'site', 'admin'];
+        const normalizedSource = allowedSources.includes(source) ? source : 'point';
+
+        const { data: branch, error: branchError } = await supabase
+            .from('branches')
+            .select('id')
+            .eq('id', branch_id)
+            .maybeSingle();
+        if (branchError) return res.status(500).json({ error: branchError.message });
+        if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+        const { data: barber, error: barberError } = await supabase
+            .from('barbers')
+            .select('id, branch_id, is_on_shift, is_authorized')
+            .eq('id', barber_id)
+            .maybeSingle();
+        if (barberError) return res.status(500).json({ error: barberError.message });
+        if (!barber) return res.status(404).json({ error: 'Barber not found' });
+        if (barber.branch_id !== branch_id) {
+            return res.status(400).json({ error: 'Barber does not belong to this branch' });
+        }
+
+        const { data: services, error: servicesError } = await supabase
+            .from('services')
+            .select('id, is_active')
+            .in('id', serviceIds);
+        if (servicesError) return res.status(500).json({ error: servicesError.message });
+        if (!services || services.length !== serviceIds.length) {
+            return res.status(400).json({ error: 'One or more service_ids are invalid' });
+        }
+        const inactive = services.find((s) => s.is_active === false);
+        if (inactive) {
+            return res.status(400).json({ error: `Service ${inactive.id} is not active` });
+        }
+
+        let certificate = null;
+        if (payment_method === 'certificate') {
+            if (!certificate_code) {
+                return res.status(400).json({ error: 'certificate_code is required when payment_method is certificate' });
+            }
+            const { data: cert, error: certError } = await supabase
+                .from('certificates')
+                .select('id, code, expires_at, is_used, metadata, service_ids')
+                .eq('code', certificate_code)
+                .maybeSingle();
+            if (certError) return res.status(500).json({ error: certError.message });
+            if (!cert) return res.status(404).json({ error: 'Certificate not found' });
+            if (cert.is_used) return res.status(400).json({ error: 'Certificate is already used' });
+            if (cert.expires_at && new Date(cert.expires_at) < new Date()) {
+                return res.status(400).json({ error: 'Your certificate is expired' });
+            }
+
+            // If certificate has service limits, keep only allowed services
+            if (Array.isArray(cert.service_ids) && cert.service_ids.length) {
+                const allowedSet = new Set(cert.service_ids);
+                const filtered = serviceIds.filter((id) => allowedSet.has(id));
+                if (!filtered.length) {
+                    return res.status(400).json({ error: 'Selected services are not covered by this certificate' });
+                }
+                serviceIds.splice(0, serviceIds.length, ...filtered);
+            }
+
+            certificate = cert;
+        }
+
+        let clientId;
+        const { data: existingClient, error: clientLookupError } = await supabase
+            .from('clients')
+            .select('id, name')
+            .eq('phone', phone_number)
+            .maybeSingle();
+        if (clientLookupError) return res.status(500).json({ error: clientLookupError.message });
+
+        if (existingClient) {
+            clientId = existingClient.id;
+            if (!existingClient.name) {
+                await supabase.from('clients').update({ name: customer_name }).eq('id', clientId);
+            }
+        } else {
+            const { data: newClient, error: clientCreateError } = await supabase
+                .from('clients')
+                .insert({ name: customer_name, phone: phone_number })
+                .select('id')
+                .maybeSingle();
+            if (clientCreateError) return res.status(500).json({ error: clientCreateError.message });
+            clientId = newClient.id;
+        }
+
+        const insertPayload = {
+            client_id: clientId,
+            branch_id,
+            barber_id,
+            service_id: serviceIds[0],
+            service_ids: serviceIds,
+            source: normalizedSource,
+            status: 'waiting',
+            payment_method,
+            certificate_id: certificate ? certificate.id : null,
+        };
+
+        const { data: entry, error: insertError } = await supabase
+            .from('queue_entries')
+            .insert(insertPayload)
+            .select('id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, certificate_id')
+            .maybeSingle();
+
+        if (insertError) {
+            return res.status(500).json({ error: insertError.message });
+        }
+
+        if (certificate) {
+            const { data: usedCert, error: useError } = await supabase
+                .from('certificates')
+                .update({ is_used: true })
+                .eq('id', certificate.id)
+                .eq('is_used', false)
+                .select('id')
+                .maybeSingle();
+
+            if (useError) {
+                return res.status(500).json({ error: useError.message });
+            }
+            if (!usedCert) {
+                await supabase.from('queue_entries').delete().eq('id', entry.id);
+                return res.status(400).json({ error: 'Certificate already used' });
+            }
+        }
+
+        return res.status(201).json({ entry, certificate });
+    }
+
+    async certificate(req, res) {
+        const { id } = req.params || {};
+        if (!id) {
+            return res.status(400).json({ error: 'certificate id is required' });
+        }
+
+        const { data: cert, error } = await supabase
+            .from('certificates')
+            .select('id, code, expires_at, is_used, metadata')
+            .eq('code', id)
+            .maybeSingle();
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+        if (!cert) {
+            return res.status(404).json({ error: 'Certificate not found' });
+        }
+
+        const expired = cert.expires_at && new Date(cert.expires_at) < new Date();
+
+        return res.json({ certificate: { ...cert, expired } });
+    }
+}
+
+module.exports = new Kiosk();
