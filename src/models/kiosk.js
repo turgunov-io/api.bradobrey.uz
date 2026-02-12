@@ -69,16 +69,71 @@ class Kiosk {
             return res.status(400).json({ error: "branch_id is required" });
         }
 
-        const { data, error } = await supabase
+        // Fetch barbers with photo in a single query
+        const { data: barbers, error: barbersError } = await supabase
             .from("barbers")
-            .select("id, name, branch_id")
+            .select("id, name, branch_id, photo_url")
             .eq("branch_id", branch_id);
 
-        if (error) {
-            return res.status(500).json({ error: error.message });
+        if (barbersError) {
+            return res.status(500).json({ error: barbersError.message });
         }
 
-        return res.status(200).json({ barbers: data });
+        // Fetch all queue entries for these barbers
+        const { data: queues, error: queuesError } = await supabase
+            .from("queue_entries")
+            .select("id, barber_id, client_id, status, created_at")
+            .eq("branch_id", branch_id);
+
+        if (queuesError) {
+            return res.status(500).json({ error: queuesError.message });
+        }
+
+        // Fetch client names in a single query to avoid per-row lookups
+        const clientIds = Array.from(
+            new Set((queues || []).map((q) => q.client_id).filter(Boolean))
+        );
+
+        let clientsById = {};
+        if (clientIds.length) {
+            const { data: clients, error: clientsError } = await supabase
+                .from("clients")
+                .select("id, name")
+                .in("id", clientIds);
+
+            if (clientsError) {
+                return res.status(500).json({ error: clientsError.message });
+            }
+
+            clientsById = (clients || []).reduce((acc, client) => {
+                acc[client.id] = client.name;
+                return acc;
+            }, {});
+        }
+
+        // Group queues by barber_id for quick lookup
+        const queuesByBarber = (queues || []).reduce((acc, entry) => {
+            const key = entry.barber_id;
+            if (!key) return acc;
+            if (!acc[key]) acc[key] = [];
+            acc[key].push({
+                id: entry.id,
+                name: clientsById[entry.client_id] || null,
+                status: entry.status,
+                created_at: entry.created_at,
+            });
+            return acc;
+        }, {});
+
+        const response = (barbers || []).map((barber) => ({
+            id: barber.id,
+            name: barber.name,
+            photo: barber.photo_url || null,
+            branch_id: barber.branch_id,
+            clients: queuesByBarber[barber.id] || [],
+        }));
+
+        return res.status(200).json({ barbers: response });
     }
 
     async services(req, res) {
