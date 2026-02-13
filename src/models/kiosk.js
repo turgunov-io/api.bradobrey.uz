@@ -72,7 +72,7 @@ class Kiosk {
         // Fetch barbers with photo in a single query
         const { data: barbers, error: barbersError } = await supabase
             .from("barbers")
-            .select("id, name, branch_id, photo_url")
+            .select("id, name, branch_id, photo_url, is_on_shift")
             .eq("branch_id", branch_id);
 
         if (barbersError) {
@@ -130,6 +130,7 @@ class Kiosk {
             name: barber.name,
             photo: barber.photo_url || null,
             branch_id: barber.branch_id,
+            is_active: barber.is_on_shift ?? null,
             clients: queuesByBarber[barber.id] || [],
         }));
 
@@ -314,7 +315,7 @@ class Kiosk {
 
         const { data: cert, error } = await supabase
             .from('certificates')
-            .select('id, code, expires_at, is_used, metadata')
+            .select('id, code, expires_at, is_used, metadata, service_ids')
             .eq('code', id)
             .maybeSingle();
 
