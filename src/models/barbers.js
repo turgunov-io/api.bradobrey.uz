@@ -1,11 +1,174 @@
-const { supabase } = require("../config/supabase");
+﻿const { supabase } = require("../config/supabase");
 const bcrypto = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
 
 const shiftAutoOffTimers = new Map();
+const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
+
+async function endBreak(barberId, branchId, io) {
+    await supabase
+        .from('barbers')
+        .update({ is_on_shift: true })
+        .eq('id', barberId);
+    if (io) {
+        io.to(`branch:${branchId}`).emit('queue:update', {
+            type: 'barber_status',
+            barberId,
+            is_on_shift: true,
+        });
+    }
+}
 
 class Barbers {
+    async takeBreak(req, res) {
+        const authHeader = req.headers.authorization || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+        if (!token) {
+            return res.status(401).json({ error: "Authorization token is required" });
+        }
+
+        let payload;
+        try {
+            payload = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        if (payload.role !== 'barber') {
+            return res.status(403).json({ error: 'Only barbers can take a break' });
+        }
+
+        const minutesRaw = req.body?.minutes ?? 15;
+        const minutes = Number(minutesRaw);
+        if (!Number.isFinite(minutes) || minutes < 1 || minutes > 180) {
+            return res.status(400).json({ error: 'minutes must be between 1 and 180' });
+        }
+
+        const barberId = payload.sub || payload.id;
+
+        const { data: barber, error: barberError } = await supabase
+            .from('barbers')
+            .select('id, branch_id')
+            .eq('id', barberId)
+            .maybeSingle();
+
+        if (barberError) {
+            return res.status(500).json({ error: barberError.message });
+        }
+        if (!barber) {
+            return res.status(404).json({ error: 'Barber not found' });
+        }
+
+        // if already on break and comes repeat request — end early
+        if (breakTimers.has(barberId)) {
+            const existing = breakTimers.get(barberId);
+            clearTimeout(existing.timer);
+            breakTimers.delete(barberId);
+            const io = req.app.get('io');
+            try {
+                await endBreak(barberId, barber.branch_id, io);
+            } catch (e) {
+                return res.status(500).json({ error: e.message });
+            }
+            return res.json({ status: 'ok', ended_early: true });
+        }
+
+        const { error: updateError } = await supabase
+            .from('barbers')
+            .update({ is_on_shift: false })
+            .eq('id', barberId);
+
+        if (updateError) {
+            return res.status(500).json({ error: updateError.message });
+        }
+
+        const ms = minutes * 60 * 1000;
+        const untilTs = new Date(Date.now() + ms);
+        const io = req.app.get('io');
+
+        const timer = setTimeout(async () => {
+            breakTimers.delete(barberId);
+            try {
+                await endBreak(barberId, barber.branch_id, io);
+            } catch (e) {
+                console.error(e.message);
+            }
+        }, ms);
+
+        breakTimers.set(barberId, { timer, startedAt: new Date(), until: untilTs });
+
+        if (io) {
+            io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+                type: 'barber_status',
+                barberId,
+                is_on_shift: false,
+            });
+        }
+
+        return res.json({ status: 'ok', until: untilTs.toISOString() });
+    }
+    async returnFromBreak(req, res) {
+        const authHeader = req.headers.authorization || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+        if (!token) {
+            return res.status(401).json({ error: "Authorization token is required" });
+        }
+
+        let payload;
+        try {
+            payload = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (err) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        if (payload.role !== 'barber') {
+            return res.status(403).json({ error: 'Only barbers can return from break' });
+        }
+
+        const barberId = payload.sub || payload.id;
+
+        const { data: barber, error: barberError } = await supabase
+            .from('barbers')
+            .select('id, branch_id')
+            .eq('id', barberId)
+            .maybeSingle();
+
+        if (barberError) {
+            return res.status(500).json({ error: barberError.message });
+        }
+        if (!barber) {
+            return res.status(404).json({ error: 'Barber not found' });
+        }
+
+        if (breakTimers.has(barberId)) {
+            clearTimeout(breakTimers.get(barberId).timer);
+            breakTimers.delete(barberId);
+        }
+
+        const { error: updateError } = await supabase
+            .from('barbers')
+            .update({ is_on_shift: true })
+            .eq('id', barberId);
+
+        if (updateError) {
+            return res.status(500).json({ error: updateError.message });
+        }
+
+        const io = req.app.get('io');
+        if (io) {
+            io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+                type: 'barber_status',
+                barberId,
+                is_on_shift: true,
+            });
+        }
+
+        return res.json({ status: 'ok' });
+    }
+
     async login(req, res) {
         const {
             login, password, branch_id
@@ -105,7 +268,25 @@ class Barbers {
             if (barberError) {
                 return res.status(500).json({ error: barberError.message });
             }
-            barber = barberData;
+            const io = req.app.get('io');
+            const breakInfo = breakTimers.get(user.id);
+            // auto-finish break if timer elapsed (for safety)
+            if (breakInfo && breakInfo.until <= new Date()) {
+                clearTimeout(breakInfo.timer);
+                breakTimers.delete(user.id);
+                try {
+                    await endBreak(user.id, barberData.branch_id, io);
+                    barberData.is_on_shift = true;
+                } catch (e) {
+                    // ignore, return current state
+                }
+            }
+            const updatedBreak = breakTimers.get(user.id);
+            barber = {
+                ...barberData,
+                break_started_at: updatedBreak?.startedAt ? updatedBreak.startedAt.toISOString() : null,
+                break_until: updatedBreak?.until ? updatedBreak.until.toISOString() : null,
+            };
         }
 
         return res.json({ user, barber });
@@ -761,3 +942,4 @@ class Barbers {
 
 
 module.exports = new Barbers();
+
