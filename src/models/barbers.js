@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
 
 const shiftAutoOffTimers = new Map();
+<<<<<<< Updated upstream
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
 
 async function endBreak(barberId, branchId, io) {
@@ -19,6 +20,60 @@ async function endBreak(barberId, branchId, io) {
         });
     }
 }
+=======
+const MAX_AUTO_OFF_MINUTES = 8 * 60; // hard ceiling to avoid long-lived timers
+
+const clampAutoOffMinutes = (minutes) => {
+    if (!Number.isFinite(minutes) || minutes <= 0) return null;
+    return Math.min(minutes, MAX_AUTO_OFF_MINUTES);
+};
+
+const clearShiftTimer = (barberId) => {
+    const timer = shiftAutoOffTimers.get(barberId);
+    if (timer) {
+        clearTimeout(timer);
+        shiftAutoOffTimers.delete(barberId);
+    }
+};
+
+const scheduleShiftAutoOff = (barberId, minutes) => {
+    const clamped = clampAutoOffMinutes(minutes);
+    if (!clamped) return null;
+
+    clearShiftTimer(barberId);
+
+    const ms = clamped * 60 * 1000;
+    const timer = setTimeout(async () => {
+        shiftAutoOffTimers.delete(barberId);
+        try {
+            await supabase
+                .from('barbers')
+                .update({ is_on_shift: false })
+                .eq('id', barberId);
+        } catch (e) {
+            console.log(e.message);
+        }
+    }, ms);
+
+    // Do not keep the event loop open for long timers
+    if (typeof timer.unref === 'function') {
+        timer.unref();
+    }
+
+    shiftAutoOffTimers.set(barberId, timer);
+    return clamped;
+};
+
+const cleanupShiftTimers = () => {
+    for (const timer of shiftAutoOffTimers.values()) {
+        clearTimeout(timer);
+    }
+    shiftAutoOffTimers.clear();
+};
+
+process.on('SIGTERM', cleanupShiftTimers);
+process.on('SIGINT', cleanupShiftTimers);
+>>>>>>> Stashed changes
 
 class Barbers {
     async takeBreak(req, res) {
@@ -885,7 +940,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
         const autoOffMinutesRaw = req.body?.auto_off_minutes;
-        const autoOffMinutes = Number.isFinite(Number(autoOffMinutesRaw)) ? Number(autoOffMinutesRaw) : null;
+        const autoOffMinutes = clampAutoOffMinutes(Number(autoOffMinutesRaw));
 
         const { data: barber, error: barberError } = await supabase
             .from('barbers')
@@ -913,29 +968,13 @@ class Barbers {
             return res.status(500).json({ error: updateError.message });
         }
 
-        if (newShiftStatus === true && autoOffMinutes && autoOffMinutes > 0) {
-            if (shiftAutoOffTimers.has(barberId)) {
-                clearTimeout(shiftAutoOffTimers.get(barberId));
-            }
-            const ms = autoOffMinutes * 60 * 1000;
-            const timer = setTimeout(async () => {
-                shiftAutoOffTimers.delete(barberId);
-                try {
-                    await supabase
-                        .from('barbers')
-                        .update({ is_on_shift: false })
-                        .eq('id', barberId);
-                } catch (e) {
-                    console.log(e.message)
-                }
-            }, ms);
-            shiftAutoOffTimers.set(barberId, timer);
-        } else if (newShiftStatus === false && shiftAutoOffTimers.has(barberId)) {
-            clearTimeout(shiftAutoOffTimers.get(barberId));
-            shiftAutoOffTimers.delete(barberId);
+        if (newShiftStatus === true && autoOffMinutes) {
+            scheduleShiftAutoOff(barberId, autoOffMinutes);
+        } else if (newShiftStatus === false) {
+            clearShiftTimer(barberId);
         }
 
-        return res.json({ barber: updated, auto_off_minutes: newShiftStatus ? autoOffMinutes || null : null });
+        return res.json({ barber: updated, auto_off_minutes: newShiftStatus ? autoOffMinutes : null });
     }
 }
 
