@@ -140,17 +140,19 @@ class Kiosk {
             }, {});
         }
 
-        // Group queues by barber_id for quick lookup
         const queuesByBarber = (queues || []).reduce((acc, entry) => {
             const key = entry.barber_id;
             if (!key) return acc;
             if (!acc[key]) acc[key] = [];
-            acc[key].push({
-                id: entry.id,
-                name: clientsById[entry.client_id] || null,
-                status: entry.status,
-                created_at: entry.created_at,
-            });
+            if (entry.status !== 'completed') {
+                acc[key].push({
+                    id: entry.id,
+                    name: clientsById[entry.client_id] || null,
+                    status: entry.status,
+                    created_at: entry.created_at,
+                });
+            }
+
             return acc;
         }, {});
 
