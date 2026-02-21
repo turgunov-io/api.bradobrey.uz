@@ -188,6 +188,18 @@ const scheduleCallFollowUp = (entry, io) => {
     callTimers.set(entry.id, timer);
 };
 
+const emitCallEvent = (io, entry) => {
+    if (!io || !entry?.branch_id) return;
+    io.to(`branch:${entry.branch_id}`).emit('queue:update', {
+        type: 'call',
+        entryId: entry.id,
+        barberId: entry.barber_id,
+        branchId: entry.branch_id,
+        clientId: entry.client?.id || entry.client_id || null,
+        clientName: entry.client?.name || entry.client_name || null,
+    });
+};
+
 process.on('SIGTERM', cleanupShiftTimers);
 process.on('SIGINT', cleanupShiftTimers);
 
@@ -735,7 +747,7 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id')
+            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {
@@ -746,6 +758,7 @@ class Barbers {
         if (status !== undefined) {
             if (status === 'called') {
                 scheduleCallFollowUp(updated, io);
+                emitCallEvent(io, updated);
             } else {
                 clearCallTimer(id);
             }
@@ -808,7 +821,7 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, swapped_flag, created_at, service_id, service_ids, payment_method, branch_id, barber_id')
+            .select('id, status, swapped_flag, created_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {
@@ -816,6 +829,7 @@ class Barbers {
         }
 
         scheduleCallFollowUp(updated, io);
+        emitCallEvent(io, updated);
 
         return res.json({ entry: updated });
     }
