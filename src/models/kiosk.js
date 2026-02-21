@@ -161,7 +161,7 @@ class Kiosk {
             name: barber.name,
             photo: barber.photo_url || null,
             branch_id: barber.branch_id,
-            is_active: barber.is_on_shift ?? null,
+            is_active: barber.is_active ?? null,
             clients: queuesByBarber[barber.id] || [],
         }));
 
