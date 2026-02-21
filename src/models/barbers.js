@@ -4,8 +4,11 @@ const jwt = require("jsonwebtoken");
 const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
 
 const shiftAutoOffTimers = new Map();
-<<<<<<< Updated upstream
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
+const callTimers = new Map(); // queueEntryId -> timer
+
+const CALL_LATE_MINUTES = 10;
+const STALE_QUEUE_HOURS = 9;
 
 async function endBreak(barberId, branchId, io) {
     await supabase
@@ -20,7 +23,6 @@ async function endBreak(barberId, branchId, io) {
         });
     }
 }
-=======
 const MAX_AUTO_OFF_MINUTES = 8 * 60; // hard ceiling to avoid long-lived timers
 
 const clampAutoOffMinutes = (minutes) => {
@@ -71,9 +73,123 @@ const cleanupShiftTimers = () => {
     shiftAutoOffTimers.clear();
 };
 
+const clearCallTimer = (entryId) => {
+    const timer = callTimers.get(entryId);
+    if (timer) {
+        clearTimeout(timer);
+        callTimers.delete(entryId);
+    }
+};
+
+const markEntriesNoShow = async ({ barberId, branchId, cutoffIso }) => {
+    const query = supabase
+        .from('queue_entries')
+        .update({ status: 'no_show', finished_at: new Date().toISOString() })
+        .lte('created_at', cutoffIso)
+        .in('status', ['waiting', 'called', 'swapped']);
+
+    if (barberId) query.eq('barber_id', barberId);
+    if (branchId) query.eq('branch_id', branchId);
+
+    const { data, error } = await query.select('id');
+    if (!error && Array.isArray(data)) {
+        data.forEach((row) => clearCallTimer(row.id));
+    }
+    return { data, error };
+};
+
+const swapCalledEntry = async (entry) => {
+    const { id, barber_id, branch_id, created_at } = entry || {};
+    if (!id || !barber_id || !created_at) return null;
+
+    const { data: nextEntry, error: nextError } = await supabase
+        .from('queue_entries')
+        .select('id, created_at')
+        .eq('barber_id', barber_id)
+        .eq('branch_id', branch_id)
+        .in('status', ['waiting', 'swapped'])
+        .gt('created_at', created_at)
+        .neq('id', id)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+    if (nextError) throw new Error(nextError.message);
+
+    const updatePayload = {
+        status: 'waiting',
+        swapped_flag: true,
+        started_at: null,
+    };
+
+    if (nextEntry) {
+        const nextTs = new Date(nextEntry.created_at).getTime();
+        updatePayload.created_at = new Date(nextTs + 1).toISOString();
+    } else {
+        updatePayload.created_at = new Date().toISOString();
+    }
+
+    const { data: updated, error: updateError } = await supabase
+        .from('queue_entries')
+        .update(updatePayload)
+        .eq('id', id)
+        .select('id, status, swapped_flag, created_at, branch_id, barber_id')
+        .maybeSingle();
+
+    if (updateError) throw new Error(updateError.message);
+    return updated;
+};
+
+const markNoShow = async (entryId) => {
+    const { data, error } = await supabase
+        .from('queue_entries')
+        .update({ status: 'no_show', finished_at: new Date().toISOString() })
+        .eq('id', entryId)
+        .select('id, branch_id, barber_id, status')
+        .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data;
+};
+
+const scheduleCallFollowUp = (entry, io) => {
+    if (!entry?.id) return;
+    clearCallTimer(entry.id);
+
+    const timer = setTimeout(async () => {
+        callTimers.delete(entry.id);
+        try {
+            const { data: fresh, error } = await supabase
+                .from('queue_entries')
+                .select('id, status, swapped_flag, created_at, branch_id, barber_id')
+                .eq('id', entry.id)
+                .maybeSingle();
+
+            if (error || !fresh || fresh.status !== 'called') return;
+
+            const isSecondCall = fresh.swapped_flag === true;
+            if (isSecondCall) {
+                await markNoShow(fresh.id);
+            } else {
+                await swapCalledEntry(fresh);
+            }
+
+            if (io) {
+                io.to(`branch:${fresh.branch_id}`).emit('queue:update', {
+                    type: 'queue_changed',
+                    barberId: fresh.barber_id,
+                });
+            }
+        } catch (e) {
+            console.error('call follow-up failed:', e.message);
+        }
+    }, CALL_LATE_MINUTES * 60 * 1000);
+
+    if (typeof timer.unref === 'function') timer.unref();
+    callTimers.set(entry.id, timer);
+};
+
 process.on('SIGTERM', cleanupShiftTimers);
 process.on('SIGINT', cleanupShiftTimers);
->>>>>>> Stashed changes
 
 class Barbers {
     async takeBreak(req, res) {
@@ -281,6 +397,68 @@ class Barbers {
         });
     }
 
+    async register(req, res) {
+        const { login, password, name, branch_id = null, phone = null, specialization = null } = req.body || {};
+
+        if (!login || !password || !name || !branch_id) {
+            return res.status(400).json({ error: 'login, password, name, and branch_id are required' });
+        }
+
+        if (String(password).length < 6) {
+            return res.status(400).json({ error: 'password must be at least 6 characters' });
+        }
+
+        const { data: existing, error: existingError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('login', login)
+            .maybeSingle();
+
+        if (existingError) {
+            return res.status(500).json({ error: existingError.message });
+        }
+        if (existing) {
+            return res.status(409).json({ error: 'login already taken' });
+        }
+
+        const password_hash = bcrypto.hashSync(password, 10);
+
+        const { data: userRow, error: userError } = await supabase
+            .from('users')
+            .insert({ login, password_hash, role: 'barber', branch_id })
+            .select('id, login, role, branch_id')
+            .maybeSingle();
+
+        if (userError || !userRow) {
+            return res.status(500).json({ error: userError?.message || 'failed to create user' });
+        }
+
+        const barberPayload = {
+            id: userRow.id,
+            name,
+            branch_id,
+            phone: phone || null,
+            specialization: specialization || null,
+            is_on_shift: false,
+        };
+
+        const { data: barberRow, error: barberError } = await supabase
+            .from('barbers')
+            .insert(barberPayload)
+            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, photo_url')
+            .maybeSingle();
+
+        if (barberError || !barberRow) {
+            await supabase.from('users').delete().eq('id', userRow.id);
+            return res.status(500).json({ error: barberError?.message || 'failed to create barber' });
+        }
+
+        return res.status(201).json({
+            user: userRow,
+            barber: barberRow,
+        });
+    }
+
     async me(req, res) {
         const authHeader = req.headers.authorization || "";
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -368,12 +546,21 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
+        const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
+        try {
+            await markEntriesNoShow({ barberId, cutoffIso });
+        } catch (e) {
+            console.error('stale queue cleanup failed:', e.message);
+        }
+
         const { data, error } = await supabase
             .from('queue_entries')
             .select(`
                 id,
                 status,
+                swapped_flag,
                 created_at,
+                started_at,
                 finished_at,
                 service_id,
                 service_ids,
@@ -389,9 +576,17 @@ class Barbers {
             return res.status(500).json({ error: error.message });
         }
 
+        const filtered = (data || []).filter((entry) => {
+            if (!entry?.created_at) return true;
+            if (['waiting', 'called', 'swapped'].includes(entry.status)) {
+                return new Date(entry.created_at) >= new Date(cutoffIso);
+            }
+            return true;
+        });
+
         return res.json({
-            items: data || [],
-            count: Array.isArray(data) ? data.length : 0,
+            items: filtered,
+            count: Array.isArray(filtered) ? filtered.length : 0,
         });
     }
 
@@ -480,7 +675,7 @@ class Barbers {
 
         const { data: entry, error: entryError } = await supabase
             .from('queue_entries')
-            .select('id, barber_id, status')
+            .select('id, barber_id, status, swapped_flag, branch_id, created_at')
             .eq('id', id)
             .eq('barber_id', barberId)
             .maybeSingle();
@@ -539,11 +734,20 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id')
+            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id')
             .maybeSingle();
 
         if (updateError) {
             return res.status(500).json({ error: updateError.message });
+        }
+
+        const io = req.app.get('io');
+        if (status !== undefined) {
+            if (status === 'called') {
+                scheduleCallFollowUp(updated, io);
+            } else {
+                clearCallTimer(id);
+            }
         }
 
         return res.json({ entry: updated });
@@ -590,9 +794,11 @@ class Barbers {
             return res.status(404).json({ error: 'Queue entry not found' });
         }
 
-        if (entry.status !== 'waiting') {
+        if (!['waiting', 'swapped'].includes(entry.status)) {
             return res.status(400).json({ error: 'Only waiting entries can be called' });
         }
+
+        const io = req.app.get('io');
 
         const { data: updated, error: updateError } = await supabase
             .from('queue_entries')
@@ -601,12 +807,14 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, created_at, service_id, service_ids, payment_method, branch_id')
+            .select('id, status, swapped_flag, created_at, service_id, service_ids, payment_method, branch_id, barber_id')
             .maybeSingle();
 
         if (updateError) {
             return res.status(500).json({ error: updateError.message });
         }
+
+        scheduleCallFollowUp(updated, io);
 
         return res.json({ entry: updated });
     }
@@ -655,6 +863,8 @@ class Barbers {
         if (entry.status !== 'called') {
             return res.status(400).json({ error: 'Only called entries can be started' });
         }
+
+        clearCallTimer(id);
 
         const { data: updated, error: updateError } = await supabase
             .from('queue_entries')
@@ -818,6 +1028,8 @@ class Barbers {
         if (entry.status === 'completed') {
             return res.status(400).json({ error: 'Queue entry is already completed' });
         }
+
+        clearCallTimer(id);
 
         const { data: updated, error: updateError } = await supabase
             .from('queue_entries')

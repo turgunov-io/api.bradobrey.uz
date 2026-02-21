@@ -1,5 +1,19 @@
 const { supabase } = require("../config/supabase");
 
+const STALE_QUEUE_HOURS = 9;
+
+const cleanupStaleQueuesForBranch = async (branchId) => {
+    if (!branchId) return null;
+    const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
+    return supabase
+        .from('queue_entries')
+        .update({ status: 'no_show', finished_at: new Date().toISOString() })
+        .eq('branch_id', branchId)
+        .lte('created_at', cutoffIso)
+        .in('status', ['waiting', 'called', 'swapped'])
+        .select('id');
+};
+
 class Kiosk {
     health(_req, res) {
         return res.json({ status: "ok" });
@@ -69,6 +83,13 @@ class Kiosk {
             return res.status(400).json({ error: "branch_id is required" });
         }
 
+        const cutoffDate = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000);
+        try {
+            await cleanupStaleQueuesForBranch(branch_id);
+        } catch (e) {
+            console.error('stale queue cleanup failed:', e.message);
+        }
+
         // Fetch barbers with photo in a single query
         const { data: barbers, error: barbersError } = await supabase
             .from("barbers")
@@ -80,7 +101,7 @@ class Kiosk {
         }
 
         // Fetch all queue entries for these barbers
-        const { data: queues, error: queuesError } = await supabase
+        const { data: rawQueues, error: queuesError } = await supabase
             .from("queue_entries")
             .select("id, barber_id, client_id, status, created_at")
             .eq("branch_id", branch_id);
@@ -88,6 +109,14 @@ class Kiosk {
         if (queuesError) {
             return res.status(500).json({ error: queuesError.message });
         }
+
+        const queues = (rawQueues || []).filter((entry) => {
+            if (!entry?.created_at) return true;
+            if (['waiting', 'called', 'swapped'].includes(entry.status)) {
+                return new Date(entry.created_at) >= cutoffDate;
+            }
+            return true;
+        });
 
         // Fetch client names in a single query to avoid per-row lookups
         const clientIds = Array.from(

@@ -9,6 +9,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
+router.post('/register', (req, res) => barbers.register(req, res));
 router.post('/login', (req, res) => barbers.login(req, res));
 router.get("/me", (req, res) => barbers.me(req, res));
 router.patch("/me", upload.single('file'), (req, res) => barbers.updateProfile(req, res));
