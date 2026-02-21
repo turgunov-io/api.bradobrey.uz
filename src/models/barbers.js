@@ -260,7 +260,7 @@ class Barbers {
 
         const { error: updateError } = await supabase
             .from('barbers')
-            .update({ is_on_shift: false })
+            .update({ is_active: false })
             .eq('id', barberId);
 
         if (updateError) {
@@ -286,7 +286,7 @@ class Barbers {
             io.to(`branch:${barber.branch_id}`).emit('queue:update', {
                 type: 'barber_status',
                 barberId,
-                is_on_shift: false,
+                is_active: false,
             });
         }
 
@@ -334,7 +334,7 @@ class Barbers {
 
         const { error: updateError } = await supabase
             .from('barbers')
-            .update({ is_on_shift: true })
+            .update({ is_active: true })
             .eq('id', barberId);
 
         if (updateError) {
@@ -346,7 +346,7 @@ class Barbers {
             io.to(`branch:${barber.branch_id}`).emit('queue:update', {
                 type: 'barber_status',
                 barberId,
-                is_on_shift: true,
+                is_active: true,
             });
         }
 
