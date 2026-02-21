@@ -280,6 +280,7 @@ class Barbers {
 
         return res.json({ status: 'ok', until: untilTs.toISOString() });
     }
+
     async returnFromBreak(req, res) {
         const authHeader = req.headers.authorization || "";
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -1131,62 +1132,25 @@ class Barbers {
         return res.json({ barber: updated });
     }
 
-    async toggleShiftStatus(req, res) {
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
+    async logout(req, res) {
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
+            const { barber_id, is_on_shift = false } = req.body;
+
+            const { data: updated, error: updateError } = await supabase
+                .from('barbers')
+                .update({ is_on_shift })
+                .eq('id', barber_id)
+                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
+                .maybeSingle();
+
+            if (updateError) {
+                return res.status(500).json({ error: updateError.message });
+            }
+
+            return res.json({ barber: updated });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
         }
-
-        if (payload.role !== 'barber') {
-            return res.status(403).json({ error: 'Only barbers can toggle their shift status' });
-        }
-
-        const barberId = payload.sub || payload.id;
-        const autoOffMinutesRaw = req.body?.auto_off_minutes;
-        const autoOffMinutes = clampAutoOffMinutes(Number(autoOffMinutesRaw));
-
-        const { data: barber, error: barberError } = await supabase
-            .from('barbers')
-            .select('id, is_on_shift')
-            .eq('id', barberId)
-            .maybeSingle();
-
-        if (barberError) {
-            return res.status(500).json({ error: barberError.message });
-        }
-        if (!barber) {
-            return res.status(404).json({ error: 'Barber not found' });
-        }
-
-        const newShiftStatus = !barber.is_on_shift;
-
-        const { data: updated, error: updateError } = await supabase
-            .from('barbers')
-            .update({ is_on_shift: newShiftStatus })
-            .eq('id', barberId)
-            .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
-            .maybeSingle();
-
-        if (updateError) {
-            return res.status(500).json({ error: updateError.message });
-        }
-
-        if (newShiftStatus === true && autoOffMinutes) {
-            scheduleShiftAutoOff(barberId, autoOffMinutes);
-        } else if (newShiftStatus === false) {
-            clearShiftTimer(barberId);
-        }
-
-        return res.json({ barber: updated, auto_off_minutes: newShiftStatus ? autoOffMinutes : null });
     }
 }
 
