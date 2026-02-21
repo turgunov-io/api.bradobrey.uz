@@ -93,14 +93,13 @@ class Kiosk {
         // Fetch barbers with photo in a single query
         const { data: barbers, error: barbersError } = await supabase
             .from("barbers")
-            .select("id, name, branch_id, photo_url, is_on_shift")
+            .select("id, name, branch_id, photo_url, is_on_shift, is_active")
             .eq("branch_id", branch_id);
 
         if (barbersError) {
             return res.status(500).json({ error: barbersError.message });
         }
 
-        // Fetch all queue entries for these barbers
         const { data: rawQueues, error: queuesError } = await supabase
             .from("queue_entries")
             .select("id, barber_id, client_id, status, created_at")
@@ -118,7 +117,6 @@ class Kiosk {
             return true;
         });
 
-        // Fetch client names in a single query to avoid per-row lookups
         const clientIds = Array.from(
             new Set((queues || []).map((q) => q.client_id).filter(Boolean))
         );
