@@ -22,6 +22,7 @@ router.patch('/queue/:id/call', (req, res) => barbers.callNext(req, res));
 router.patch("/queue/:id/start", (req, res) => barbers.startQueue(req, res));
 router.patch("/queue/:id/complete", (req, res) => barbers.completeQueueEntry(req, res));
 router.patch("/queue/:id/edit-before-complete", (req, res) => barbers.editBeforeComplete(req, res));
+router.patch("/queue/:id/no-show", (req, res) => barbers.markNoShow(req, res));
 
 router.post("/break", (req, res) => barbers.takeBreak(req, res));
 router.post("/return", (req, res) => barbers.returnFromBreak(req, res));

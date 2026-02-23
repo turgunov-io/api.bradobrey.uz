@@ -1166,6 +1166,24 @@ class Barbers {
             return res.status(500).json({ error: error.message });
         }
     }
+
+    async markNoShow(req, res) {
+        const { id } = req.params || {};
+        const { no_show = true } = req.body || {};
+        
+        const { data: updated, error: updateError } = await supabase
+            .from('queue_entries')
+            .update({ status: no_show ? 'no_show' : 'waiting' })
+            .eq('id', id)
+            .select('id, customer_name, barber_id, status, no_show')
+            .maybeSingle();
+
+        if (updateError) {
+            return res.status(500).json({ error: updateError.message });
+        }
+
+        return res.json({ queue_entry: updated });
+    }
 }
 
 

@@ -142,7 +142,7 @@ class Kiosk {
             const key = entry.barber_id;
             if (!key) return acc;
             if (!acc[key]) acc[key] = [];
-            if (entry.status !== 'completed') {
+            if (entry.status !== 'completed' && entry.status !== 'no-show') {
                 acc[key].push({
                     id: entry.id,
                     name: clientsById[entry.client_id] || null,
