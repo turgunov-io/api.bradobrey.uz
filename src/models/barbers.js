@@ -1175,7 +1175,7 @@ class Barbers {
             .from('queue_entries')
             .update({ status: no_show ? 'no_show' : 'waiting' })
             .eq('id', id)
-            .select('id, client_id, barber_id, status, no_show')
+            .select('id, client_id, barber_id, status')
             .maybeSingle();
 
         if (updateError) {
