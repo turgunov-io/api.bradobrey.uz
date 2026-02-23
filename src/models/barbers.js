@@ -1170,7 +1170,7 @@ class Barbers {
     async markNoShow(req, res) {
         const { id } = req.params || {};
         const { no_show = true } = req.body || {};
-        
+
         const { data: updated, error: updateError } = await supabase
             .from('queue_entries')
             .update({ status: no_show ? 'no_show' : 'waiting' })

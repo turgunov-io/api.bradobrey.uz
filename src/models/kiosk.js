@@ -84,13 +84,13 @@ class Kiosk {
         }
 
         const cutoffDate = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000);
+
         try {
             await cleanupStaleQueuesForBranch(branch_id);
         } catch (e) {
             console.error('stale queue cleanup failed:', e.message);
         }
 
-        // Fetch barbers with photo in a single query
         const { data: barbers, error: barbersError } = await supabase
             .from("barbers")
             .select("id, name, branch_id, photo_url, is_on_shift, is_active")
@@ -102,7 +102,7 @@ class Kiosk {
 
         const { data: rawQueues, error: queuesError } = await supabase
             .from("queue_entries")
-            .select("id, barber_id, client_id, status, created_at")
+            .select("id, barber_id, client_id, status, created_at, service_ids") // 🔥 ADDED service_ids
             .eq("branch_id", branch_id);
 
         if (queuesError) {
@@ -116,6 +116,31 @@ class Kiosk {
             }
             return true;
         });
+
+        const allServiceIds = Array.from(
+            new Set(
+                (queues || [])
+                    .flatMap(q => q.service_ids || [])
+                    .filter(Boolean)
+            )
+        );
+
+        let servicesById = {};
+        if (allServiceIds.length) {
+            const { data: services, error: servicesError } = await supabase
+                .from("services")
+                .select("id, duration_minutes, name")
+                .in("id", allServiceIds);
+
+            if (servicesError) {
+                return res.status(500).json({ error: servicesError.message });
+            }
+
+            servicesById = (services || []).reduce((acc, service) => {
+                acc[service.id] = service.duration_minutes || 0;
+                return acc;
+            }, {});
+        }
 
         const clientIds = Array.from(
             new Set((queues || []).map((q) => q.client_id).filter(Boolean))
@@ -138,21 +163,37 @@ class Kiosk {
             }, {});
         }
 
-        const queuesByBarber = (queues || []).reduce((acc, entry) => {
+        const queuesByBarber = {};
+        const waitingTimeByBarber = {};
+
+        for (const entry of queues || []) {
             const key = entry.barber_id;
-            if (!key) return acc;
-            if (!acc[key]) acc[key] = [];
-            if (entry.status !== 'completed' && entry.status !== 'no-show') {
-                acc[key].push({
-                    id: entry.id,
-                    name: clientsById[entry.client_id] || null,
-                    status: entry.status,
-                    created_at: entry.created_at,
-                });
+            if (!key) continue;
+
+            if (entry.status === 'completed' || entry.status === 'no_show') {
+                continue;
             }
 
-            return acc;
-        }, {});
+            if (!queuesByBarber[key]) queuesByBarber[key] = [];
+            if (!waitingTimeByBarber[key]) waitingTimeByBarber[key] = 0;
+
+            const serviceDuration = (entry.service_ids || []).reduce((sum, serviceId) => {
+                return sum + (servicesById[serviceId] || 0);
+            }, 0);
+
+            waitingTimeByBarber[key] += serviceDuration;
+
+            queuesByBarber[key].push({
+                id: entry.id,
+                name: clientsById[entry.client_id] || null,
+                status: entry.status,
+                created_at: entry.created_at,
+                estimated_time: serviceDuration
+            });
+        }
+
+        const overallEstimatedWaitingTime = Object.values(waitingTimeByBarber)
+            .reduce((sum, val) => sum + val, 0);
 
         const response = (barbers || []).map((barber) => ({
             id: barber.id,
@@ -162,9 +203,13 @@ class Kiosk {
             is_active: barber.is_active ?? null,
             is_on_shift: barber.is_on_shift ?? null,
             clients: queuesByBarber[barber.id] || [],
+            estimated_waiting_time: waitingTimeByBarber[barber.id] || 0
         }));
 
-        return res.status(200).json({ barbers: response });
+        return res.status(200).json({
+            barbers: response,
+            overall_estimated_waiting_time: overallEstimatedWaitingTime
+        });
     }
 
     async services(req, res) {
