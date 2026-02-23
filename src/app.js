@@ -7,6 +7,7 @@ const morgan = require('morgan');
 const barbers = require('./routers/barbers');
 const kiosk = require('./routers/kiosk');
 const certificate = require('./routers/certificate');
+const services = require('./routers/services');
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/barbers', barbers);
 app.use('/api/kiosk', kiosk);
 app.use('/api/certificate', certificate);
+app.use('/api/services', services);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

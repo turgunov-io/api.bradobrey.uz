@@ -411,7 +411,7 @@ class Barbers {
     }
 
     async register(req, res) {
-        const { login, password, name, branch_id = null, phone = null, specialization = null } = req.body || {};
+        const { login, password, name, branch_id = null, phone, specialization = null } = req.body || {};
 
         if (!login || !password || !name || !branch_id) {
             return res.status(400).json({ error: 'login, password, name, and branch_id are required' });
@@ -1175,7 +1175,7 @@ class Barbers {
             .from('queue_entries')
             .update({ status: no_show ? 'no_show' : 'waiting' })
             .eq('id', id)
-            .select('id, customer_name, barber_id, status, no_show')
+            .select('id, client_id, barber_id, status, no_show')
             .maybeSingle();
 
         if (updateError) {
