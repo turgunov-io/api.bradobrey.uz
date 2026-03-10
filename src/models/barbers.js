@@ -364,14 +364,20 @@ class Barbers {
 
         if (!branch_id) return res.status(400).json({ error: 'Branch ID is required' });
 
-        const { data: barberData, error: barberError } = await supabase
+        const { data: users, error: barberError } = await supabase
             .from('users')
             .select('*')
             .eq('login', login)
-            .single();
+            .eq('role', 'barber')
+            .limit(1);
 
         if (barberError) {
-            return res.status(400).json({ error: barberError.message });
+            return res.status(500).json({ error: 'Failed to verify credentials' });
+        }
+
+        const barberData = Array.isArray(users) ? users[0] : null;
+        if (!barberData) {
+            return res.status(400).json({ error: 'Invalid credentials' });
         }
 
         const passwordCheck = bcrypto.compareSync(password, barberData.password_hash);
