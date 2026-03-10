@@ -715,6 +715,7 @@ class Barbers {
             'rejected',
             'swapped',
             'no_show',
+            'not_in_time',
         ];
 
         const updatePayload = {};
@@ -724,7 +725,7 @@ class Barbers {
                 return res.status(400).json({ error: 'Invalid status value' });
             }
             updatePayload.status = status;
-            if (['completed', 'cancelled', 'rejected', 'no_show'].includes(status)) {
+            if (['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'].includes(status)) {
                 updatePayload.finished_at = new Date().toISOString();
             }
         }
@@ -973,7 +974,7 @@ class Barbers {
             return res.status(404).json({ error: 'Queue entry not found' });
         }
 
-        const terminal = ['completed', 'cancelled', 'rejected', 'no_show'];
+        const terminal = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
         if (terminal.includes(entry.status)) {
             return res.status(409).json({ error: `Cannot edit price in status ${entry.status}` });
         }
@@ -1179,13 +1180,42 @@ class Barbers {
 
         const { data: updated, error: updateError } = await supabase
             .from('queue_entries')
-            .update({ status: no_show ? 'no_show' : 'waiting' })
+            .update({ status: no_show ? 'no_show' : 'waiting', finished_at: no_show ? new Date().toISOString() : null })
             .eq('id', id)
-            .select('id, client_id, barber_id, status')
+            .select('id, client_id, barber_id, status, finished_at')
             .maybeSingle();
 
         if (updateError) {
             return res.status(500).json({ error: updateError.message });
+        }
+
+        if (!updated) {
+            return res.status(404).json({ error: 'Queue entry not found' });
+        }
+
+        return res.json({ queue_entry: updated });
+    }
+
+    async markNotInTime(req, res) {
+        const { id } = req.params || {};
+
+        if (!id) return res.status(400).json({ error: 'Queue entry id is required' });
+
+        clearCallTimer(id);
+
+        const { data: updated, error: updateError } = await supabase
+            .from('queue_entries')
+            .update({ status: 'not_in_time', finished_at: new Date().toISOString() })
+            .eq('id', id)
+            .select('id, client_id, barber_id, status, finished_at')
+            .maybeSingle();
+
+        if (updateError) {
+            return res.status(500).json({ error: updateError.message });
+        }
+
+        if (!updated) {
+            return res.status(404).json({ error: 'Queue entry not found' });
         }
 
         return res.json({ queue_entry: updated });

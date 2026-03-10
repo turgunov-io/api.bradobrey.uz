@@ -46,7 +46,7 @@ create table if not exists queue_entries (
   service_id uuid references services(id),
   service_ids uuid[],
   source text check (source in ('point', 'site', 'admin')),
-  status text check (status in ('waiting', 'called', 'swapped', 'rejected', 'in_progress', 'completed', 'cancelled', 'no_show')) default 'waiting',
+  status text check (status in ('waiting', 'called', 'swapped', 'rejected', 'in_progress', 'completed', 'cancelled', 'no_show', 'not_in_time')) default 'waiting',
   created_at timestamp default now(),
   started_at timestamp,
   finished_at timestamp,
@@ -106,6 +106,15 @@ begin
   ) then
     alter table queue_entries add column payment_method text check (payment_method in ('cash', 'card', 'certificate'));
   end if;
+
+  -- Ensure status enum includes new value 'not_in_time'
+  begin
+    execute 'alter table queue_entries drop constraint if exists queue_entries_status_check';
+  exception when undefined_object then null;
+  end;
+  alter table queue_entries
+    add constraint queue_entries_status_check
+    check (status in ('waiting', 'called', 'swapped', 'rejected', 'in_progress', 'completed', 'cancelled', 'no_show', 'not_in_time'));
 
   if not exists (
     select 1

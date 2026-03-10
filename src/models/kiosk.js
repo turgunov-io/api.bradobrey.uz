@@ -110,6 +110,9 @@ class Kiosk {
         }
 
         const queues = (rawQueues || []).filter((entry) => {
+            if (['completed', 'no_show', 'not_in_time'].includes(entry.status)) {
+                return false;
+            }
             if (!entry?.created_at) return true;
             if (['waiting', 'called', 'swapped'].includes(entry.status)) {
                 return new Date(entry.created_at) >= cutoffDate;
@@ -170,7 +173,7 @@ class Kiosk {
             const key = entry.barber_id;
             if (!key) continue;
 
-            if (entry.status === 'completed' || entry.status === 'no_show') {
+            if (entry.status === 'completed' || entry.status === 'no_show' || entry.status === 'not_in_time') {
                 continue;
             }
 
