@@ -11,8 +11,11 @@ const BannerRouter = express.Router();
 
 BannerRouter.get('/', (req, res) => BannerMarketplace.all(req, res));
 BannerRouter.get('/:id', (req, res) => BannerMarketplace.getById(req, res));
+
 BannerRouter.post('/', upload.single('file'), (req, res) => BannerMarketplace.create(req, res));
-BannerRouter.put('/:id', (_req, res) => res.status(501).json({ error: 'Not implemented' }));
-BannerRouter.delete('/:id', (_req, res) => res.status(501).json({ error: 'Not implemented' }));
+
+BannerRouter.put('/:id', upload.single('file'), (req, res) => BannerMarketplace.update(req, res));
+
+BannerRouter.delete('/:id', (req, res) => BannerMarketplace.deactivate(req, res));
 
 module.exports = BannerRouter;

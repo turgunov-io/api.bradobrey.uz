@@ -3,43 +3,50 @@ const {
     uploadBufferToSupabaseWithFolder,
 } = require("../../composable/uploadImage");
 
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.webm', '.mkv'];
+
+const checkType = (url) => {
+    const normalized = (url || '').toLowerCase();
+    if (!normalized) return null;
+    if (IMAGE_EXTENSIONS.some((ext) => normalized.endsWith(ext))) return 'image';
+    if (VIDEO_EXTENSIONS.some((ext) => normalized.endsWith(ext))) return 'video';
+    return 'unknown';
+};
+
+const formatBanner = (item, index = 0) => ({
+    id: item?.id ? item.id : index,
+    locales: {
+        title: {
+            ...(item?.title_uz != null && { uz: item.title_uz }),
+            ...(item?.title_ru != null && { ru: item.title_ru }),
+            ...(item?.title_en != null && { en: item.title_en }),
+        },
+        description: {
+            ...(item?.description_uz != null && { uz: item.description_uz }),
+            ...(item?.description_ru != null && { ru: item.description_ru }),
+            ...(item?.description_en != null && { en: item.description_en }),
+        },
+    },
+    media: {
+        type: checkType(item?.image_url),
+        url: item?.image_url || null,
+    },
+    is_active: item?.is_active,
+    sort_order: item?.sort_order ? item.sort_order : index,
+});
+
 class BannerMarketplace {
     async all(req, res) {
         const { data, error } = await supabase
             .from('banners')
-            .select('*')
+            .select('*');
 
         if (error) {
             return res.status(500).json({ error: error.message });
         }
 
-        function checkType(url) {
-            return 'image' ? url.includes('.jpg') || url.includes('.jpeg') || url.includes('.png') : null;
-        }
-
-        const entries = data.map((item, index) => {
-            return {
-                id: item.id ? item.id : index,
-                locales: {
-                    title: {
-                        ...(item.title_uz != null && { uz: item.title_uz }),
-                        ...(item.title_ru != null && { ru: item.title_ru }),
-                        ...(item.title_en != null && { en: item.title_en }),
-                    },
-                    description: {
-                        ...(item.description_uz != null && { uz: item.description_uz }),
-                        ...(item.description_ru != null && { ru: item.description_ru }),
-                        ...(item.description_en != null && { en: item.description_en }),
-                    },
-                },
-                media: {
-                    type: checkType(item.image_url),
-                    url: item.image_url,
-                },
-                is_active: item.is_active,
-                sort_order: item.sort_order ? item.sort_order : index,
-            }
-        })
+        const entries = (data || []).map((item, index) => formatBanner(item, index));
 
         return res.status(200).json({ data: entries });
     }
@@ -60,31 +67,7 @@ class BannerMarketplace {
             return res.status(404).json({ error: 'Banner not found' });
         }
 
-        function checkType(url) {
-            return 'image' ? url.includes('.jpg') || url.includes('.jpeg') || url.includes('.png') : null;
-        }
-
-        const entry = {
-            id: data.id,
-            locales: {
-                title: {
-                    ...(data.title_uz != null && { uz: data.title_uz }),
-                    ...(data.title_ru != null && { ru: data.title_ru }),
-                    ...(data.title_en != null && { en: data.title_en }),
-                },
-                description: {
-                    ...(data.description_uz != null && { uz: data.description_uz }),
-                    ...(data.description_ru != null && { ru: data.description_ru }),
-                    ...(data.description_en != null && { en: data.description_en }),
-                },
-            },
-            media: {
-                type: checkType(data.image_url),
-                url: data.image_url,
-            },
-            is_active: data.is_active,
-            sort_order: data.sort_order,
-        };
+        const entry = formatBanner(data, 0);
 
         return res.status(200).json({ entry });
     }
@@ -156,7 +139,154 @@ class BannerMarketplace {
             return res.status(500).json({ error: error.message });
         }
 
-        return res.status(201).json({ entry: data });
+        return res.status(201).json({ entry: formatBanner(data, 0) });
+    }
+
+    async update(req, res) {
+        const { id } = req.params;
+        if (!id) return res.status(400).json({ error: 'Banner id is required' });
+
+        const {
+            title_uz,
+            title_ru,
+            title_en,
+            description_uz,
+            description_ru,
+            description_en,
+            is_active,
+            sort_order,
+        } = req.body || {};
+
+        const file = req.file;
+
+        const { data: current, error: fetchError } = await supabase
+            .from('banners')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle();
+
+        if (fetchError) return res.status(500).json({ error: fetchError.message });
+        if (!current) return res.status(404).json({ error: 'Banner not found' });
+
+        let uploadedImage = null;
+        if (file) {
+            if (!file.buffer) {
+                return res.status(400).json({ error: 'Uploaded file buffer is missing' });
+            }
+
+            const { data: uploadData, error: uploadErr } =
+                await uploadBufferToSupabaseWithFolder(
+                    file.buffer,
+                    file.mimetype,
+                    'banners',
+                    'banner'
+                );
+
+            if (uploadErr || !uploadData?.publicUrl) {
+                return res.status(500).json({ error: uploadErr?.message || 'Image upload failed' });
+            }
+
+            uploadedImage = uploadData;
+        }
+
+        const parseBoolean = (value, fallback) => {
+            if (value === undefined) return fallback;
+            if (typeof value === 'string') {
+                const normalized = value.trim().toLowerCase();
+                if (normalized === 'true') return true;
+                if (normalized === 'false') return false;
+            }
+            return Boolean(value);
+        };
+
+        const parseSortOrder = (value, fallback) => {
+            if (value === undefined || value === null || value === '') {
+                return fallback ?? 0;
+            }
+            const numeric = Number(value);
+            return Number.isFinite(numeric) ? numeric : null;
+        };
+
+        const nextSortOrder = parseSortOrder(sort_order, current.sort_order);
+        if (nextSortOrder === null) {
+            if (uploadedImage?.path) {
+                await supabase.storage.from('images').remove([uploadedImage.path]).catch(() => { });
+            }
+            return res.status(400).json({ error: 'sort_order must be a number' });
+        }
+
+        const nextEntry = {
+            title_uz: title_uz !== undefined ? (title_uz || null) : current.title_uz,
+            title_ru: title_ru !== undefined ? (title_ru || null) : current.title_ru,
+            title_en: title_en !== undefined ? (title_en || null) : current.title_en,
+            description_uz: description_uz !== undefined ? (description_uz || null) : current.description_uz,
+            description_ru: description_ru !== undefined ? (description_ru || null) : current.description_ru,
+            description_en: description_en !== undefined ? (description_en || null) : current.description_en,
+            is_active: parseBoolean(is_active, current.is_active),
+            sort_order: nextSortOrder,
+            image_url: uploadedImage?.publicUrl || current.image_url,
+        };
+
+        const hasTitle = [nextEntry.title_uz, nextEntry.title_ru, nextEntry.title_en]
+            .some((value) => value !== null && value !== undefined && String(value).trim() !== '');
+        const hasDescription = [nextEntry.description_uz, nextEntry.description_ru, nextEntry.description_en]
+            .some((value) => value !== null && value !== undefined && String(value).trim() !== '');
+
+        if (!hasTitle || !hasDescription) {
+            if (uploadedImage?.path) {
+                await supabase.storage.from('images').remove([uploadedImage.path]).catch(() => { });
+            }
+            return res.status(400).json({
+                error: 'At least one title and one description must be provided',
+            });
+        }
+
+        const { data, error } = await supabase
+            .from('banners')
+            .update(nextEntry)
+            .eq('id', id)
+            .select('*')
+            .single();
+
+        if (error) {
+            if (uploadedImage?.path) {
+                await supabase.storage.from('images').remove([uploadedImage.path]).catch(() => { });
+            }
+            return res.status(500).json({ error: error.message });
+        }
+
+        if (uploadedImage?.path) {
+            const oldPath = extractStoragePath(current.image_url);
+            if (oldPath) {
+                await supabase.storage.from('images').remove([oldPath]).catch(() => { });
+            }
+        }
+
+        return res.status(200).json({ entry: formatBanner(data, 0) });
+
+        function extractStoragePath(publicUrl) {
+            if (!publicUrl) return null;
+            const match = publicUrl.match(/\/storage\/v1\/object\/public\/images\/(.+)$/);
+            return match ? match[1] : null;
+        }
+    }
+
+    async deactivate(req, res) {
+        const { id } = req.params;
+        const { is_active } = req.body;
+
+        const { data, error } = await supabase
+            .from('banners')
+            .update({ is_active })
+            .eq('id', id)
+            .select('*')
+            .single();
+
+        if (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
+        return res.status(200).json({ entry: formatBanner(data, 0) });
     }
 }
 
