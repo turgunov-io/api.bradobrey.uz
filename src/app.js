@@ -10,6 +10,8 @@ const services = require('./routers/services');
 const history = require('./routers/history');
 const barbers = require('./routers/barbers');
 const marketplace = require('./routers/marketplace');
+const statistics = require('./routers/statistics');
+const promoCode = require('./routers/promoCode');
 
 const app = express();
 
@@ -41,6 +43,8 @@ app.use('/api/kiosk', kiosk);
 app.use('/api/certificate', certificate);
 app.use('/api/services', services);
 app.use('/api/history', history);
+app.use('/api/statistics', statistics);
+app.use('/api/promo-code', promoCode);
 
 // Marketplace App
 app.use('/api/marketplace', marketplace);
