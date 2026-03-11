@@ -12,7 +12,7 @@ if (!supabaseUrl || !supabaseServiceRoleKey) {
 
 const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
   auth: {
-    autoRefreshToken: false, // we’re using server-side service role, no sessions
+    autoRefreshToken: false, 
     persistSession: false,
     detectSessionInUrl: false,
   },

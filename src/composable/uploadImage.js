@@ -19,9 +19,14 @@ async function uploadBase64ToSupabase(imageBase64, contentTypeInput, barberId) {
 }
 
 async function uploadBufferToSupabase(buffer, contentType, barberId) {
+    return uploadBufferToSupabaseWithFolder(buffer, contentType, 'avatars', barberId);
+}
+
+async function uploadBufferToSupabaseWithFolder(buffer, contentType, folder = 'uploads', namePrefix = '') {
     const ext = (contentType && contentType.split('/')[1]) || 'png';
-    const fileName = `${barberId}-${Date.now()}-${randomUUID()}.${ext}`;
-    const path = `avatars/${fileName}`;
+    const safePrefix = namePrefix ? `${namePrefix}-` : '';
+    const fileName = `${safePrefix}${Date.now()}-${randomUUID()}.${ext}`;
+    const path = `${folder}/${fileName}`;
 
     const { data, error } = await supabase.storage.from('images').upload(path, buffer, {
         contentType: contentType || 'image/png',
@@ -37,4 +42,4 @@ async function uploadBufferToSupabase(buffer, contentType, barberId) {
     return { data: { path, publicUrl: publicUrlData?.publicUrl || null } };
 }
 
-module.exports = { uploadBase64ToSupabase, uploadBufferToSupabase };
+module.exports = { uploadBase64ToSupabase, uploadBufferToSupabase, uploadBufferToSupabaseWithFolder };
