@@ -8,6 +8,7 @@ const barbers = require('./routers/barbers');
 const kiosk = require('./routers/kiosk');
 const certificate = require('./routers/certificate');
 const services = require('./routers/services');
+const history = require('./routers/history');
 
 const app = express();
 
@@ -38,6 +39,7 @@ app.use('/api/barbers', barbers);
 app.use('/api/kiosk', kiosk);
 app.use('/api/certificate', certificate);
 app.use('/api/services', services);
+app.use('/api/history', history);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
