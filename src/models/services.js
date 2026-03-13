@@ -1,14 +1,57 @@
 const { supabase } = require("../config/supabase");
 
+const DEFAULT_CATEGORY_LABEL = "Uncategorized";
+
+const normalizeCategory = (category) => {
+    if (category === undefined || category === null) return null;
+    const trimmed = String(category).trim();
+    return trimmed.length ? trimmed : null;
+};
+
+const groupServicesByCategory = (services = []) => {
+    const groups = new Map();
+
+    for (const service of services) {
+        const key = service && service.category
+            ? String(service.category).trim()
+            : "";
+        const category = key || DEFAULT_CATEGORY_LABEL;
+
+        if (!groups.has(category)) groups.set(category, []);
+        groups.get(category).push(service);
+    }
+
+    return Array.from(groups.entries()).map(([category, services]) => ({
+        category,
+        services,
+    }));
+};
+
 class Services {
-    async list(_req, res) {
-        const { data, error } = await supabase
-            .from("services")
-            .select("*")
-            .order("base_price", { ascending: true });
+    async list(req, res) {
+        const { active, grouped } = req.query || {};
+
+        let query = supabase.from("services").select("*");
+
+        if (active !== undefined) {
+            const activeFlag = String(active).toLowerCase() === "true" || active === "1";
+            query = query.eq("is_active", activeFlag);
+        }
+
+        const { data, error } = await query
+            .order("category", { ascending: true, nullsFirst: false })
+            .order("base_price", { ascending: true })
+            .order("name", { ascending: true });
 
         if (error) return res.status(500).json({ error: error.message });
-        return res.json({ data: data });
+
+        const categories = groupServicesByCategory(data || []);
+
+        if (grouped === "true" || grouped === "1") {
+            return res.json({ categories });
+        }
+
+        return res.json({ categories });
     }
 
     async getById(req, res) {
@@ -28,7 +71,7 @@ class Services {
     }
 
     async create(req, res) {
-        const { name, duration_minutes, base_price = null, is_active = true } = req.body || {};
+        const { name, duration_minutes, base_price = null, is_active = true, category } = req.body || {};
 
         if (!name || !String(name).trim()) {
             return res.status(400).json({ error: "name is required" });
@@ -42,6 +85,8 @@ class Services {
             return res.status(400).json({ error: "base_price must be a non-negative number" });
         }
 
+        const normalizedCategory = normalizeCategory(category);
+
         const { data, error } = await supabase
             .from("services")
             .insert({
@@ -49,6 +94,7 @@ class Services {
                 duration_minutes: duration,
                 base_price: price,
                 is_active: Boolean(is_active),
+                category: normalizedCategory,
             })
             .select("*")
             .maybeSingle();
@@ -61,7 +107,7 @@ class Services {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: "Service id is required" });
 
-        const { name, duration_minutes, base_price, is_active, image } = req.body || {};
+        const { name, duration_minutes, base_price, is_active, image, category } = req.body || {};
         const update = {};
 
         if (name !== undefined) {
@@ -89,6 +135,10 @@ class Services {
 
         if (image !== undefined) {
             update.image = String(image);
+        }
+
+        if (category !== undefined) {
+            update.category = normalizeCategory(category);
         }
 
         if (Object.keys(update).length === 0) {

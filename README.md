@@ -25,7 +25,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `POST /api/monitor/queue` — enqueue client (`barber_id` optional, auto-picks least busy on shift; `service_id` can be an array, first ID stored as primary, full array saved to `service_ids`)
 - `GET /api/monitor/queue/:id/status` — current status + ETA
 - `POST /api/monitor/queue/:id/cancel` — cancel from client side
-- `GET /api/services` — list services (use before enqueue to obtain `service_id`)
+- `GET /api/services` — list services (use before enqueue to obtain `service_id`); response now also includes `categories: [{ category, services: [...] }]`
 - `POST /api/services` — create service (admin roles)
 - Note: if your DB is missing `service_ids` column in `queue_entries`, apply the SQL in `schema.sql` (or run `ALTER TABLE queue_entries ADD COLUMN service_ids uuid[];`). Code will gracefully fall back to single `service_id` but multi-service sums require the column.
 
@@ -60,8 +60,8 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
   - Check status: `GET /api/monitor/queue/:id/status` (status + ETA)
   - Cancel: `POST /api/monitor/queue/:id/cancel`
 - **Services**
-  - List: `GET /api/services` (`?active=true` to filter)
-  - Create: `POST /api/services` (admin_network/admin_branch)
+  - List: `GET /api/services` (`?active=true` to filter, `?grouped=true` to return only grouped output); default response includes both `data` (flat list) and `categories` (array of `{ category, services }`).
+  - Create: `POST /api/services` (admin_network/admin_branch) — accepts optional `category` string.
   - Update: `PATCH /api/services/:id` (admin_network/admin_branch)
   - Activate/deactivate: `POST /api/services/:id/{activate|deactivate}` (admin_network/admin_branch)
 - **Realtime**
@@ -79,7 +79,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 
 ## Service Endpoints
 
-- `GET /api/services` (`?active=true` for active only)
+- `GET /api/services` (`?active=true` for active only, `?grouped=true` to return categories only; default adds `categories` alongside flat list)
 - `GET /api/services/:id`
 - `POST /api/services` (admin_network, admin_branch)
 - `PATCH /api/services/:id` (admin_network, admin_branch)

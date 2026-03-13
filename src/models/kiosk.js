@@ -1,6 +1,26 @@
 const { supabase } = require("../config/supabase");
 
 const STALE_QUEUE_HOURS = 9;
+const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
+
+const groupServicesByCategory = (services = []) => {
+    const categories = new Map();
+
+    for (const service of services) {
+        const category = service && service.category
+            ? String(service.category).trim()
+            : "";
+        const key = category || DEFAULT_SERVICE_CATEGORY;
+
+        if (!categories.has(key)) categories.set(key, []);
+        categories.get(key).push(service);
+    }
+
+    return Array.from(categories.entries()).map(([category, services]) => ({
+        category,
+        services,
+    }));
+};
 
 const cleanupStaleQueuesForBranch = async (branchId) => {
     if (!branchId) return null;
@@ -216,19 +236,32 @@ class Kiosk {
     }
 
     async services(req, res) {
-        const { data, error } = await supabase
-            .from("services")
-            .select("*");
+        const { active, grouped } = req.query || {};
+
+        let query = supabase.from("services").select("*");
+
+        if (active !== undefined) {
+            const activeFlag = String(active).toLowerCase() === "true" || active === "1";
+            query = query.eq("is_active", activeFlag);
+        }
+
+        const { data, error } = await query
+            .order("category", { ascending: true, nullsFirst: false })
+            .order("base_price", { ascending: true })
+            .order("name", { ascending: true });
 
         if (error) {
             return res.status(500).json({ error: error.message });
         }
 
-        if (!data) {
-            return res.status(404).json({ error: "No service found!" })
+        const services = data || [];
+        const categories = groupServicesByCategory(services);
+
+        if (grouped === "true" || grouped === "1") {
+            return res.status(200).json({ categories });
         }
 
-        return res.status(200).json({ services: data });
+        return res.status(200).json({ services, categories });
     }
 
     async book(req, res) {
