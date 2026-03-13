@@ -11,7 +11,7 @@ const history = require('./routers/history');
 const barbers = require('./routers/barbers');
 const marketplace = require('./routers/marketplace');
 const statistics = require('./routers/statistics');
-const promoCode = require('./routers/promoCode');
+const promoCode = require('./routers/promocode');
 
 const app = express();
 

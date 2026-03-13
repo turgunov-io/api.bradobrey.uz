@@ -58,7 +58,6 @@ class PromoCodes {
     const allowed = this.ensureAllowed(promo.data);
     if (!allowed.ok) return res.status(400).json({ success: false, message: allowed.message });
 
-    // Record usage only after successful payment
     const { error: insertError } = await supabase.from('promo_code_usage').insert({
       promo_code_id: promo.data.id,
       user_id: user_id || null,
