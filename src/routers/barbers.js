@@ -11,6 +11,7 @@ const upload = multer({
 
 router.post('/register', (req, res) => barbers.register(req, res));
 router.post('/login', (req, res) => barbers.login(req, res));
+router.post('/admin/login', (req, res) => barbers.adminLogin(req, res));
 router.post('/logout', (req, res) => barbers.logout(req, res));
 router.get("/me", (req, res) => barbers.me(req, res));
 router.patch("/me", upload.single('file'), (req, res) => barbers.updateProfile(req, res));

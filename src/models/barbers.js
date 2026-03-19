@@ -6,6 +6,7 @@ const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composabl
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
 const callTimers = new Map(); // queueEntryId -> timer
+const ADMIN_ROLES = new Set(['admin_network', 'admin_branch']);
 
 const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
@@ -72,6 +73,17 @@ const cleanupShiftTimers = () => {
     }
     shiftAutoOffTimers.clear();
 };
+
+const signUserToken = ({ id, login, role, branch_id = null }) => jwt.sign(
+    {
+        sub: id,
+        login,
+        role,
+        branchId: branch_id,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+);
 
 const clearCallTimer = (entryId) => {
     const timer = callTimers.get(entryId);
@@ -394,16 +406,12 @@ class Barbers {
             .update({ branch_id, is_on_shift: true })
             .eq('id', barberData.id);
 
-        const token = jwt.sign(
-            {
-                sub: barberData.id,
-                login: barberData.login,
-                role: barberData.role,
-                branchId: branch_id,
-            },
-            process.env.JWT_SECRET,
-            { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-        );
+        const token = signUserToken({
+            branch_id,
+            id: barberData.id,
+            login: barberData.login,
+            role: barberData.role,
+        });
 
         return res.json({
             token,
@@ -412,6 +420,52 @@ class Barbers {
                 login: barberData.login,
                 role: barberData.role,
                 branch_id,
+            },
+        });
+    }
+
+    async adminLogin(req, res) {
+        const { login, password } = req.body || {};
+
+        if (!login || !password) {
+            return res.status(400).json({ error: 'Login and password are required' });
+        }
+
+        const { data: users, error: userError } = await supabase
+            .from('users')
+            .select('id, login, role, branch_id, password_hash')
+            .eq('login', login)
+            .in('role', Array.from(ADMIN_ROLES))
+            .limit(1);
+
+        if (userError) {
+            return res.status(500).json({ error: 'Failed to verify credentials' });
+        }
+
+        const adminUser = Array.isArray(users) ? users[0] : null;
+        if (!adminUser) {
+            return res.status(400).json({ error: 'Invalid credentials' });
+        }
+
+        const passwordCheck = bcrypto.compareSync(password, adminUser.password_hash);
+        if (!passwordCheck) {
+            return res.status(400).json({ error: 'Invalid credentials' });
+        }
+
+        const token = signUserToken({
+            branch_id: adminUser.branch_id || null,
+            id: adminUser.id,
+            login: adminUser.login,
+            role: adminUser.role,
+        });
+
+        return res.json({
+            token,
+            user: {
+                id: adminUser.id,
+                login: adminUser.login,
+                role: adminUser.role,
+                branch_id: adminUser.branch_id || null,
             },
         });
     }

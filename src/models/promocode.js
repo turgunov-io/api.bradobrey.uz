@@ -23,6 +23,17 @@ const calcDiscountedTotal = (total, promo) => {
   return Math.max(0, Number(discounted.toFixed(2)));
 };
 
+const normalizeDiscountType = (value) => {
+  const type = String(value || '').trim().toLowerCase();
+
+  if (type === 'percent') return 'percentage';
+  if (type === 'amount') return 'fixed';
+
+  return type;
+};
+
+const normalizeStatus = (value) => String(value || 'active').trim().toLowerCase();
+
 class PromoCodes {
   async validate(req, res) {
     const { code, user_id, order_total } = req.body || {};
@@ -154,37 +165,13 @@ class PromoCodes {
   }
 
   async create(req, res) {
-    const { code, discount_type, discount_value, usage_limit, is_unlimited = false, status = 'active' } = req.body || {};
-
-    if (!code || !discount_type || !discount_value) {
-      return res.status(400).json({ error: 'code, discount_type, and discount_value are required' });
-    }
-
-    const normalizedCode = normalizeCode(code);
-    const allowedTypes = ['percentage', 'fixed'];
-    if (!allowedTypes.includes(discount_type)) {
-      return res.status(400).json({ error: 'discount_type must be percentage or fixed' });
-    }
-
-    const numericValue = Number(discount_value);
-    if (!Number.isFinite(numericValue) || numericValue <= 0) {
-      return res.status(400).json({ error: 'discount_value must be a positive number' });
-    }
-
-    if (!is_unlimited) {
-      const limit = Number(usage_limit);
-      if (!Number.isFinite(limit) || limit <= 0) {
-        return res.status(400).json({ error: 'usage_limit must be a positive number when not unlimited' });
-      }
+    const parsed = this.parseWritePayload(req.body);
+    if (parsed.error) {
+      return res.status(400).json({ error: parsed.error });
     }
 
     const payload = {
-      code: normalizedCode,
-      discount_type,
-      discount_value: numericValue,
-      usage_limit: is_unlimited ? null : usage_limit,
-      is_unlimited: Boolean(is_unlimited),
-      status,
+      ...parsed.data,
       used_count: 0,
     };
 
@@ -199,6 +186,62 @@ class PromoCodes {
     return res.status(201).json({
       promo_code: data,
       message: 'Promo code created',
+    });
+  }
+
+  async update(req, res) {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    const promo = await this.fetchPromoById(id);
+    if (promo.error) return res.status(500).json({ error: promo.error });
+    if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
+
+    const parsed = this.parseWritePayload(req.body, { currentPromo: promo.data });
+    if (parsed.error) {
+      return res.status(400).json({ error: parsed.error });
+    }
+
+    const { data, error } = await supabase
+      .from('promo_codes')
+      .update(parsed.data)
+      .eq('id', promo.data.id)
+      .select()
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      promo_code: data,
+      message: 'Promo code updated',
+    });
+  }
+
+  async remove(req, res) {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ error: 'id is required' });
+
+    const promo = await this.fetchPromoById(id);
+    if (promo.error) return res.status(500).json({ error: promo.error });
+    if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
+
+    const { error: usageError } = await supabase
+      .from('promo_code_usage')
+      .delete()
+      .eq('promo_code_id', promo.data.id);
+
+    if (usageError) return res.status(500).json({ error: usageError.message });
+
+    const { error: deleteError } = await supabase
+      .from('promo_codes')
+      .delete()
+      .eq('id', promo.data.id);
+
+    if (deleteError) return res.status(500).json({ error: deleteError.message });
+
+    return res.json({
+      id: promo.data.id,
+      message: 'Promo code deleted',
     });
   }
 
@@ -221,6 +264,56 @@ class PromoCodes {
       .maybeSingle();
 
     return { data, error: error ? error.message : null };
+  }
+
+  parseWritePayload(body = {}, options = {}) {
+    const currentPromo = options.currentPromo || null;
+    const code = normalizeCode(body.code);
+    const discountType = normalizeDiscountType(body.discount_type);
+    const numericValue = Number(body.discount_value);
+    const isUnlimited = Boolean(body.is_unlimited);
+    const status = normalizeStatus(body.status);
+    const limit = body.usage_limit === null || body.usage_limit === undefined || body.usage_limit === ''
+      ? null
+      : Number(body.usage_limit);
+
+    if (!code || !discountType || body.discount_value === undefined || body.discount_value === null || body.discount_value === '') {
+      return { error: 'code, discount_type, and discount_value are required' };
+    }
+
+    if (!['percentage', 'fixed'].includes(discountType)) {
+      return { error: 'discount_type must be percentage or fixed' };
+    }
+
+    if (!Number.isFinite(numericValue) || numericValue <= 0) {
+      return { error: 'discount_value must be a positive number' };
+    }
+
+    if (!['active', 'inactive'].includes(status)) {
+      return { error: 'status must be active or inactive' };
+    }
+
+    if (!isUnlimited) {
+      if (!Number.isFinite(limit) || limit <= 0) {
+        return { error: 'usage_limit must be a positive number when not unlimited' };
+      }
+
+      if (currentPromo && limit < Number(currentPromo.used_count || 0)) {
+        return { error: 'usage_limit cannot be less than used_count' };
+      }
+    }
+
+    return {
+      data: {
+        code,
+        discount_type: discountType,
+        discount_value: numericValue,
+        usage_limit: isUnlimited ? null : limit,
+        is_unlimited: Boolean(isUnlimited),
+        status,
+      },
+      error: null,
+    };
   }
 
   ensureAllowed(promo) {

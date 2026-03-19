@@ -1,6 +1,37 @@
 const { supabase } = require("../config/supabase");
 
 class Certificate {
+  async active(req, res) {
+    const { data, error } = await supabase
+      .from("certificates")
+      .select("id, code, service_ids, expires_at, is_used, metadata")
+      .order("code", { ascending: true });
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const now = new Date();
+    const items = (data || []).filter((certificate) => {
+      if (certificate?.is_used) {
+        return false;
+      }
+
+      if (!certificate?.expires_at) {
+        return true;
+      }
+
+      const expiresAt = new Date(certificate.expires_at);
+
+      return !Number.isNaN(expiresAt.getTime()) && expiresAt >= now;
+    });
+
+    return res.json({
+      count: items.length,
+      items,
+    });
+  }
+
   async create(req, res) {
     const { code, service_ids, expires_at, metadata } = req.body || {};
 

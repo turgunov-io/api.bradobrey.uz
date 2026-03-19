@@ -86,6 +86,14 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `POST /api/services/:id/activate` (admin_network, admin_branch)
 - `POST /api/services/:id/deactivate` (admin_network, admin_branch)
 
+## Admin Login Endpoint
+
+- `POST /api/barbers/admin/login`
+- Body: `{ "login": "...", "password": "..." }`
+- Roles: `admin_network`, `admin_branch`
+- Response: `{ "token": "...", "user": { "id", "login", "role", "branch_id" } }`
+- `branch_id` is optional for admins, but if it exists in `users`, it is included in both JWT `branchId` and response `user.branch_id`
+
 ## AI prompt to recreate this project
 
 ```

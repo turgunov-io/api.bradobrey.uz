@@ -9,5 +9,7 @@ router.post('/use', (req, res) => promo.use(req, res));
 router.get('/dashboard', (req, res) => promo.list(req, res));
 router.get('/dashboard/:id', (req, res) => promo.stats(req, res));
 router.post('/dashboard/create', (req, res) => promo.create(req, res));
+router.patch('/dashboard/:id', (req, res) => promo.update(req, res));
+router.delete('/dashboard/:id', (req, res) => promo.remove(req, res));
 
 module.exports = router;
