@@ -6,7 +6,8 @@ const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composabl
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
 const callTimers = new Map(); // queueEntryId -> timer
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch']);
+const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
+const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber']);
 
 const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
@@ -84,6 +85,8 @@ const signUserToken = ({ id, login, role, branch_id = null }) => jwt.sign(
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
 );
+
+const isBarberWorkspaceRole = (role) => BARBER_WORKSPACE_ROLES.has(role);
 
 const clearCallTimer = (entryId) => {
     const timer = callTimers.get(entryId);
@@ -231,7 +234,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can take a break' });
         }
 
@@ -320,7 +323,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can return from break' });
         }
 
@@ -380,7 +383,7 @@ class Barbers {
             .from('users')
             .select('*')
             .eq('login', login)
-            .eq('role', 'barber')
+            .in('role', Array.from(BARBER_WORKSPACE_ROLES))
             .limit(1);
 
         if (barberError) {
@@ -564,7 +567,7 @@ class Barbers {
         }
 
         let barber = null;
-        if (user.role === 'barber') {
+        if (isBarberWorkspaceRole(user.role)) {
             const { data: barberData, error: barberError } = await supabase
                 .from('barbers')
                 .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
@@ -613,7 +616,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can view their queue' });
         }
 
@@ -680,7 +683,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can view queue entries' });
         }
 
@@ -736,7 +739,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can edit their queue entries' });
         }
 
@@ -845,7 +848,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can call queue entries' });
         }
 
@@ -912,7 +915,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can start queue entries' });
         }
 
@@ -978,7 +981,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can edit price before completion' });
         }
 
@@ -1077,7 +1080,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can complete queue entries' });
         }
 
@@ -1142,7 +1145,7 @@ class Barbers {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
 
-        if (payload.role !== 'barber') {
+        if (!isBarberWorkspaceRole(payload.role)) {
             return res.status(403).json({ error: 'Only barbers can update their profile' });
         }
 

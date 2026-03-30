@@ -2,6 +2,7 @@ const { supabase } = require("../config/supabase");
 
 const STALE_QUEUE_HOURS = 9;
 const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
+const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber'];
 
 const groupServicesByCategory = (services = []) => {
     const categories = new Map();
@@ -120,6 +121,25 @@ class Kiosk {
             return res.status(500).json({ error: barbersError.message });
         }
 
+        const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
+        let allowedBarberIds = new Set(barberIds);
+
+        if (barberIds.length) {
+            const { data: users, error: usersError } = await supabase
+                .from('users')
+                .select('id, role')
+                .in('id', barberIds)
+                .in('role', OPERATIONAL_BARBER_ROLES);
+
+            if (usersError) {
+                return res.status(500).json({ error: usersError.message });
+            }
+
+            allowedBarberIds = new Set((users || []).map((user) => user.id));
+        }
+
+        const visibleBarbers = (barbers || []).filter((barber) => allowedBarberIds.has(barber.id));
+
         const { data: rawQueues, error: queuesError } = await supabase
             .from("queue_entries")
             .select("id, barber_id, client_id, status, created_at, service_ids") // 🔥 ADDED service_ids
@@ -192,6 +212,7 @@ class Kiosk {
         for (const entry of queues || []) {
             const key = entry.barber_id;
             if (!key) continue;
+            if (!allowedBarberIds.has(key)) continue;
 
             if (entry.status === 'completed' || entry.status === 'no_show' || entry.status === 'not_in_time') {
                 continue;
@@ -218,7 +239,7 @@ class Kiosk {
         const overallEstimatedWaitingTime = Object.values(waitingTimeByBarber)
             .reduce((sum, val) => sum + val, 0);
 
-        const response = (barbers || []).map((barber) => ({
+        const response = visibleBarbers.map((barber) => ({
             id: barber.id,
             name: barber.name,
             photo: barber.photo_url || null,
@@ -307,6 +328,17 @@ class Kiosk {
         if (!barber) return res.status(404).json({ error: 'Barber not found' });
         if (barber.branch_id !== branch_id) {
             return res.status(400).json({ error: 'Barber does not belong to this branch' });
+        }
+
+        const { data: barberUser, error: barberUserError } = await supabase
+            .from('users')
+            .select('id, role')
+            .eq('id', barber_id)
+            .in('role', OPERATIONAL_BARBER_ROLES)
+            .maybeSingle();
+        if (barberUserError) return res.status(500).json({ error: barberUserError.message });
+        if (!barberUser) {
+            return res.status(400).json({ error: 'Selected employee is not available as a barber' });
         }
 
         const { data: services, error: servicesError } = await supabase
