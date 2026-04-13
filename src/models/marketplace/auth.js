@@ -35,9 +35,28 @@ const canSendOtpEmail = () =>
     process.env.SMTP_HOST &&
       process.env.SMTP_PORT &&
       process.env.SMTP_USER &&
-      process.env.SMTP_PASS &&
-      process.env.SMTP_FROM
+      process.env.SMTP_PASS
   );
+
+const buildSmtpFrom = ({ user, fromRaw }) => {
+  const fromValue = String(fromRaw || '').trim();
+  const userValue = String(user || '').trim();
+
+  if (fromValue) {
+    // Already contains an email address (`name@host` or `"Name" <name@host>`)
+    if (/[^\s<>]+@[^\s<>]+/.test(fromValue)) return fromValue;
+
+    // Display name only; best-effort fallback to authenticated SMTP user when it's an email.
+    if (userValue && /@/.test(userValue)) {
+      return { name: fromValue, address: userValue };
+    }
+
+    return null;
+  }
+
+  if (userValue && /@/.test(userValue)) return userValue;
+  return null;
+};
 
 const trySendOtpEmail = async ({ to, code }) => {
   if (!canSendOtpEmail()) return { sent: false, reason: 'smtp_not_configured' };
@@ -53,10 +72,14 @@ const trySendOtpEmail = async ({ to, code }) => {
   const port = Number(process.env.SMTP_PORT);
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
-  const from = process.env.SMTP_FROM;
+  const from = buildSmtpFrom({ user, fromRaw: process.env.SMTP_FROM });
 
   if (!Number.isFinite(port)) {
     return { sent: false, reason: 'invalid_smtp_port' };
+  }
+
+  if (!from) {
+    return { sent: false, reason: 'invalid_smtp_from' };
   }
 
   const transporter = nodemailer.createTransport({
@@ -119,12 +142,20 @@ class MarketplaceAuth {
       }
 
       try {
-        const { sent } = await trySendOtpEmail({ to: email, code });
-        if (sent) {
-          return res.status(200).json({ message: 'OTP sent' });
+        const smtpConfigured = canSendOtpEmail();
+        const { sent, reason } = await trySendOtpEmail({ to: email, code });
+
+        if (sent) return res.status(200).json({ message: 'OTP sent' });
+
+        if (smtpConfigured) {
+          console.error('OTP email send failed:', reason);
+          return res.status(500).json({ error: 'Failed to send OTP email' });
         }
       } catch (mailErr) {
         console.error('OTP email send failed:', mailErr?.message || mailErr);
+        if (canSendOtpEmail()) {
+          return res.status(500).json({ error: 'Failed to send OTP email' });
+        }
       }
 
       if (shouldReturnOtpInResponse()) {
