@@ -7,3 +7,7 @@ create table if not exists marketplace_clients (
   created_at timestamptz not null default now()
 );
 
+-- If the table already exists, CREATE TABLE IF NOT EXISTS won't add new columns.
+-- Keep this file idempotent for existing databases.
+alter table marketplace_clients
+  add column if not exists password_hash text;
