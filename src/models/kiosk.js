@@ -296,6 +296,7 @@ class Kiosk {
             source = 'point',
             payment_method = null,
             certificate_code = null,
+            promo_code = null,
         } = req.body || {};
 
         if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids)) || !customer_name || !phone_number) {
@@ -352,6 +353,43 @@ class Kiosk {
         const inactive = services.find((s) => s.is_active === false);
         if (inactive) {
             return res.status(400).json({ error: `Service ${inactive.id} is not active` });
+        }
+
+        const normalizedPromoCode = promo_code ? String(promo_code).trim().toUpperCase() : null;
+
+        if (payment_method === 'certificate' && normalizedPromoCode) {
+            return res.status(400).json({ error: 'Promo code cannot be used with certificate payment_method' });
+        }
+
+        let promo = null;
+        if (normalizedPromoCode) {
+            const { data: promoData, error: promoError } = await supabase
+                .from('promo_codes')
+                .select('*')
+                .eq('code', normalizedPromoCode)
+                .maybeSingle();
+
+            if (promoError) {
+                return res.status(500).json({ error: promoError.message });
+            }
+
+            if (!promoData) {
+                return res.status(404).json({ error: 'Promo code not found' });
+            }
+
+            if (promoData.status !== 'active') {
+                return res.status(400).json({ error: 'Promo code inactive' });
+            }
+
+            if (!promoData.is_unlimited) {
+                const used = Number(promoData.used_count || 0);
+                const limit = Number(promoData.usage_limit || 0);
+                if (used >= limit) {
+                    return res.status(400).json({ error: 'Promo code expired or limit reached' });
+                }
+            }
+
+            promo = promoData;
         }
 
         let certificate = null;
@@ -447,7 +485,105 @@ class Kiosk {
             }
         }
 
-        return res.status(201).json({ entry, certificate });
+        let promo_usage = null;
+        if (promo) {
+            const { data: insertedUsage, error: usageError } = await supabase
+                .from('promo_code_usage')
+                .insert({
+                    promo_code_id: promo.id,
+                    user_id: null,
+                    user_name: customer_name,
+                    phone: phone_number,
+                    order_id: entry.id,
+                })
+                .select('id, promo_code_id, order_id, used_at')
+                .maybeSingle();
+
+            if (usageError || !insertedUsage) {
+                await supabase.from('queue_entries').delete().eq('id', entry.id);
+                return res.status(500).json({ error: usageError?.message || 'Failed to record promo code usage' });
+            }
+
+            promo_usage = insertedUsage;
+
+            if (!promo.is_unlimited) {
+                let currentCount = Number(promo.used_count || 0);
+                let updated = false;
+
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    const limit = Number(promo.usage_limit || 0);
+                    const nextCount = currentCount + 1;
+
+                    if (nextCount > limit) {
+                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        return res.status(409).json({ error: 'Promo code limit reached' });
+                    }
+
+                    const { data: updatedPromo, error: updateError } = await supabase
+                        .from('promo_codes')
+                        .update({ used_count: nextCount })
+                        .eq('id', promo.id)
+                        .eq('used_count', currentCount)
+                        .select('id, used_count, usage_limit, status, is_unlimited')
+                        .maybeSingle();
+
+                    if (updateError) {
+                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        return res.status(500).json({ error: updateError.message });
+                    }
+
+                    if (updatedPromo?.id) {
+                        promo.used_count = updatedPromo.used_count;
+                        promo.usage_limit = updatedPromo.usage_limit;
+                        promo.status = updatedPromo.status;
+                        promo.is_unlimited = updatedPromo.is_unlimited;
+                        updated = true;
+                        break;
+                    }
+
+                    const { data: freshPromo, error: freshError } = await supabase
+                        .from('promo_codes')
+                        .select('used_count, usage_limit, status, is_unlimited')
+                        .eq('id', promo.id)
+                        .maybeSingle();
+
+                    if (freshError || !freshPromo) {
+                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        return res.status(409).json({ error: freshError?.message || 'Promo code update conflict' });
+                    }
+
+                    if (freshPromo.status !== 'active') {
+                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        return res.status(409).json({ error: 'Promo code inactive' });
+                    }
+
+                    promo.used_count = freshPromo.used_count;
+                    promo.usage_limit = freshPromo.usage_limit;
+                    promo.is_unlimited = freshPromo.is_unlimited;
+                    currentCount = Number(freshPromo.used_count || 0);
+                }
+
+                if (!updated) {
+                    await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                    await supabase.from('queue_entries').delete().eq('id', entry.id);
+                    return res.status(409).json({ error: 'Promo code update conflict' });
+                }
+            }
+        }
+
+        const promoSummary = promo
+            ? {
+                code: promo.code,
+                discount_type: promo.discount_type,
+                discount_value: Number(promo.discount_value),
+            }
+            : null;
+
+        return res.status(201).json({ entry, certificate, promo: promoSummary, promo_usage });
     }
 
     async certificate(req, res) {

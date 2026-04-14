@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { supabase } = require('../config/supabase');
+const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 
 class History {
     async barber(req, res) {
@@ -37,9 +38,20 @@ class History {
         const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
         const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
 
-        const query = supabase
-            .from('queue_entries')
-            .select(`
+        const selectWithCertificate = `
+                id,
+                status,
+                created_at,
+                finished_at,
+                service_id,
+                service_ids,
+                payment_method,
+                certificate_id,
+                branch_id,
+                client:clients ( id, name, phone )
+            `;
+
+        const selectWithoutCertificate = `
                 id,
                 status,
                 created_at,
@@ -49,21 +61,39 @@ class History {
                 payment_method,
                 branch_id,
                 client:clients ( id, name, phone )
-            `, { count: 'exact' })
+            `;
+
+        let query = supabase
+            .from('queue_entries')
+            .select(selectWithCertificate, { count: 'exact' })
             .eq('barber_id', barberId)
             .in('status', finalStatuses)
             .order('finished_at', { ascending: false })
             .range(offset, offset + limit - 1);
 
-        const { data, error, count } = await query;
+        let { data, error, count } = await query;
+
+        if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
+            query = supabase
+                .from('queue_entries')
+                .select(selectWithoutCertificate, { count: 'exact' })
+                .eq('barber_id', barberId)
+                .in('status', finalStatuses)
+                .order('finished_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            ({ data, error, count } = await query);
+        }
 
         if (error) {
             return res.status(500).json({ error: error.message });
         }
 
+        const enriched = await enrichQueueEntriesWithBenefits(data || []);
+
         return res.json({
-            items: data || [],
-            count: typeof count === 'number' ? count : (data ? data.length : 0),
+            items: enriched,
+            count: typeof count === 'number' ? count : (enriched ? enriched.length : 0),
             limit,
             offset,
             statuses: finalStatuses,

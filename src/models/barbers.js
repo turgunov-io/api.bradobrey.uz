@@ -2,6 +2,7 @@
 const bcrypto = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
+const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -629,7 +630,7 @@ class Barbers {
             console.error('stale queue cleanup failed:', e.message);
         }
 
-        const { data, error } = await supabase
+        let { data, error } = await supabase
             .from('queue_entries')
             .select(`
                 id,
@@ -641,12 +642,34 @@ class Barbers {
                 service_id,
                 service_ids,
                 payment_method,
+                certificate_id,
                 branch_id,
                 client:clients ( id, name, phone )
             `)
             .eq('barber_id', barberId)
             .in('status', ['waiting', 'called', 'in_progress'])
             .order('created_at', { ascending: true });
+
+        if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
+            ({ data, error } = await supabase
+                .from('queue_entries')
+                .select(`
+                    id,
+                    status,
+                    swapped_flag,
+                    created_at,
+                    started_at,
+                    finished_at,
+                    service_id,
+                    service_ids,
+                    payment_method,
+                    branch_id,
+                    client:clients ( id, name, phone )
+                `)
+                .eq('barber_id', barberId)
+                .in('status', ['waiting', 'called', 'in_progress'])
+                .order('created_at', { ascending: true }));
+        }
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -660,9 +683,11 @@ class Barbers {
             return true;
         });
 
+        const enriched = await enrichQueueEntriesWithBenefits(filtered);
+
         return res.json({
-            items: filtered,
-            count: Array.isArray(filtered) ? filtered.length : 0,
+            items: enriched,
+            count: Array.isArray(enriched) ? enriched.length : 0,
         });
     }
 
@@ -689,7 +714,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data, error } = await supabase
+        let { data, error } = await supabase
             .from('queue_entries')
             .select(`
                 id,
@@ -699,12 +724,32 @@ class Barbers {
                 service_id,
                 service_ids,
                 payment_method,
+                certificate_id,
                 branch_id,
                 client:clients ( id, name, phone )
             `)
             .eq('id', id)
             .eq('barber_id', barberId)
             .maybeSingle();
+
+        if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
+            ({ data, error } = await supabase
+                .from('queue_entries')
+                .select(`
+                    id,
+                    status,
+                    created_at,
+                    finished_at,
+                    service_id,
+                    service_ids,
+                    payment_method,
+                    branch_id,
+                    client:clients ( id, name, phone )
+                `)
+                .eq('id', id)
+                .eq('barber_id', barberId)
+                .maybeSingle());
+        }
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -714,11 +759,14 @@ class Barbers {
             return res.status(404).json({ error: 'Queue entry not found' });
         }
 
-        if (data.status === 'completed') {
-            return res.status(209).json({ warning: "completed", data });
+        const [enriched] = await enrichQueueEntriesWithBenefits([data]);
+        const entry = enriched || data;
+
+        if (entry.status === 'completed') {
+            return res.status(209).json({ warning: "completed", data: entry });
         }
 
-        return res.status(200).json(data);
+        return res.status(200).json(entry);
     }
 
     async updateQueue(req, res) {
