@@ -3,6 +3,7 @@ const bcrypto = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
+const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback");
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -876,6 +877,10 @@ class Barbers {
             }
         }
 
+        if (status === 'completed' && entry.status !== 'completed') {
+            await awardCashbackForCompletedQueueEntry(updated);
+        }
+
         return res.json({ entry: updated });
     }
 
@@ -1166,12 +1171,14 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id')
+            .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id')
             .maybeSingle();
 
         if (updateError) {
             return res.status(500).json({ error: updateError.message });
         }
+
+        await awardCashbackForCompletedQueueEntry(updated);
 
         return res.json({ entry: updated });
     }

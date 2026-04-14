@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 
 const { supabase } = require('../../config/supabase');
+const { getWalletBalance } = require('../../composable/cashback');
+const { enrichQueueEntriesWithBenefits } = require('../../composable/enrichQueueBenefits');
 const {
   uploadBase64ToSupabase,
   uploadBufferToSupabase,
@@ -41,7 +43,7 @@ const buildDefaultAvatarUrl = (seedInput) => {
   return DEFAULT_AVATAR_URL_TEMPLATE.replace('{seed}', encodeURIComponent(seed));
 };
 
-const formatProfile = (row) => {
+const formatProfile = (row, options = {}) => {
   const hasCustomPhoto = Boolean(row?.photo_url);
   return {
     id: row?.id,
@@ -50,6 +52,8 @@ const formatProfile = (row) => {
     photo_url: row?.photo_url || buildDefaultAvatarUrl(row?.email || row?.id),
     photo_url_is_default: !hasCustomPhoto,
     phone_required: !row?.phone,
+    cashback_balance:
+      options.cashback_balance === undefined ? null : options.cashback_balance,
   };
 };
 
@@ -108,7 +112,23 @@ class MarketplaceProfile {
     try {
       const auth = await this._auth(req, res);
       if (!auth) return;
-      return res.json({ profile: formatProfile(auth.client) });
+
+      let cashback_balance = null;
+      if (auth.client.phone) {
+        const { data: linked, error: linkError } = await supabase
+          .from('clients')
+          .select('id')
+          .eq('phone', auth.client.phone)
+          .maybeSingle();
+
+        if (linkError) {
+          return res.status(500).json({ error: linkError.message });
+        }
+
+        cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
+      }
+
+      return res.json({ profile: formatProfile(auth.client, { cashback_balance }) });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: error.message || 'Internal server error' });
@@ -224,7 +244,22 @@ class MarketplaceProfile {
         await this._ensureClientRecordForPhone(nextPhone, updated?.email).catch(() => { });
       }
 
-      return res.json({ profile: formatProfile(updated) });
+      let cashback_balance = null;
+      if (updated?.phone) {
+        const { data: linked, error: linkError } = await supabase
+          .from('clients')
+          .select('id')
+          .eq('phone', updated.phone)
+          .maybeSingle();
+
+        if (linkError) {
+          return res.status(500).json({ error: linkError.message });
+        }
+
+        cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
+      }
+
+      return res.json({ profile: formatProfile(updated, { cashback_balance }) });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: error.message || 'Internal server error' });
@@ -316,7 +351,7 @@ class MarketplaceProfile {
         return res.status(500).json({ error: error.message });
       }
 
-      const entries = data || [];
+      const entries = await enrichQueueEntriesWithBenefits(data || []);
 
       const serviceIds = new Set();
       for (const entry of entries) {
@@ -374,8 +409,19 @@ class MarketplaceProfile {
           services,
           payments: entry.payments || [],
           total_price,
+          used_promo: Boolean(entry.used_promo),
+          promo_code: entry.promo_code || null,
+          promo_discount_type: entry.promo_discount_type || null,
+          promo_discount_value: entry.promo_discount_value ?? null,
+          used_certificate: Boolean(entry.used_certificate),
+          certificate_code: entry.certificate_code || null,
+          cashback_earned: entry.cashback_earned ?? 0,
+          cashback_spent: entry.cashback_spent ?? 0,
+          cashback_net: entry.cashback_net ?? 0,
         };
       });
+
+      const cashback_balance = await getWalletBalance(clientRow.id);
 
       return res.json({
         items: formatted,
@@ -384,6 +430,7 @@ class MarketplaceProfile {
         offset,
         phone,
         statuses: finalStatuses,
+        cashback_balance,
       });
     } catch (error) {
       console.error(error);

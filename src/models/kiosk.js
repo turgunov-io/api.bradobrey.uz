@@ -4,6 +4,24 @@ const STALE_QUEUE_HOURS = 9;
 const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber'];
 
+const normalizePhone = (phoneInput) => {
+    const raw = String(phoneInput || '').trim();
+    if (!raw) return null;
+
+    const cleaned = raw.replace(/[\s()-]/g, '');
+
+    if (cleaned.startsWith('+')) return cleaned;
+    if (/^\d+$/.test(cleaned)) {
+        if (cleaned.startsWith('998') && cleaned.length === 12) return `+${cleaned}`;
+        if (cleaned.length === 9) return `+998${cleaned}`;
+        if (cleaned.startsWith('0') && cleaned.length === 10) return `+998${cleaned.slice(1)}`;
+    }
+
+    return cleaned;
+};
+
+const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');
+
 const groupServicesByCategory = (services = []) => {
     const categories = new Map();
 
@@ -303,6 +321,11 @@ class Kiosk {
             return res.status(400).json({ error: "branch_id, barber_id, service_id/service_ids, customer_name, and phone_number are required" });
         }
 
+        const normalizedPhone = normalizePhone(phone_number);
+        if (!normalizedPhone || !isValidE164(normalizedPhone)) {
+            return res.status(400).json({ error: "phone_number must be in E.164 format, e.g. +998991234567" });
+        }
+
         const serviceIds = Array.isArray(service_ids) && service_ids.length
             ? service_ids
             : service_id
@@ -426,7 +449,7 @@ class Kiosk {
         const { data: existingClient, error: clientLookupError } = await supabase
             .from('clients')
             .select('id, name')
-            .eq('phone', phone_number)
+            .eq('phone', normalizedPhone)
             .maybeSingle();
         if (clientLookupError) return res.status(500).json({ error: clientLookupError.message });
 
@@ -438,7 +461,7 @@ class Kiosk {
         } else {
             const { data: newClient, error: clientCreateError } = await supabase
                 .from('clients')
-                .insert({ name: customer_name, phone: phone_number })
+                .insert({ name: customer_name, phone: normalizedPhone })
                 .select('id')
                 .maybeSingle();
             if (clientCreateError) return res.status(500).json({ error: clientCreateError.message });
@@ -493,7 +516,7 @@ class Kiosk {
                     promo_code_id: promo.id,
                     user_id: null,
                     user_name: customer_name,
-                    phone: phone_number,
+                    phone: normalizedPhone,
                     order_id: entry.id,
                 })
                 .select('id, promo_code_id, order_id, used_at')

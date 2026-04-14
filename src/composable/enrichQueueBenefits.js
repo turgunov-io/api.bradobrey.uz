@@ -74,6 +74,36 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
     }
   }
 
+  const cashbackByOrderId = new Map();
+  if (orderIds.length) {
+    const { data, error } = await supabase
+      .from('cashback_transactions')
+      .select('queue_entry_id, kind, amount')
+      .in('queue_entry_id', orderIds)
+      .in('kind', ['earn', 'spend']);
+
+    if (error) {
+      const msg = String(error.message || '');
+      if (!msg.includes('cashback_transactions')) {
+        console.error('Failed to fetch cashback_transactions for queue entries:', error.message);
+      }
+    } else {
+      for (const row of data || []) {
+        const orderId = row?.queue_entry_id ? String(row.queue_entry_id) : null;
+        if (!orderId) continue;
+
+        const current = cashbackByOrderId.get(orderId) || { earn: 0, spend: 0 };
+        const amount = Number(row?.amount);
+        const num = Number.isFinite(amount) ? amount : 0;
+
+        if (row?.kind === 'earn') current.earn += num;
+        if (row?.kind === 'spend') current.spend += num;
+
+        cashbackByOrderId.set(orderId, current);
+      }
+    }
+  }
+
   return items.map((entry) => {
     const orderId = entry?.id ? String(entry.id) : null;
     const usage = orderId ? usageByOrderId.get(orderId) : null;
@@ -86,6 +116,10 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
       entry?.payment_method === 'certificate' || Boolean(certificateId);
     const used_promo = Boolean(promo);
 
+    const cashback = orderId ? cashbackByOrderId.get(orderId) : null;
+    const cashback_earned = cashback ? Number((cashback.earn || 0).toFixed(2)) : 0;
+    const cashback_spent = cashback ? Number((cashback.spend || 0).toFixed(2)) : 0;
+
     return {
       ...entry,
       used_certificate,
@@ -94,9 +128,11 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
       promo_code: promo?.code || null,
       promo_discount_type: promo?.discount_type || null,
       promo_discount_value: promo ? toNumberOrNull(promo.discount_value) : null,
+      cashback_earned,
+      cashback_spent,
+      cashback_net: Number((cashback_earned - cashback_spent).toFixed(2)),
     };
   });
 }
 
 module.exports = { enrichQueueEntriesWithBenefits };
-
