@@ -18,6 +18,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 
 - Cashback is stored in `cashback_wallets` and is attached to `clients` (phone-based identity).
 - Cashback начисляется **с каждого завершенного заказа** (status=`completed`) в процентах от суммы услуг (`services.base_price`), с учётом промокода (если он был применён).
+- Marketplace orders can **spend cashback at booking time** via `POST /api/kiosk/book` with `source=site`, `use_cashback=true` and `Authorization: Bearer <marketplace token>`; kiosk/point orders (`source=point`) cannot use cashback.
 - По умолчанию cashback выключен. Чтобы включить — задайте `CASHBACK_PERCENT` в окружении (например `5` = 5%).
 - Для оплаты сертификатом cashback не начисляется.
 - Убедитесь, что SQL из `db/supabase/cashback.sql` применён в вашей базе.

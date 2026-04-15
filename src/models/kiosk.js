@@ -1,4 +1,13 @@
 const { supabase } = require("../config/supabase");
+const jwt = require("jsonwebtoken");
+
+const {
+    applyPromoDiscount,
+    getWalletBalance,
+    spendCashback,
+    refundCashbackSpend,
+    roundMoney,
+} = require("../composable/cashback");
 
 const STALE_QUEUE_HOURS = 9;
 const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
@@ -21,6 +30,19 @@ const normalizePhone = (phoneInput) => {
 };
 
 const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');
+
+const MARKETPLACE_ROLE = 'marketplace';
+
+const getBearerToken = (req) => {
+    const authHeader = req.headers.authorization || '';
+    return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+};
+
+const verifyJwt = (token) => {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
+    return jwt.verify(token, jwtSecret);
+};
 
 const groupServicesByCategory = (services = []) => {
     const categories = new Map();
@@ -315,6 +337,7 @@ class Kiosk {
             payment_method = null,
             certificate_code = null,
             promo_code = null,
+            use_cashback = false,
         } = req.body || {};
 
         if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids)) || !customer_name || !phone_number) {
@@ -334,6 +357,75 @@ class Kiosk {
 
         const allowedSources = ['point', 'site', 'admin'];
         const normalizedSource = allowedSources.includes(source) ? source : 'point';
+
+        const useCashback =
+            use_cashback === true ||
+            use_cashback === 1 ||
+            use_cashback === '1' ||
+            String(use_cashback || '').toLowerCase() === 'true';
+
+        let marketplaceClient = null;
+        if (useCashback) {
+            if (normalizedSource !== 'site') {
+                return res.status(400).json({ error: 'Cashback can only be used for marketplace orders (source=site)' });
+            }
+
+            if (payment_method === 'certificate' || certificate_code) {
+                return res.status(400).json({ error: 'Cashback cannot be used with certificate payment' });
+            }
+
+            const token = getBearerToken(req);
+            if (!token) {
+                return res.status(401).json({ error: 'Authorization token is required to use cashback' });
+            }
+
+            let payload;
+            try {
+                payload = verifyJwt(token);
+            } catch (_err) {
+                return res.status(401).json({ error: 'Invalid or expired token' });
+            }
+
+            if (payload?.role !== MARKETPLACE_ROLE) {
+                return res.status(403).json({ error: 'Only marketplace users can use cashback' });
+            }
+
+            const marketplaceClientId = payload.sub || payload.id;
+            if (!marketplaceClientId) {
+                return res.status(401).json({ error: 'Invalid token payload' });
+            }
+
+            const { data: mpClient, error: mpError } = await supabase
+                .from('marketplace_clients')
+                .select('id, phone, is_active')
+                .eq('id', marketplaceClientId)
+                .maybeSingle();
+
+            if (mpError) {
+                return res.status(500).json({ error: mpError.message });
+            }
+
+            if (!mpClient) {
+                return res.status(404).json({ error: 'Marketplace client not found' });
+            }
+
+            if (mpClient.is_active === false) {
+                return res.status(403).json({ error: 'Account is disabled' });
+            }
+
+            if (!mpClient.phone) {
+                return res.status(428).json({
+                    error: 'Phone number is required to use cashback',
+                    code: 'PHONE_REQUIRED',
+                });
+            }
+
+            if (String(mpClient.phone) !== String(normalizedPhone)) {
+                return res.status(403).json({ error: 'Phone mismatch: cashback can only be used for your own phone number' });
+            }
+
+            marketplaceClient = mpClient;
+        }
 
         const { data: branch, error: branchError } = await supabase
             .from('branches')
@@ -367,7 +459,7 @@ class Kiosk {
 
         const { data: services, error: servicesError } = await supabase
             .from('services')
-            .select('id, is_active')
+            .select('id, is_active, base_price')
             .in('id', serviceIds);
         if (servicesError) return res.status(500).json({ error: servicesError.message });
         if (!services || services.length !== serviceIds.length) {
@@ -377,6 +469,12 @@ class Kiosk {
         if (inactive) {
             return res.status(400).json({ error: `Service ${inactive.id} is not active` });
         }
+
+        const priceById = new Map(
+            (services || [])
+                .filter((row) => row?.id)
+                .map((row) => [String(row.id), Number(row.base_price)])
+        );
 
         const normalizedPromoCode = promo_code ? String(promo_code).trim().toUpperCase() : null;
 
@@ -445,6 +543,15 @@ class Kiosk {
             certificate = cert;
         }
 
+        const finalOrderTotal = roundMoney(
+            (serviceIds || []).reduce((sum, id) => {
+                const price = priceById.get(String(id));
+                return sum + (Number.isFinite(price) ? price : 0);
+            }, 0)
+        );
+
+        const discountedTotal = applyPromoDiscount(finalOrderTotal, promo);
+
         let clientId;
         const { data: existingClient, error: clientLookupError } = await supabase
             .from('clients')
@@ -508,6 +615,55 @@ class Kiosk {
             }
         }
 
+        let cashback = null;
+        let payableTotal = discountedTotal;
+        if (useCashback) {
+            const walletBalance = await getWalletBalance(clientId);
+            const maxSpend = roundMoney(Math.min(walletBalance, discountedTotal));
+            payableTotal = roundMoney(Math.max(0, discountedTotal - maxSpend));
+
+            if (maxSpend > 0) {
+                const spendRes = await spendCashback({
+                    clientId,
+                    queueEntryId: entry.id,
+                    amount: maxSpend,
+                    meta: {
+                        total: finalOrderTotal,
+                        discounted_total: discountedTotal,
+                        promo_code: promo?.code || null,
+                        marketplace_client_id: marketplaceClient?.id || null,
+                    },
+                });
+
+                if (!spendRes?.spent) {
+                    await supabase.from('queue_entries').delete().eq('id', entry.id);
+                    const status = spendRes?.reason === 'insufficient_balance' ? 409 : 500;
+                    return res.status(status).json({
+                        error:
+                            spendRes?.reason === 'insufficient_balance'
+                                ? 'Insufficient cashback balance'
+                                : 'Failed to spend cashback',
+                        reason: spendRes?.reason || null,
+                        balance: spendRes?.balance ?? walletBalance,
+                    });
+                }
+
+                cashback = {
+                    used: true,
+                    spent_amount: spendRes.amount,
+                    balance: spendRes.balance,
+                    transaction_id: spendRes.transaction?.id || null,
+                };
+            } else {
+                cashback = {
+                    used: false,
+                    spent_amount: 0,
+                    balance: walletBalance,
+                    transaction_id: null,
+                };
+            }
+        }
+
         let promo_usage = null;
         if (promo) {
             const { data: insertedUsage, error: usageError } = await supabase
@@ -523,6 +679,14 @@ class Kiosk {
                 .maybeSingle();
 
             if (usageError || !insertedUsage) {
+                if (cashback?.spent_amount) {
+                    await refundCashbackSpend({
+                        clientId,
+                        queueEntryId: entry.id,
+                        amount: cashback.spent_amount,
+                        transactionId: cashback.transaction_id,
+                    });
+                }
                 await supabase.from('queue_entries').delete().eq('id', entry.id);
                 return res.status(500).json({ error: usageError?.message || 'Failed to record promo code usage' });
             }
@@ -539,6 +703,14 @@ class Kiosk {
 
                     if (nextCount > limit) {
                         await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        if (cashback?.spent_amount) {
+                            await refundCashbackSpend({
+                                clientId,
+                                queueEntryId: entry.id,
+                                amount: cashback.spent_amount,
+                                transactionId: cashback.transaction_id,
+                            });
+                        }
                         await supabase.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(409).json({ error: 'Promo code limit reached' });
                     }
@@ -553,6 +725,14 @@ class Kiosk {
 
                     if (updateError) {
                         await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        if (cashback?.spent_amount) {
+                            await refundCashbackSpend({
+                                clientId,
+                                queueEntryId: entry.id,
+                                amount: cashback.spent_amount,
+                                transactionId: cashback.transaction_id,
+                            });
+                        }
                         await supabase.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(500).json({ error: updateError.message });
                     }
@@ -574,12 +754,28 @@ class Kiosk {
 
                     if (freshError || !freshPromo) {
                         await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        if (cashback?.spent_amount) {
+                            await refundCashbackSpend({
+                                clientId,
+                                queueEntryId: entry.id,
+                                amount: cashback.spent_amount,
+                                transactionId: cashback.transaction_id,
+                            });
+                        }
                         await supabase.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(409).json({ error: freshError?.message || 'Promo code update conflict' });
                     }
 
                     if (freshPromo.status !== 'active') {
                         await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        if (cashback?.spent_amount) {
+                            await refundCashbackSpend({
+                                clientId,
+                                queueEntryId: entry.id,
+                                amount: cashback.spent_amount,
+                                transactionId: cashback.transaction_id,
+                            });
+                        }
                         await supabase.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(409).json({ error: 'Promo code inactive' });
                     }
@@ -592,6 +788,14 @@ class Kiosk {
 
                 if (!updated) {
                     await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                    if (cashback?.spent_amount) {
+                        await refundCashbackSpend({
+                            clientId,
+                            queueEntryId: entry.id,
+                            amount: cashback.spent_amount,
+                            transactionId: cashback.transaction_id,
+                        });
+                    }
                     await supabase.from('queue_entries').delete().eq('id', entry.id);
                     return res.status(409).json({ error: 'Promo code update conflict' });
                 }
@@ -606,7 +810,18 @@ class Kiosk {
             }
             : null;
 
-        return res.status(201).json({ entry, certificate, promo: promoSummary, promo_usage });
+        return res.status(201).json({
+            entry,
+            certificate,
+            promo: promoSummary,
+            promo_usage,
+            totals: {
+                total: finalOrderTotal,
+                discounted_total: discountedTotal,
+                payable_total: payableTotal,
+            },
+            cashback,
+        });
     }
 
     async certificate(req, res) {
