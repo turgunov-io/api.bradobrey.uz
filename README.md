@@ -14,6 +14,14 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - Install deps: `npm install`
 - Start dev server: `npm run dev` (defaults to `http://localhost:4000`)
 
+## Cashback (loyalty)
+
+- Cashback is stored in `cashback_wallets` and is attached to `clients` (phone-based identity).
+- Cashback начисляется **с каждого завершенного заказа** (status=`completed`) в процентах от суммы услуг (`services.base_price`), с учётом промокода (если он был применён).
+- По умолчанию cashback выключен. Чтобы включить — задайте `CASHBACK_PERCENT` в окружении (например `5` = 5%).
+- Для оплаты сертификатом cashback не начисляется.
+- Убедитесь, что SQL из `db/supabase/cashback.sql` применён в вашей базе.
+
 ## Key Endpoints
 
 - `POST /api/auth/login` — returns JWT + barber data (if role = barber)
