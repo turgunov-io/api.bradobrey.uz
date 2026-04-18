@@ -877,11 +877,12 @@ class Barbers {
             }
         }
 
+        let cashback = null;
         if (status === 'completed' && entry.status !== 'completed') {
-            await awardCashbackForCompletedQueueEntry(updated);
+            cashback = await awardCashbackForCompletedQueueEntry(updated);
         }
 
-        return res.json({ entry: updated });
+        return res.json({ entry: updated, cashback });
     }
 
     async callNext(req, res) {
@@ -1178,9 +1179,9 @@ class Barbers {
             return res.status(500).json({ error: updateError.message });
         }
 
-        await awardCashbackForCompletedQueueEntry(updated);
+        const cashback = await awardCashbackForCompletedQueueEntry(updated);
 
-        return res.json({ entry: updated });
+        return res.json({ entry: updated, cashback });
     }
 
     async updateProfile(req, res) {

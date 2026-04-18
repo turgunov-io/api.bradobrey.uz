@@ -22,6 +22,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - По умолчанию cashback выключен. Чтобы включить — задайте `CASHBACK_PERCENT` в окружении (например `5` = 5%).
 - Для оплаты сертификатом cashback не начисляется.
 - Убедитесь, что SQL из `db/supabase/cashback.sql` применён в вашей базе.
+- One-time backfill for already completed orders (after deploy): `npm run backfill:cashback` (optional: `--since`, `--until`, `--batch`, `--max`, `--verbose`).
 
 ## Key Endpoints
 

@@ -20,13 +20,12 @@ create table if not exists cashback_transactions (
 );
 
 -- Prevent duplicate earn/spend for the same order
+drop index if exists idx_cashback_transactions_queue_kind;
 create unique index if not exists idx_cashback_transactions_queue_kind
-  on cashback_transactions (queue_entry_id, kind)
-  where queue_entry_id is not null;
+  on cashback_transactions (queue_entry_id, kind);
 
 create index if not exists idx_cashback_transactions_client_created_at
   on cashback_transactions (client_id, created_at desc);
 
 create index if not exists idx_cashback_transactions_queue_entry_id
   on cashback_transactions (queue_entry_id);
-

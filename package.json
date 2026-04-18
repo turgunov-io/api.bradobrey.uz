@@ -7,6 +7,7 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "build": "echo \"Netlify build step (no-op)\"",
+    "backfill:cashback": "node scripts/backfill-cashback.js",
     "test": "echo \"No automated tests configured\" && exit 0"
   },
   "keywords": [],

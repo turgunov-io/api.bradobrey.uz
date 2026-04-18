@@ -340,13 +340,13 @@ async function insertCashbackTransaction({ clientId, queueEntryId, kind, amount,
 
   const { data, error } = await supabase
     .from('cashback_transactions')
-    .upsert(payload, {
-      onConflict: 'queue_entry_id,kind',
-      ignoreDuplicates: true,
-    })
+    .insert(payload)
     .select('id, client_id, queue_entry_id, kind, amount, created_at');
 
   if (error) {
+    if (error.code === '23505') {
+      return { inserted: false, transaction: null };
+    }
     const msg = String(error.message || '');
     if (msg.includes("Could not find the 'cashback_transactions'") || msg.includes('cashback_transactions')) {
       return { inserted: false, transaction: null };
