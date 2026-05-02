@@ -48,7 +48,7 @@ class History {
                 payment_method,
                 certificate_id,
                 branch_id,
-                client:clients ( id, name, phone )
+                client:clients ( id, name, phone, rank, completed_visits )
             `;
 
         const selectWithoutCertificate = `
@@ -60,7 +60,7 @@ class History {
                 service_ids,
                 payment_method,
                 branch_id,
-                client:clients ( id, name, phone )
+                client:clients ( id, name, phone, rank, completed_visits )
             `;
 
         let query = supabase
@@ -118,7 +118,7 @@ class History {
             service_ids,
             payment_method,
             branch_id,
-            client:clients ( id, name, phone ),
+            client:clients ( id, name, phone, rank, completed_visits ),
             barber:barbers ( id, name )
         `, { count: 'exact' })
             .order('finished_at', { ascending: false })
@@ -174,7 +174,7 @@ class History {
                 service_ids,
                 payment_method,
                 branch_id,
-                client:clients ( id, name, phone )
+                client:clients ( id, name, phone, rank, completed_visits )
             `)
             .eq('branch_id', id);
 

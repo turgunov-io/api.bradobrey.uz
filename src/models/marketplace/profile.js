@@ -114,10 +114,11 @@ class MarketplaceProfile {
       if (!auth) return;
 
       let cashback_balance = null;
+      let loyalty = null;
       if (auth.client.phone) {
         const { data: linked, error: linkError } = await supabase
           .from('clients')
-          .select('id')
+          .select('id, rank, completed_visits')
           .eq('phone', auth.client.phone)
           .maybeSingle();
 
@@ -126,9 +127,20 @@ class MarketplaceProfile {
         }
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
+        if (linked?.id) {
+          loyalty = {
+            rank: linked.rank || 'guest',
+            completed_visits: Number(linked.completed_visits || 0),
+          };
+        }
       }
 
-      return res.json({ profile: formatProfile(auth.client, { cashback_balance }) });
+      return res.json({
+        profile: {
+          ...formatProfile(auth.client, { cashback_balance }),
+          loyalty,
+        },
+      });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: error.message || 'Internal server error' });
@@ -245,10 +257,11 @@ class MarketplaceProfile {
       }
 
       let cashback_balance = null;
+      let loyalty = null;
       if (updated?.phone) {
         const { data: linked, error: linkError } = await supabase
           .from('clients')
-          .select('id')
+          .select('id, rank, completed_visits')
           .eq('phone', updated.phone)
           .maybeSingle();
 
@@ -257,9 +270,20 @@ class MarketplaceProfile {
         }
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
+        if (linked?.id) {
+          loyalty = {
+            rank: linked.rank || 'guest',
+            completed_visits: Number(linked.completed_visits || 0),
+          };
+        }
       }
 
-      return res.json({ profile: formatProfile(updated, { cashback_balance }) });
+      return res.json({
+        profile: {
+          ...formatProfile(updated, { cashback_balance }),
+          loyalty,
+        },
+      });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: error.message || 'Internal server error' });

@@ -89,7 +89,25 @@ class Kiosk {
             return res.status(500).json({ error: error?.message || "Failed to load branches" });
         }
 
-        return res.status(200).json({ entry: data });
+        let adsRow = null;
+        const { data: adsData, error: adsError } = await supabase
+            .from('kiosk_ad_settings')
+            .select('regular_urls, kids_urls, updated_at')
+            .eq('id', 1)
+            .maybeSingle();
+
+        if (!adsError && adsData) {
+            adsRow = adsData;
+        }
+
+        return res.status(200).json({
+            entry: data,
+            ads: {
+                regular: adsRow?.regular_urls || [],
+                kids: adsRow?.kids_urls || [],
+                updated_at: adsRow?.updated_at || null,
+            },
+        });
     }
 
     async register(req, res) {

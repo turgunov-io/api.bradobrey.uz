@@ -104,6 +104,15 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - Response: `{ "token": "...", "user": { "id", "login", "role", "branch_id" } }`
 - `branch_id` is optional for admins, but if it exists in `users`, it is included in both JWT `branchId` and response `user.branch_id`
 
+## Kiosk Ads (YouTube)
+
+- Apply SQL: `db/supabase/kiosk_ads.sql`
+- Kiosk config now includes playlists:
+  - `GET /api/kiosk/config` → `{ ..., ads: { regular: string[], kids: string[], updated_at } }`
+- Admin endpoints (use `Authorization: Bearer <token>` from admin login):
+  - `GET /api/kiosk-ads/settings`
+  - `PATCH /api/kiosk-ads/settings` body example: `{ "regular_urls": ["https://youtu.be/..."], "kids_urls": ["https://www.youtube.com/watch?v=..."] }`
+
 ## AI prompt to recreate this project
 
 ```

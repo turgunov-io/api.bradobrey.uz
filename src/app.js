@@ -12,6 +12,8 @@ const barbers = require('./routers/barbers');
 const marketplace = require('./routers/marketplace');
 const statistics = require('./routers/statistics');
 const promoCode = require('./routers/promocode');
+const loyalty = require('./routers/loyalty');
+const kioskAds = require('./routers/kioskAds');
 
 const app = express();
 
@@ -45,6 +47,8 @@ app.use('/api/services', services);
 app.use('/api/history', history);
 app.use('/api/statistics', statistics);
 app.use('/api/promo-code', promoCode);
+app.use('/api/loyalty', loyalty);
+app.use('/api/kiosk-ads', kioskAds);
 
 // Marketplace App
 app.use('/api/marketplace', marketplace);
