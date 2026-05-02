@@ -645,7 +645,7 @@ class Barbers {
                 payment_method,
                 certificate_id,
                 branch_id,
-                client:clients ( id, name, phone, rank, completed_visits )
+                client:clients ( id, name, phone )
             `)
             .eq('barber_id', barberId)
             .in('status', ['waiting', 'called', 'in_progress'])
@@ -665,7 +665,7 @@ class Barbers {
                     service_ids,
                     payment_method,
                     branch_id,
-                    client:clients ( id, name, phone, rank, completed_visits )
+                    client:clients ( id, name, phone )
                 `)
                 .eq('barber_id', barberId)
                 .in('status', ['waiting', 'called', 'in_progress'])
@@ -727,7 +727,7 @@ class Barbers {
                 payment_method,
                 certificate_id,
                 branch_id,
-                client:clients ( id, name, phone, rank, completed_visits )
+                client:clients ( id, name, phone )
             `)
             .eq('id', id)
             .eq('barber_id', barberId)
@@ -745,7 +745,7 @@ class Barbers {
                     service_ids,
                     payment_method,
                     branch_id,
-                    client:clients ( id, name, phone, rank, completed_visits )
+                    client:clients ( id, name, phone )
                 `)
                 .eq('id', id)
                 .eq('barber_id', barberId)
@@ -860,7 +860,7 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name, rank, completed_visits )')
+            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {
@@ -939,7 +939,7 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, swapped_flag, created_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name, rank, completed_visits )')
+            .select('id, status, swapped_flag, created_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {

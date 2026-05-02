@@ -2,6 +2,37 @@ const jwt = require('jsonwebtoken');
 const { supabase } = require('../config/supabase');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 
+const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
+
+const getBearerToken = (req) => {
+    const authHeader = req.headers.authorization || "";
+    return authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+};
+
+const requireAdmin = (req, res) => {
+    const token = getBearerToken(req);
+
+    if (!token) {
+        res.status(401).json({ error: "Authorization token is required" });
+        return null;
+    }
+
+    let payload;
+    try {
+        payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (_err) {
+        res.status(401).json({ error: "Invalid or expired token" });
+        return null;
+    }
+
+    if (!ADMIN_ROLES.has(payload?.role)) {
+        res.status(403).json({ error: "Only admins can view this resource" });
+        return null;
+    }
+
+    return payload;
+};
+
 class History {
     async barber(req, res) {
         const authHeader = req.headers.authorization || "";
@@ -48,7 +79,7 @@ class History {
                 payment_method,
                 certificate_id,
                 branch_id,
-                client:clients ( id, name, phone, rank, completed_visits )
+                client:clients ( id, name, phone )
             `;
 
         const selectWithoutCertificate = `
@@ -60,7 +91,7 @@ class History {
                 service_ids,
                 payment_method,
                 branch_id,
-                client:clients ( id, name, phone, rank, completed_visits )
+                client:clients ( id, name, phone )
             `;
 
         let query = supabase
@@ -101,6 +132,9 @@ class History {
     }
 
     async all(req, res) {
+        const auth = requireAdmin(req, res);
+        if (!auth) return;
+
         const { filter } = req.query;
 
         // all?filter=retention
@@ -160,6 +194,9 @@ class History {
     }
 
     async branch(req, res) {
+        const auth = requireAdmin(req, res);
+        if (!auth) return;
+
         const id = req.query.id;
         if (!id) return res.status(400).json({ error: "Branch ID is required!" });
 
