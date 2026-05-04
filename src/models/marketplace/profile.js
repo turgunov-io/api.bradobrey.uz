@@ -57,6 +57,44 @@ const formatProfile = (row, options = {}) => {
   };
 };
 
+const DEFAULT_RANK_SETTINGS = {
+  id: 1,
+  bronze_min_visits: 2,
+  silver_min_visits: 5,
+  gold_min_visits: 10,
+  updated_at: null,
+};
+
+async function fetchRankSettings() {
+  try {
+    const { data, error } = await supabase
+      .from('client_rank_settings')
+      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
+      .eq('id', 1)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Failed to load client rank settings:', error.message);
+      return null;
+    }
+
+    if (!data) {
+      return DEFAULT_RANK_SETTINGS;
+    }
+
+    return {
+      id: data.id ?? 1,
+      bronze_min_visits: Number(data.bronze_min_visits ?? DEFAULT_RANK_SETTINGS.bronze_min_visits),
+      silver_min_visits: Number(data.silver_min_visits ?? DEFAULT_RANK_SETTINGS.silver_min_visits),
+      gold_min_visits: Number(data.gold_min_visits ?? DEFAULT_RANK_SETTINGS.gold_min_visits),
+      updated_at: data.updated_at ?? null,
+    };
+  } catch (error) {
+    console.error('Failed to load client rank settings:', error);
+    return null;
+  }
+}
+
 class MarketplaceProfile {
   async _auth(req, res) {
     const token = getBearerToken(req);
@@ -113,6 +151,7 @@ class MarketplaceProfile {
       const auth = await this._auth(req, res);
       if (!auth) return;
 
+      const rankSettings = await fetchRankSettings();
       let cashback_balance = null;
       let loyalty = null;
       if (auth.client.phone) {
@@ -139,6 +178,7 @@ class MarketplaceProfile {
         profile: {
           ...formatProfile(auth.client, { cashback_balance }),
           loyalty,
+          loyalty_settings: rankSettings,
         },
       });
     } catch (error) {
@@ -256,6 +296,7 @@ class MarketplaceProfile {
         await this._ensureClientRecordForPhone(nextPhone, updated?.email).catch(() => { });
       }
 
+      const rankSettings = await fetchRankSettings();
       let cashback_balance = null;
       let loyalty = null;
       if (updated?.phone) {
@@ -282,6 +323,7 @@ class MarketplaceProfile {
         profile: {
           ...formatProfile(updated, { cashback_balance }),
           loyalty,
+          loyalty_settings: rankSettings,
         },
       });
     } catch (error) {

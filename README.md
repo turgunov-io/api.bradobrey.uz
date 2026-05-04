@@ -39,6 +39,13 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `POST /api/services` — create service (admin roles)
 - Note: if your DB is missing `service_ids` column in `queue_entries`, apply the SQL in `schema.sql` (or run `ALTER TABLE queue_entries ADD COLUMN service_ids uuid[];`). Code will gracefully fall back to single `service_id` but multi-service sums require the column.
 
+- Marketplace barbershops catalog (barbershop = row in `branches`):
+  - `GET /api/marketplace/barbershops` (`?active=true` optional)
+  - `GET /api/marketplace/barbershops/:id`
+  - `POST /api/marketplace/barbershops`
+  - `PATCH /api/marketplace/barbershops/:id`
+  - `POST /api/marketplace/barbershops/:id/{activate|deactivate}`
+
 ## Notes
 
 - Swap logic on reject: first reject pushes the entry behind the next waiting client and sets `swapped_flag`; second reject marks `rejected`.
