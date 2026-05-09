@@ -30,6 +30,9 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `POST /api/auth/register` — create user (role-driven); for barbers also creates profile
 - `GET /api/auth/me` — current user from JWT
 - `GET /api/barber/queue` — barber’s queue (waiting + called)
+- `GET /api/barbers/me?period=YYYY-MM` — current barber profile with `barber.finance` details for the selected month
+- `GET /api/barbers/queue/:id/reassign-options` — available barbers for queue reassignment, sorted from most available to busiest
+- `PATCH /api/barbers/queue/:id/reassign` — move a queue entry to another barber, or auto-pick the most available barber
 - `POST /api/queue/:id/{call|start|reject|complete|pause}` — status transitions; `complete` auto-calculates amount from service price(s) if not provided
 - `GET /api/monitor/barbers?branch_id=...` — barbers on a branch + queues (client initials)
 - `POST /api/monitor/queue` — enqueue client (`barber_id` optional, auto-picks least busy on shift; `service_id` can be an array, first ID stored as primary, full array saved to `service_ids`)
@@ -54,6 +57,49 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - Barber login requires `branch_id` to pin the session to a branch (updates `users.branch_id` and `barbers.branch_id` for kiosk visibility).
 - Monitor enqueue accepts `service_id` or `service_ids` array; first ID is stored as `service_id`, full list saved in `service_ids`.
 - Payments: if `amount` is omitted on `POST /api/queue/:id/complete`, it is calculated by summing `base_price` of all `service_ids` attached to the entry.
+
+## Daily Queue Auto-Close
+
+The backend starts an internal scheduler with `npm start` / `node src/server.js`. No button click or external request is required. Serverless functions do not keep background timers alive, so use this on the long-running Node/PM2 deployment.
+
+Behavior:
+
+1. Every day at local midnight the scheduler finds open queue entries created before the current day.
+2. Only no-arrival statuses are closed: `waiting`, `called`, and `swapped`.
+3. Matching entries are updated to `status=no_show` and `finished_at=<cleanup time>`.
+4. The scheduler emits Socket.io `queue:update` with `type=queue_auto_closed` for each affected branch.
+5. On server startup it also runs the same cleanup once, so missed midnight cleanup is handled after restart.
+
+Configuration:
+
+- `QUEUE_AUTO_CLOSE_TIMEZONE=Asia/Tashkent` controls midnight timezone. Default is `Asia/Tashkent`.
+- `QUEUE_AUTO_CLOSE_ENABLED=false` disables the scheduler.
+- `QUEUE_AUTO_CLOSE_ON_STARTUP=false` disables startup cleanup but keeps midnight cleanup.
+
+## Barber Profile Finance
+
+`GET /api/barbers/me` returns `barber.finance` for the current month. Use `?period=YYYY-MM` to request another month.
+
+Response fields:
+
+- `total_earned` — total earned amount. Backend uses `finance_snapshots.payload.employees[barberId].profit` when it is set; otherwise it calculates completed queue revenue from service prices or `price_override`.
+- `goal` — target amount from `finance_snapshots.payload.employees[barberId].salary`.
+- `advance` — advance amount from `finance_snapshots.payload.employees[barberId].advances`.
+- `penalty` — penalty amount from `finance_snapshots.payload.employees[barberId].penalty`.
+- `payout` — amount to pay out: calculated commission minus advance and penalty.
+- `commission`, `profit_percent`, and `bonus_profit_percent` are included for transparency.
+
+Apply `db/supabase/finance_snapshots.sql` if the database does not have `finance_snapshots` yet.
+
+## Barber Reassignment API Workflow
+
+1. Fetch candidates: `GET /api/barbers/queue/:id/reassign-options` with `Authorization: Bearer <barber JWT>`.
+2. Backend checks that the queue entry belongs to the current barber and is still reassignable (`waiting`, `called`, or `swapped`).
+3. Response returns `candidates`, sorted by `estimated_waiting_time`, then `current_clients`, then barber name. Current barber is excluded, inactive and off-shift barbers are excluded.
+4. Reassign manually: `PATCH /api/barbers/queue/:id/reassign` with body `{ "barber_id": "<target barber id>" }`.
+5. Reassign automatically: call the same PATCH endpoint with an empty body; backend picks the first candidate, meaning the most available barber.
+6. Backend updates the entry to `status=waiting`, changes `barber_id`, clears `started_at`, sets `swapped_flag=true`, and moves `created_at` after the target barber's last active queue item so the client appears at the end of the selected barber's list.
+7. Backend emits Socket.io `queue:update` with `type=queue_reassigned`, so clients can refresh both the old and new barber queues.
 
 ## User Journey Map (Blocks 1 and 2)
 

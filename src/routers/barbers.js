@@ -16,6 +16,8 @@ router.post('/logout', (req, res) => barbers.logout(req, res));
 router.get("/me", (req, res) => barbers.me(req, res));
 router.patch("/me", upload.single('file'), (req, res) => barbers.updateProfile(req, res));
 router.get("/queue", (req, res) => barbers.myQueue(req, res));
+router.get("/queue/:id/reassign-options", (req, res) => barbers.queueReassignOptions(req, res));
+router.patch("/queue/:id/reassign", (req, res) => barbers.reassignQueue(req, res));
 router.get("/queue/:id", (req, res) => barbers.getQueueById(req, res));
 router.patch("/queue/:id", (req, res) => barbers.updateQueue(req, res));
 

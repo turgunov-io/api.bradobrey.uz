@@ -10,6 +10,8 @@ const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: D
 const callTimers = new Map(); // queueEntryId -> timer
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
 const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber']);
+const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
+const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
 
 const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
@@ -90,6 +92,144 @@ const signUserToken = ({ id, login, role, branch_id = null }) => jwt.sign(
 
 const isBarberWorkspaceRole = (role) => BARBER_WORKSPACE_ROLES.has(role);
 
+const normalizeId = (value) => {
+    const text = String(value || '').trim();
+    return text || null;
+};
+
+const roundFinanceAmount = (value) => {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? Math.round(amount) : 0;
+};
+
+const getCurrentFinancePeriod = () => {
+    const date = new Date();
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}`;
+};
+
+const periodRange = (period) => {
+    const normalized = /^\d{4}-\d{2}$/.test(String(period || ''))
+        ? String(period)
+        : getCurrentFinancePeriod();
+    const [yearText, monthText] = normalized.split('-');
+    const year = Number(yearText);
+    const monthIndex = Number(monthText) - 1;
+
+    return {
+        from: new Date(Date.UTC(year, monthIndex, 1)).toISOString(),
+        period: normalized,
+        to: new Date(Date.UTC(year, monthIndex + 1, 1)).toISOString(),
+    };
+};
+
+const isMissingFinanceSnapshotTable = (error) => {
+    const code = String(error?.code || '').trim();
+    const message = [
+        error?.message,
+        error?.details,
+        error?.hint,
+    ].filter(Boolean).join(' ');
+
+    return code === '42P01'
+        || code === 'PGRST205'
+        || (
+            /finance_snapshots/i.test(message)
+            && /does not exist|not found|schema cache/i.test(message)
+        );
+};
+
+const financeNumber = (value) => {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? Math.max(0, amount) : 0;
+};
+
+const normalizeFinanceDraft = (value) => {
+    const source = value && typeof value === 'object' ? value : {};
+
+    return {
+        advances: financeNumber(source.advances),
+        bonus_profit_percent: financeNumber(source.bonus_profit_percent),
+        penalty: financeNumber(source.penalty),
+        profit: financeNumber(source.profit),
+        profit_percent: financeNumber(source.profit_percent),
+        salary: financeNumber(source.salary),
+    };
+};
+
+const commissionForFinance = ({ goal, profit, profitPercent, bonusProfitPercent }) => {
+    const normalizedProfit = financeNumber(profit);
+    const normalizedGoal = financeNumber(goal);
+    const basePercent = financeNumber(profitPercent);
+    const bonusPercent = bonusProfitPercent > 0 ? financeNumber(bonusProfitPercent) : basePercent;
+    const profitToGoal = normalizedGoal > 0 ? Math.min(normalizedProfit, normalizedGoal) : 0;
+    const profitAboveGoal = Math.max(0, normalizedProfit - profitToGoal);
+
+    return roundFinanceAmount(
+        (profitToGoal * basePercent) / 100
+        + (profitAboveGoal * bonusPercent) / 100
+    );
+};
+
+const getFinanceSnapshotDraft = async ({ branchId, barberId, period }) => {
+    if (!branchId || !barberId) {
+        return normalizeFinanceDraft(null);
+    }
+
+    const { data, error } = await supabase
+        .from('finance_snapshots')
+        .select('payload')
+        .eq('branch_id', branchId)
+        .eq('period', period)
+        .limit(1)
+        .maybeSingle();
+
+    if (error) {
+        if (isMissingFinanceSnapshotTable(error)) {
+            return normalizeFinanceDraft(null);
+        }
+        throw new Error(error.message);
+    }
+
+    const employees = data?.payload?.employees && typeof data.payload.employees === 'object'
+        ? data.payload.employees
+        : {};
+
+    return normalizeFinanceDraft(employees[barberId]);
+};
+
+const authenticateBarberWorkspace = (req, res, forbiddenMessage) => {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+    if (!token) {
+        res.status(401).json({ error: "Authorization token is required" });
+        return null;
+    }
+
+    let payload;
+    try {
+        payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+        res.status(401).json({ error: "Invalid or expired token" });
+        return null;
+    }
+
+    if (!isBarberWorkspaceRole(payload.role)) {
+        res.status(403).json({ error: forbiddenMessage });
+        return null;
+    }
+
+    const barberId = payload.sub || payload.id;
+    if (!barberId) {
+        res.status(401).json({ error: "Invalid token payload" });
+        return null;
+    }
+
+    return { barberId, payload };
+};
+
 const clearCallTimer = (entryId) => {
     const timer = callTimers.get(entryId);
     if (timer) {
@@ -166,6 +306,265 @@ const markNoShow = async (entryId) => {
         .maybeSingle();
     if (error) throw new Error(error.message);
     return data;
+};
+
+const serviceIdsForEntry = (entry) => {
+    const serviceIds = Array.isArray(entry?.service_ids)
+        ? entry.service_ids.filter(Boolean)
+        : [];
+
+    if (serviceIds.length) return serviceIds;
+    return entry?.service_id ? [entry.service_id] : [];
+};
+
+const isMissingPriceOverrideColumn = (error) => {
+    const message = String(error?.message || error?.details || '').trim();
+    return /price_override/i.test(message) && /could not find|does not exist|schema cache/i.test(message);
+};
+
+const completedRevenueQuery = ({ barberId, branchId, from, to, select }) => {
+    let query = supabase
+        .from('queue_entries')
+        .select(select)
+        .eq('barber_id', barberId)
+        .eq('status', 'completed')
+        .gte('finished_at', from)
+        .lt('finished_at', to);
+
+    if (branchId) {
+        query = query.eq('branch_id', branchId);
+    }
+
+    return query;
+};
+
+const getCompletedQueueRevenue = async ({ barberId, branchId, from, to }) => {
+    if (!barberId || !from || !to) return 0;
+
+    let { data: entries, error } = await completedRevenueQuery({
+        barberId,
+        branchId,
+        from,
+        select: 'id, service_id, service_ids, price_override',
+        to,
+    });
+
+    if (error && isMissingPriceOverrideColumn(error)) {
+        ({ data: entries, error } = await completedRevenueQuery({
+            barberId,
+            branchId,
+            from,
+            select: 'id, service_id, service_ids',
+            to,
+        }));
+    }
+
+    if (error) throw new Error(error.message);
+    if (!Array.isArray(entries) || !entries.length) return 0;
+
+    const serviceIds = Array.from(
+        new Set(entries.flatMap(serviceIdsForEntry).filter(Boolean))
+    );
+    let pricesByServiceId = new Map();
+
+    if (serviceIds.length) {
+        const { data: services, error: servicesError } = await supabase
+            .from('services')
+            .select('id, base_price')
+            .in('id', serviceIds);
+
+        if (servicesError) throw new Error(servicesError.message);
+
+        pricesByServiceId = new Map(
+            (services || []).map((service) => [
+                String(service.id),
+                financeNumber(service.base_price),
+            ])
+        );
+    }
+
+    return entries.reduce((sum, entry) => {
+        const overrideAmount = financeNumber(entry?.price_override);
+
+        if (overrideAmount > 0) {
+            return sum + overrideAmount;
+        }
+
+        const servicesTotal = serviceIdsForEntry(entry).reduce((entrySum, serviceId) => {
+            return entrySum + (pricesByServiceId.get(String(serviceId)) || 0);
+        }, 0);
+
+        return sum + servicesTotal;
+    }, 0);
+};
+
+const getBarberProfileFinance = async ({ barberId, branchId, period }) => {
+    const range = periodRange(period);
+    const [draft, completedRevenue] = await Promise.all([
+        getFinanceSnapshotDraft({ branchId, barberId, period: range.period }),
+        getCompletedQueueRevenue({
+            barberId,
+            branchId,
+            from: range.from,
+            to: range.to,
+        }),
+    ]);
+    const totalEarned = draft.profit > 0 ? draft.profit : completedRevenue;
+    const commission = commissionForFinance({
+        bonusProfitPercent: draft.bonus_profit_percent,
+        goal: draft.salary,
+        profit: totalEarned,
+        profitPercent: draft.profit_percent,
+    });
+
+    return {
+        advance: roundFinanceAmount(draft.advances),
+        bonus_profit_percent: draft.bonus_profit_percent,
+        commission,
+        goal: roundFinanceAmount(draft.salary),
+        payout: roundFinanceAmount(commission - draft.advances - draft.penalty),
+        penalty: roundFinanceAmount(draft.penalty),
+        period: range.period,
+        profit_percent: draft.profit_percent,
+        total_earned: roundFinanceAmount(totalEarned),
+    };
+};
+
+const isStaleActiveEntry = (entry, cutoffIso) => {
+    if (!entry?.created_at || !REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) return false;
+
+    const createdAt = new Date(entry.created_at).getTime();
+    const cutoffAt = new Date(cutoffIso).getTime();
+
+    return Number.isFinite(createdAt) && Number.isFinite(cutoffAt) && createdAt < cutoffAt;
+};
+
+const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, excludeEntryId = null, requireOnShift = true }) => {
+    const { data: barbers, error: barbersError } = await supabase
+        .from('barbers')
+        .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active')
+        .eq('branch_id', branchId);
+
+    if (barbersError) throw new Error(barbersError.message);
+
+    const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
+    let allowedBarberIds = new Set();
+
+    if (barberIds.length) {
+        const { data: users, error: usersError } = await supabase
+            .from('users')
+            .select('id, role')
+            .in('id', barberIds)
+            .in('role', Array.from(BARBER_WORKSPACE_ROLES));
+
+        if (usersError) throw new Error(usersError.message);
+        allowedBarberIds = new Set((users || []).map((user) => user.id));
+    }
+
+    const candidates = (barbers || [])
+        .filter((barber) => allowedBarberIds.has(barber.id))
+        .filter((barber) => !excludeBarberId || barber.id !== excludeBarberId)
+        .filter((barber) => barber.is_active !== false && barber.is_authorized !== false)
+        .filter((barber) => !requireOnShift || barber.is_on_shift === true);
+
+    const candidateIds = new Set(candidates.map((barber) => barber.id));
+    const statsByBarber = new Map();
+
+    let queueQuery = supabase
+        .from('queue_entries')
+        .select('id, barber_id, status, service_id, service_ids')
+        .eq('branch_id', branchId)
+        .in('status', ACTIVE_QUEUE_STATUSES);
+
+    if (excludeEntryId) {
+        queueQuery = queueQuery.neq('id', excludeEntryId);
+    }
+
+    const { data: queues, error: queuesError } = await queueQuery;
+    if (queuesError) throw new Error(queuesError.message);
+
+    const allServiceIds = Array.from(
+        new Set((queues || []).flatMap(serviceIdsForEntry).filter(Boolean))
+    );
+
+    let durationByServiceId = new Map();
+    if (allServiceIds.length) {
+        const { data: services, error: servicesError } = await supabase
+            .from('services')
+            .select('id, duration_minutes')
+            .in('id', allServiceIds);
+
+        if (servicesError) throw new Error(servicesError.message);
+
+        durationByServiceId = new Map(
+            (services || []).map((service) => [
+                String(service.id),
+                Number(service.duration_minutes || 0),
+            ])
+        );
+    }
+
+    for (const entry of queues || []) {
+        const barberId = entry?.barber_id;
+        if (!candidateIds.has(barberId)) continue;
+
+        const currentStats = statsByBarber.get(barberId) || {
+            current_clients: 0,
+            estimated_waiting_time: 0,
+        };
+
+        currentStats.current_clients += 1;
+        currentStats.estimated_waiting_time += serviceIdsForEntry(entry).reduce((sum, serviceId) => {
+            return sum + (durationByServiceId.get(String(serviceId)) || 0);
+        }, 0);
+
+        statsByBarber.set(barberId, currentStats);
+    }
+
+    return candidates
+        .map((barber) => {
+            const stats = statsByBarber.get(barber.id) || {
+                current_clients: 0,
+                estimated_waiting_time: 0,
+            };
+
+            return {
+                id: barber.id,
+                name: barber.name,
+                photo: barber.photo_url || null,
+                branch_id: barber.branch_id,
+                is_active: barber.is_active ?? null,
+                is_on_shift: barber.is_on_shift ?? null,
+                current_clients: stats.current_clients,
+                estimated_waiting_time: stats.estimated_waiting_time,
+            };
+        })
+        .sort((left, right) => (
+            left.estimated_waiting_time - right.estimated_waiting_time
+            || left.current_clients - right.current_clients
+            || String(left.name || '').localeCompare(String(right.name || ''), 'ru')
+        ));
+};
+
+const getQueueTailCreatedAt = async ({ branchId, barberId }) => {
+    const { data: tailEntry, error } = await supabase
+        .from('queue_entries')
+        .select('id, created_at')
+        .eq('branch_id', branchId)
+        .eq('barber_id', barberId)
+        .in('status', ACTIVE_QUEUE_STATUSES)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (error) throw new Error(error.message);
+
+    const tailTime = tailEntry?.created_at ? new Date(tailEntry.created_at).getTime() : NaN;
+    const nextTime = Number.isFinite(tailTime)
+        ? Math.max(Date.now(), tailTime + 1)
+        : Date.now();
+
+    return new Date(nextTime).toISOString();
 };
 
 const scheduleCallFollowUp = (entry, io) => {
@@ -579,6 +978,10 @@ class Barbers {
             if (barberError) {
                 return res.status(500).json({ error: barberError.message });
             }
+            if (!barberData) {
+                return res.status(404).json({ error: 'Barber profile not found' });
+            }
+
             const io = req.app.get('io');
             const breakInfo = breakTimers.get(user.id);
             // auto-finish break if timer elapsed (for safety)
@@ -593,10 +996,17 @@ class Barbers {
                 }
             }
             const updatedBreak = breakTimers.get(user.id);
+            const finance = await getBarberProfileFinance({
+                barberId: user.id,
+                branchId: barberData.branch_id || user.branch_id,
+                period: req.query?.period,
+            });
+
             barber = {
                 ...barberData,
                 break_started_at: updatedBreak?.startedAt ? updatedBreak.startedAt.toISOString() : null,
                 break_until: updatedBreak?.until ? updatedBreak.until.toISOString() : null,
+                finance,
             };
         }
 
@@ -883,6 +1293,165 @@ class Barbers {
         }
 
         return res.json({ entry: updated, cashback });
+    }
+
+    async queueReassignOptions(req, res) {
+        const { id } = req.params || {};
+        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can view queue reassign options');
+
+        if (!auth) return;
+        if (!id) {
+            return res.status(400).json({ error: 'Queue entry id is required' });
+        }
+
+        const { data: entry, error: entryError } = await supabase
+            .from('queue_entries')
+            .select('id, barber_id, status, branch_id, created_at')
+            .eq('id', id)
+            .eq('barber_id', auth.barberId)
+            .maybeSingle();
+
+        if (entryError) {
+            return res.status(500).json({ error: entryError.message });
+        }
+        if (!entry) {
+            return res.status(404).json({ error: 'Queue entry not found' });
+        }
+        if (!REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) {
+            return res.status(400).json({ error: 'Only waiting or called queue entries can be reassigned' });
+        }
+
+        try {
+            const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
+            if (isStaleActiveEntry(entry, cutoffIso)) {
+                await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
+                return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
+            }
+
+            await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
+
+            const candidates = await getBranchBarberAvailability({
+                branchId: entry.branch_id,
+                excludeBarberId: auth.barberId,
+                excludeEntryId: id,
+                requireOnShift: true,
+            });
+
+            return res.json({
+                candidates,
+                recommended_barber_id: candidates[0]?.id || null,
+            });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+    }
+
+    async reassignQueue(req, res) {
+        const { id } = req.params || {};
+        const targetBarberId = normalizeId(req.body?.barber_id);
+        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can reassign queue entries');
+
+        if (!auth) return;
+        if (!id) {
+            return res.status(400).json({ error: 'Queue entry id is required' });
+        }
+
+        const { data: entry, error: entryError } = await supabase
+            .from('queue_entries')
+            .select('id, barber_id, status, branch_id, created_at')
+            .eq('id', id)
+            .eq('barber_id', auth.barberId)
+            .maybeSingle();
+
+        if (entryError) {
+            return res.status(500).json({ error: entryError.message });
+        }
+        if (!entry) {
+            return res.status(404).json({ error: 'Queue entry not found' });
+        }
+        if (!REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) {
+            return res.status(400).json({ error: 'Only waiting or called queue entries can be reassigned' });
+        }
+        if (targetBarberId && targetBarberId === auth.barberId) {
+            return res.status(400).json({ error: 'Queue entry already belongs to this barber' });
+        }
+
+        try {
+            const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
+            if (isStaleActiveEntry(entry, cutoffIso)) {
+                await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
+                return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
+            }
+
+            await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
+
+            const candidates = await getBranchBarberAvailability({
+                branchId: entry.branch_id,
+                excludeBarberId: auth.barberId,
+                excludeEntryId: id,
+                requireOnShift: true,
+            });
+
+            const selectedBarber = targetBarberId
+                ? candidates.find((candidate) => candidate.id === targetBarberId)
+                : candidates[0];
+
+            if (!selectedBarber) {
+                return res.status(400).json({
+                    error: targetBarberId
+                        ? 'Selected barber is not available for reassignment'
+                        : 'No available barber found for reassignment',
+                    candidates,
+                });
+            }
+
+            const nextCreatedAt = await getQueueTailCreatedAt({
+                branchId: entry.branch_id,
+                barberId: selectedBarber.id,
+            });
+
+            const { data: updated, error: updateError } = await supabase
+                .from('queue_entries')
+                .update({
+                    barber_id: selectedBarber.id,
+                    created_at: nextCreatedAt,
+                    started_at: null,
+                    status: 'waiting',
+                    swapped_flag: true,
+                })
+                .eq('id', id)
+                .eq('barber_id', auth.barberId)
+                .in('status', REASSIGNABLE_QUEUE_STATUSES)
+                .select('id, status, swapped_flag, created_at, started_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
+                .maybeSingle();
+
+            if (updateError) {
+                return res.status(500).json({ error: updateError.message });
+            }
+            if (!updated) {
+                return res.status(404).json({ error: 'Queue entry not found' });
+            }
+
+            clearCallTimer(id);
+
+            const io = req.app.get('io');
+            if (io) {
+                io.to(`branch:${entry.branch_id}`).emit('queue:update', {
+                    type: 'queue_reassigned',
+                    entryId: updated.id,
+                    branchId: entry.branch_id,
+                    fromBarberId: auth.barberId,
+                    barberId: selectedBarber.id,
+                });
+            }
+
+            return res.json({
+                entry: updated,
+                target_barber: selectedBarber,
+            });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
     }
 
     async callNext(req, res) {
