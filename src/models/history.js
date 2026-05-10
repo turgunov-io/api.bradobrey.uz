@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 const { supabase } = require('../config/supabase');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
+const BARBER_HISTORY_ROLES = new Set(['barber', 'super-barber']);
 const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
 
 const toAmount = (value) => {
@@ -99,7 +99,7 @@ const getBearerToken = (req) => {
     return authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 };
 
-const requireAdmin = (req, res) => {
+const requireBarberHistoryAccess = (req, res) => {
     const token = getBearerToken(req);
 
     if (!token) {
@@ -115,8 +115,8 @@ const requireAdmin = (req, res) => {
         return null;
     }
 
-    if (!ADMIN_ROLES.has(payload?.role)) {
-        res.status(403).json({ error: "Only admins can view this resource" });
+    if (!BARBER_HISTORY_ROLES.has(payload?.role)) {
+        res.status(403).json({ error: "Only barbers can view history" });
         return null;
     }
 
@@ -125,23 +125,8 @@ const requireAdmin = (req, res) => {
 
 class History {
     async barber(req, res) {
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (payload.role !== 'barber') {
-            return res.status(403).json({ error: 'Only barbers can view history' });
-        }
+        const payload = requireBarberHistoryAccess(req, res);
+        if (!payload) return;
 
         const barberId = payload.sub || payload.id;
 
@@ -233,16 +218,14 @@ class History {
     }
 
     async all(req, res) {
-        const auth = requireAdmin(req, res);
-        if (!auth) return;
-
         const { filter } = req.query;
+        const branchId = req.query.branch_id || req.query.branchId || req.query.id;
 
         // all?filter=retention
         // all?filter=loyal
         // all?filter=all
 
-        const { data, error, count } = await supabase
+        let query = supabase
             .from('queue_entries')
             .select(`
             id,
@@ -260,6 +243,12 @@ class History {
         `, { count: 'exact' })
             .order('finished_at', { ascending: false })
             .limit(100);
+
+        if (branchId) {
+            query = query.eq('branch_id', branchId);
+        }
+
+        const { data, error, count } = await query;
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -302,9 +291,6 @@ class History {
     }
 
     async branch(req, res) {
-        const auth = requireAdmin(req, res);
-        if (!auth) return;
-
         const id = req.query.id;
         if (!id) return res.status(400).json({ error: "Branch ID is required!" });
 
