@@ -31,6 +31,9 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `GET /api/auth/me` — current user from JWT
 - `GET /api/barber/queue` — barber’s queue (waiting + called)
 - `GET /api/barbers/me?period=YYYY-MM` — current barber profile with `barber.finance` details for the selected month
+- `GET /api/verifix/events` — barber activity log with lateness fields
+- `POST /api/verifix/events` — record kiosk activity (`login`, `logout`, `shift_start`, `shift_end`, `break_start`, `break_end`)
+- `GET|POST|PATCH|DELETE /api/verifix/schedules` — planned work schedules for branches or individual barbers
 - `GET /api/barbers/queue/:id/reassign-options` — available barbers for queue reassignment, sorted from most available to busiest
 - `PATCH /api/barbers/queue/:id/reassign` — move a queue entry to another barber, or auto-pick the most available barber
 - `POST /api/queue/:id/{call|start|reject|complete|pause}` — status transitions; `complete` auto-calculates amount from service price(s) if not provided
@@ -75,6 +78,44 @@ Configuration:
 - `QUEUE_AUTO_CLOSE_TIMEZONE=Asia/Tashkent` controls midnight timezone. Default is `Asia/Tashkent`.
 - `QUEUE_AUTO_CLOSE_ENABLED=false` disables the scheduler.
 - `QUEUE_AUTO_CLOSE_ON_STARTUP=false` disables startup cleanup but keeps midnight cleanup.
+
+## Verifix Activity And Lateness
+
+Apply `db/supabase/verifix.sql` before using Verifix.
+
+Schedules:
+
+- `POST /api/verifix/schedules` creates a planned start time.
+- Body for a branch default schedule:
+  `{ "branch_id": "...", "day_of_week": 1, "start_time": "09:00", "end_time": "20:00", "grace_minutes": 5 }`
+- Body for an individual barber schedule:
+  `{ "branch_id": "...", "barber_id": "...", "day_of_week": 1, "start_time": "10:00", "grace_minutes": 0 }`
+- `day_of_week` uses `0=Sunday`, `1=Monday`, ..., `6=Saturday`.
+- If a barber has a personal schedule for the day, it is used first. Otherwise the branch schedule (`barber_id=null`) is used.
+
+Events:
+
+- `POST /api/verifix/events` records an event from the barber kiosk or dashboard.
+- Barber JWT records only its own events. Admin JWT can pass `barber_id`.
+- Supported `event_type`: `login`, `logout`, `shift_start`, `shift_end`, `break_start`, `break_end`, `manual_adjustment`.
+- For `login` and `shift_start`, backend compares `occurred_at` with the planned `start_time + grace_minutes`.
+- Response stores `is_late`, `late_by_minutes`, `schedule_id`, and `scheduled_start_at`.
+- Existing barber actions also create Verifix logs: `POST /api/barbers/login` logs `login`, `POST /api/barbers/logout` logs `logout`, break endpoints log `break_start` and `break_end`.
+
+Examples:
+
+```http
+POST /api/verifix/events
+Authorization: Bearer <barber JWT>
+Content-Type: application/json
+
+{ "event_type": "shift_start", "occurred_at": "2026-05-10T04:10:00.000Z" }
+```
+
+```http
+GET /api/verifix/events?branch_id=<branch_id>&start_date=2026-05-10&end_date=2026-05-10&late_only=true
+Authorization: Bearer <admin JWT>
+```
 
 ## Barber Profile Finance
 

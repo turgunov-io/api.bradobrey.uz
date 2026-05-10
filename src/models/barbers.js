@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
 const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback");
+const { recordActivityEvent } = require("./verifix");
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -616,6 +617,23 @@ const emitCallEvent = (io, entry) => {
     });
 };
 
+const logVerifixEvent = async ({ actorId, actorRole, barberId, branchId, eventType, io, metadata, source = 'barber_kiosk' }) => {
+    try {
+        await recordActivityEvent({
+            actorId,
+            actorRole,
+            barberId,
+            branchId,
+            eventType,
+            io,
+            metadata,
+            source,
+        });
+    } catch (error) {
+        console.error(`verifix ${eventType} log failed:`, error.message);
+    }
+};
+
 process.on('SIGTERM', cleanupShiftTimers);
 process.on('SIGINT', cleanupShiftTimers);
 
@@ -668,6 +686,15 @@ class Barbers {
             const io = req.app.get('io');
             try {
                 await endBreak(barberId, barber.branch_id, io);
+                await logVerifixEvent({
+                    actorId: barberId,
+                    actorRole: payload.role,
+                    barberId,
+                    branchId: barber.branch_id,
+                    eventType: 'break_end',
+                    io,
+                    metadata: { ended_early: true },
+                });
             } catch (e) {
                 return res.status(500).json({ error: e.message });
             }
@@ -691,6 +718,14 @@ class Barbers {
             breakTimers.delete(barberId);
             try {
                 await endBreak(barberId, barber.branch_id, io);
+                await logVerifixEvent({
+                    barberId,
+                    branchId: barber.branch_id,
+                    eventType: 'break_end',
+                    io,
+                    metadata: { auto_return: true },
+                    source: 'system',
+                });
             } catch (e) {
                 console.error(e.message);
             }
@@ -705,6 +740,16 @@ class Barbers {
                 is_active: false,
             });
         }
+
+        await logVerifixEvent({
+            actorId: barberId,
+            actorRole: payload.role,
+            barberId,
+            branchId: barber.branch_id,
+            eventType: 'break_start',
+            io,
+            metadata: { minutes },
+        });
 
         return res.json({ status: 'ok', until: untilTs.toISOString() });
     }
@@ -766,6 +811,16 @@ class Barbers {
             });
         }
 
+        await logVerifixEvent({
+            actorId: barberId,
+            actorRole: payload.role,
+            barberId,
+            branchId: barber.branch_id,
+            eventType: 'break_end',
+            io,
+            metadata: { manual_return: true },
+        });
+
         return res.json({ status: 'ok' });
     }
 
@@ -815,6 +870,16 @@ class Barbers {
             id: barberData.id,
             login: barberData.login,
             role: barberData.role,
+        });
+
+        await logVerifixEvent({
+            actorId: barberData.id,
+            actorRole: barberData.role,
+            barberId: barberData.id,
+            branchId: branch_id,
+            eventType: 'login',
+            io: req.app.get('io'),
+            metadata: { login: barberData.login },
         });
 
         return res.json({
@@ -1848,6 +1913,16 @@ class Barbers {
 
             if (updateError) {
                 return res.status(500).json({ error: updateError.message });
+            }
+
+            if (updated) {
+                await logVerifixEvent({
+                    barberId: updated.id,
+                    branchId: updated.branch_id,
+                    eventType: 'logout',
+                    io: req.app.get('io'),
+                    metadata: { is_on_shift },
+                });
             }
 
             return res.json({ barber: updated });

@@ -14,6 +14,7 @@ const statistics = require('./routers/statistics');
 const promoCode = require('./routers/promocode');
 const loyalty = require('./routers/loyalty');
 const kioskAds = require('./routers/kioskAds');
+const verifix = require('./routers/verifix');
 
 const app = express();
 
@@ -49,6 +50,7 @@ app.use('/api/statistics', statistics);
 app.use('/api/promo-code', promoCode);
 app.use('/api/loyalty', loyalty);
 app.use('/api/kiosk-ads', kioskAds);
+app.use('/api/verifix', verifix);
 
 // Marketplace App
 app.use('/api/marketplace', marketplace);
