@@ -3,6 +3,96 @@ const { supabase } = require('../config/supabase');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
+const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
+
+const toAmount = (value) => {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? amount : 0;
+};
+
+const serviceIdsForEntry = (entry) => {
+    const serviceIds = Array.isArray(entry?.service_ids)
+        ? entry.service_ids.filter(Boolean)
+        : [];
+
+    if (serviceIds.length) return serviceIds;
+    return entry?.service_id ? [entry.service_id] : [];
+};
+
+const hasExplicitTimezone = (value) => /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+
+const normalizeTimestampAsUtc = (value) => {
+    if (!value || typeof value !== 'string') return value ?? null;
+
+    const normalized = value.trim().replace(' ', 'T');
+    const valueWithTimezone = hasExplicitTimezone(normalized)
+        ? normalized
+        : `${normalized}Z`;
+    const date = new Date(valueWithTimezone);
+
+    return Number.isNaN(date.getTime()) ? value : date.toISOString();
+};
+
+const normalizeQueueEntryTimestamps = (entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+
+    return QUEUE_TIMESTAMP_KEYS.reduce((normalized, key) => {
+        if (key in normalized) {
+            normalized[key] = normalizeTimestampAsUtc(normalized[key]);
+        }
+        return normalized;
+    }, { ...entry });
+};
+
+const normalizeQueueEntriesTimestamps = (entries) => (
+    Array.isArray(entries) ? entries.map(normalizeQueueEntryTimestamps) : []
+);
+
+const enrichQueueEntriesWithAmounts = async (entries) => {
+    const items = Array.isArray(entries) ? entries : [];
+    if (!items.length) return items;
+
+    const serviceIds = Array.from(
+        new Set(items.flatMap(serviceIdsForEntry).filter(Boolean))
+    );
+
+    let priceByServiceId = new Map();
+
+    if (serviceIds.length) {
+        const { data, error } = await supabase
+            .from('services')
+            .select('id, base_price')
+            .in('id', serviceIds);
+
+        if (error) throw new Error(error.message);
+
+        priceByServiceId = new Map(
+            (data || []).map((service) => [
+                String(service.id),
+                toAmount(service.base_price),
+            ])
+        );
+    }
+
+    return items.map((entry) => {
+        const originalAmount = serviceIdsForEntry(entry).reduce((sum, serviceId) => {
+            return sum + (priceByServiceId.get(String(serviceId)) || 0);
+        }, 0);
+        const overrideAmount = toAmount(entry?.price_override);
+        const hasOverride = overrideAmount > 0;
+
+        return {
+            ...entry,
+            amount: hasOverride ? overrideAmount : originalAmount,
+            amount_source: hasOverride ? 'price_override' : 'services',
+            original_amount: originalAmount,
+        };
+    });
+};
+
+const prepareHistoryEntries = async (entries) => (
+    enrichQueueEntriesWithAmounts(normalizeQueueEntriesTimestamps(entries || []))
+);
 
 const getBearerToken = (req) => {
     const authHeader = req.headers.authorization || "";
@@ -78,6 +168,8 @@ class History {
                 service_ids,
                 payment_method,
                 certificate_id,
+                price_override,
+                price_override_reason,
                 branch_id,
                 client:clients ( id, name, phone )
             `;
@@ -90,6 +182,8 @@ class History {
                 service_id,
                 service_ids,
                 payment_method,
+                price_override,
+                price_override_reason,
                 branch_id,
                 client:clients ( id, name, phone )
             `;
@@ -120,7 +214,14 @@ class History {
             return res.status(500).json({ error: error.message });
         }
 
-        const enriched = await enrichQueueEntriesWithBenefits(data || []);
+        let itemsWithAmounts;
+        try {
+            itemsWithAmounts = await prepareHistoryEntries(data || []);
+        } catch (amountError) {
+            return res.status(500).json({ error: amountError.message });
+        }
+
+        const enriched = await enrichQueueEntriesWithBenefits(itemsWithAmounts);
 
         return res.json({
             items: enriched,
@@ -151,6 +252,8 @@ class History {
             service_id,
             service_ids,
             payment_method,
+            price_override,
+            price_override_reason,
             branch_id,
             client:clients ( id, name, phone, rank, completed_visits ),
             barber:barbers ( id, name )
@@ -162,7 +265,12 @@ class History {
             return res.status(500).json({ error: error.message });
         }
 
-        const items = data || [];
+        let items;
+        try {
+            items = await prepareHistoryEntries(data || []);
+        } catch (amountError) {
+            return res.status(500).json({ error: amountError.message });
+        }
 
         const visits = {};
 
@@ -210,6 +318,8 @@ class History {
                 service_id,
                 service_ids,
                 payment_method,
+                price_override,
+                price_override_reason,
                 branch_id,
                 client:clients ( id, name, phone, rank, completed_visits )
             `)
@@ -219,7 +329,11 @@ class History {
             return res.status(500).json({ error: error.message });
         }
 
-        return res.json({ data: data })
+        try {
+            return res.json({ data: await prepareHistoryEntries(data || []) })
+        } catch (amountError) {
+            return res.status(500).json({ error: amountError.message });
+        }
     }
 }
 

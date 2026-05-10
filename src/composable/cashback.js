@@ -39,6 +39,11 @@ async function getServicesTotal(serviceIds) {
   return roundMoney(total);
 }
 
+const getOverrideTotal = (entry) => {
+  const amount = Number(entry?.price_override);
+  return Number.isFinite(amount) && amount > 0 ? roundMoney(amount) : null;
+};
+
 async function getPromoForOrder(orderId) {
   if (!orderId) return null;
 
@@ -364,7 +369,7 @@ async function computeCashbackTotalsForQueueEntry(entry) {
   }
 
   const serviceIds = getServiceIdsFromEntry(entry);
-  const total = await getServicesTotal(serviceIds);
+  const total = getOverrideTotal(entry) ?? await getServicesTotal(serviceIds);
   const promo = await getPromoForOrder(entry.id);
   const discountedTotal = applyPromoDiscount(total, promo);
 

@@ -1335,7 +1335,7 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
+            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, price_override, price_override_reason, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {
@@ -1806,7 +1806,7 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id')
+            .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id, price_override, price_override_reason')
             .maybeSingle();
 
         if (updateError) {

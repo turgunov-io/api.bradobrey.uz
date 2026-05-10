@@ -7,12 +7,15 @@ create table if not exists queue_entries (
   service_ids uuid[],
   source text check (source in ('point', 'site', 'admin')),
   status text check (status in ('waiting', 'called', 'swapped', 'rejected', 'in_progress', 'completed', 'cancelled', 'no_show', 'not_in_time')) default 'waiting',
-  created_at timestamp default now(),
-  started_at timestamp,
-  finished_at timestamp,
+  created_at timestamptz not null default now(),
+  started_at timestamptz,
+  finished_at timestamptz,
   swapped_flag boolean default false,
   payment_method text check (payment_method in ('cash', 'card', 'certificate')),
-  certificate_id uuid
+  certificate_id uuid,
+  price_override numeric(12,2) check (price_override is null or price_override >= 0),
+  price_override_reason text,
+  updated_at timestamptz not null default now()
 );
 
 create index if not exists idx_queue_entries_barber_status on queue_entries (barber_id, status, created_at);
