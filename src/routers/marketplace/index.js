@@ -4,9 +4,11 @@ const authRouter = require('./auth');
 const clientsRouter = require('./clients');
 const profileRouter = require('./profile');
 const barbershopsRouter = require('./barbershops');
+const catalogRouter = require('./catalog');
 
 const marketplaceRouter = express.Router();
 
+marketplaceRouter.use('/catalog', catalogRouter);
 marketplaceRouter.use('/auth', authRouter);
 marketplaceRouter.use('/clients', clientsRouter);
 marketplaceRouter.use('/profile', profileRouter);

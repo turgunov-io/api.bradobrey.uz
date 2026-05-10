@@ -1,11 +1,27 @@
 const { supabase } = require("../config/supabase");
 
+const isMissingColumnError = (error, column) => {
+  const message = String(error?.message || error?.details || "").toLowerCase();
+  return Boolean(error) && message.includes(column.toLowerCase()) && (
+    message.includes("does not exist") ||
+    message.includes("could not find") ||
+    message.includes("schema cache")
+  );
+};
+
 class Certificate {
   async active(req, res) {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("certificates")
-      .select("id, code, service_ids, expires_at, is_used, metadata")
+      .select("id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id")
       .order("code", { ascending: true });
+
+    if (isMissingColumnError(error, "marketplace_barbershop_id")) {
+      ({ data, error } = await supabase
+        .from("certificates")
+        .select("id, code, service_ids, expires_at, is_used, metadata")
+        .order("code", { ascending: true }));
+    }
 
     if (error) {
       return res.status(500).json({ error: error.message });
@@ -33,7 +49,7 @@ class Certificate {
   }
 
   async create(req, res) {
-    const { code, service_ids, expires_at, metadata } = req.body || {};
+    const { code, service_ids, expires_at, metadata, marketplace_barbershop_id } = req.body || {};
 
     if (!code || typeof code !== "string") {
       return res.status(400).json({ error: "code is required" });
@@ -67,16 +83,28 @@ class Certificate {
       return res.status(409).json({ error: "Certificate code already exists" });
     }
 
-    const { data: inserted, error: insertError } = await supabase
+    const payload = {
+      code,
+      service_ids,
+      expires_at: expiresAtIso,
+      metadata: metadata || null,
+      marketplace_barbershop_id: marketplace_barbershop_id || null,
+    };
+
+    let { data: inserted, error: insertError } = await supabase
       .from("certificates")
-      .insert({
-        code,
-        service_ids,
-        expires_at: expiresAtIso,
-        metadata: metadata || null,
-      })
-      .select("id, code, service_ids, expires_at, is_used, metadata")
+      .insert(payload)
+      .select("id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id")
       .maybeSingle();
+
+    if (isMissingColumnError(insertError, "marketplace_barbershop_id")) {
+      delete payload.marketplace_barbershop_id;
+      ({ data: inserted, error: insertError } = await supabase
+        .from("certificates")
+        .insert(payload)
+        .select("id, code, service_ids, expires_at, is_used, metadata")
+        .maybeSingle());
+    }
 
     if (insertError) {
       return res.status(500).json({ error: insertError.message });

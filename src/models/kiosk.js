@@ -44,6 +44,60 @@ const verifyJwt = (token) => {
     return jwt.verify(token, jwtSecret);
 };
 
+const isMissingColumnError = (error, column) => {
+    const message = String(error?.message || error?.details || '').toLowerCase();
+    return Boolean(error) && message.includes(column.toLowerCase()) && (
+        message.includes('does not exist') ||
+        message.includes('could not find') ||
+        message.includes('schema cache')
+    );
+};
+
+const fetchBranchForBooking = async (branchId) => {
+    let { data, error } = await supabase
+        .from('branches')
+        .select('id, marketplace_barbershop_id')
+        .eq('id', branchId)
+        .maybeSingle();
+
+    if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+        ({ data, error } = await supabase
+            .from('branches')
+            .select('id')
+            .eq('id', branchId)
+            .maybeSingle());
+
+        if (data) data.marketplace_barbershop_id = null;
+    }
+
+    return { data, error };
+};
+
+const fetchCertificateForBooking = async (code) => {
+    let { data, error } = await supabase
+        .from('certificates')
+        .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
+        .eq('code', code)
+        .maybeSingle();
+
+    if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+        ({ data, error } = await supabase
+            .from('certificates')
+            .select('id, code, expires_at, is_used, metadata, service_ids')
+            .eq('code', code)
+            .maybeSingle());
+
+        if (data) data.marketplace_barbershop_id = null;
+    }
+
+    return { data, error };
+};
+
+const isScopedToDifferentBarbershop = (benefit, branch) => (
+    Boolean(benefit?.marketplace_barbershop_id) &&
+    benefit.marketplace_barbershop_id !== branch?.marketplace_barbershop_id
+);
+
 const groupServicesByCategory = (services = []) => {
     const categories = new Map();
 
@@ -357,6 +411,7 @@ class Kiosk {
             promo_code = null,
             use_cashback = false,
         } = req.body || {};
+        const effectivePaymentMethod = payment_method || (certificate_code ? 'certificate' : null);
 
         if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids)) || !customer_name || !phone_number) {
             return res.status(400).json({ error: "branch_id, barber_id, service_id/service_ids, customer_name, and phone_number are required" });
@@ -388,7 +443,7 @@ class Kiosk {
                 return res.status(400).json({ error: 'Cashback can only be used for marketplace orders (source=site)' });
             }
 
-            if (payment_method === 'certificate' || certificate_code) {
+            if (effectivePaymentMethod === 'certificate' || certificate_code) {
                 return res.status(400).json({ error: 'Cashback cannot be used with certificate payment' });
             }
 
@@ -445,11 +500,7 @@ class Kiosk {
             marketplaceClient = mpClient;
         }
 
-        const { data: branch, error: branchError } = await supabase
-            .from('branches')
-            .select('id')
-            .eq('id', branch_id)
-            .maybeSingle();
+        const { data: branch, error: branchError } = await fetchBranchForBooking(branch_id);
         if (branchError) return res.status(500).json({ error: branchError.message });
         if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
@@ -496,7 +547,7 @@ class Kiosk {
 
         const normalizedPromoCode = promo_code ? String(promo_code).trim().toUpperCase() : null;
 
-        if (payment_method === 'certificate' && normalizedPromoCode) {
+        if (effectivePaymentMethod === 'certificate' && normalizedPromoCode) {
             return res.status(400).json({ error: 'Promo code cannot be used with certificate payment_method' });
         }
 
@@ -528,24 +579,27 @@ class Kiosk {
                 }
             }
 
+            if (isScopedToDifferentBarbershop(promoData, branch)) {
+                return res.status(400).json({ error: 'Promo code is not available for selected barbershop' });
+            }
+
             promo = promoData;
         }
 
         let certificate = null;
-        if (payment_method === 'certificate') {
+        if (effectivePaymentMethod === 'certificate') {
             if (!certificate_code) {
                 return res.status(400).json({ error: 'certificate_code is required when payment_method is certificate' });
             }
-            const { data: cert, error: certError } = await supabase
-                .from('certificates')
-                .select('id, code, expires_at, is_used, metadata, service_ids')
-                .eq('code', certificate_code)
-                .maybeSingle();
+            const { data: cert, error: certError } = await fetchCertificateForBooking(certificate_code);
             if (certError) return res.status(500).json({ error: certError.message });
             if (!cert) return res.status(404).json({ error: 'Certificate not found' });
             if (cert.is_used) return res.status(400).json({ error: 'Certificate is already used' });
             if (cert.expires_at && new Date(cert.expires_at) < new Date()) {
                 return res.status(400).json({ error: 'Your certificate is expired' });
+            }
+            if (isScopedToDifferentBarbershop(cert, branch)) {
+                return res.status(400).json({ error: 'Certificate is not available for selected barbershop' });
             }
 
             // If certificate has service limits, keep only allowed services
@@ -601,7 +655,7 @@ class Kiosk {
             service_ids: serviceIds,
             source: normalizedSource,
             status: 'waiting',
-            payment_method,
+            payment_method: effectivePaymentMethod,
             certificate_id: certificate ? certificate.id : null,
         };
 
@@ -634,7 +688,7 @@ class Kiosk {
         }
 
         let cashback = null;
-        let payableTotal = discountedTotal;
+        let payableTotal = certificate ? 0 : discountedTotal;
         if (useCashback) {
             const walletBalance = await getWalletBalance(clientId);
             const maxSpend = roundMoney(Math.min(walletBalance, discountedTotal));

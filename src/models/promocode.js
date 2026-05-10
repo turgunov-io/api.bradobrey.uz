@@ -2,6 +2,13 @@ const { supabase } = require('../config/supabase');
 
 const normalizeCode = (code = '') => String(code).trim().toUpperCase();
 
+const normalizeId = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const text = String(value).trim();
+  return text || null;
+};
+
 const formatDiscount = (promo) => {
   if (!promo) return '';
   const value = Number(promo.discount_value);
@@ -21,6 +28,15 @@ const calcDiscountedTotal = (total, promo) => {
     discounted = numTotal - value;
   }
   return Math.max(0, Number(discounted.toFixed(2)));
+};
+
+const isMissingColumnError = (error, column) => {
+  const message = String(error?.message || error?.details || '').toLowerCase();
+  return Boolean(error) && message.includes(column.toLowerCase()) && (
+    message.includes('does not exist') ||
+    message.includes('could not find') ||
+    message.includes('schema cache')
+  );
 };
 
 const normalizeDiscountType = (value) => {
@@ -175,11 +191,20 @@ class PromoCodes {
       used_count: 0,
     };
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('promo_codes')
       .insert(payload)
       .select()
       .maybeSingle();
+
+    if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+      delete payload.marketplace_barbershop_id;
+      ({ data, error } = await supabase
+        .from('promo_codes')
+        .insert(payload)
+        .select()
+        .maybeSingle());
+    }
 
     if (error) return res.status(500).json({ error: error.message });
 
@@ -202,12 +227,24 @@ class PromoCodes {
       return res.status(400).json({ error: parsed.error });
     }
 
-    const { data, error } = await supabase
+    let updatePayload = parsed.data;
+    let { data, error } = await supabase
       .from('promo_codes')
-      .update(parsed.data)
+      .update(updatePayload)
       .eq('id', promo.data.id)
       .select()
       .maybeSingle();
+
+    if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+      updatePayload = { ...parsed.data };
+      delete updatePayload.marketplace_barbershop_id;
+      ({ data, error } = await supabase
+        .from('promo_codes')
+        .update(updatePayload)
+        .eq('id', promo.data.id)
+        .select()
+        .maybeSingle());
+    }
 
     if (error) return res.status(500).json({ error: error.message });
 
@@ -273,6 +310,9 @@ class PromoCodes {
     const numericValue = Number(body.discount_value);
     const isUnlimited = Boolean(body.is_unlimited);
     const status = normalizeStatus(body.status);
+    const marketplaceBarbershopId = body.marketplace_barbershop_id === undefined
+      ? (currentPromo ? currentPromo.marketplace_barbershop_id || null : null)
+      : normalizeId(body.marketplace_barbershop_id);
     const limit = body.usage_limit === null || body.usage_limit === undefined || body.usage_limit === ''
       ? null
       : Number(body.usage_limit);
@@ -311,6 +351,7 @@ class PromoCodes {
         usage_limit: isUnlimited ? null : limit,
         is_unlimited: Boolean(isUnlimited),
         status,
+        marketplace_barbershop_id: marketplaceBarbershopId,
       },
       error: null,
     };
