@@ -12,6 +12,26 @@ const {
 const STALE_QUEUE_HOURS = 9;
 const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber'];
+const DEFAULT_TIMEZONE = 'Asia/Tashkent';
+
+const normalizeText = (value) => {
+    if (value === undefined || value === null) return null;
+    const text = String(value).trim();
+    return text || null;
+};
+
+const getZonedDateString = (date, timeZone) => {
+    const tz = timeZone || DEFAULT_TIMEZONE;
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    });
+    const parts = formatter.formatToParts(date);
+    const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    return `${map.year}-${map.month}-${map.day}`;
+};
 
 const normalizePhone = (phoneInput) => {
     const raw = String(phoneInput || '').trim();
@@ -56,14 +76,14 @@ const isMissingColumnError = (error, column) => {
 const fetchBranchForBooking = async (branchId) => {
     let { data, error } = await supabase
         .from('branches')
-        .select('id, marketplace_barbershop_id')
+        .select('id, timezone, marketplace_barbershop_id')
         .eq('id', branchId)
         .maybeSingle();
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
         ({ data, error } = await supabase
             .from('branches')
-            .select('id')
+            .select('id, timezone')
             .eq('id', branchId)
             .maybeSingle());
 
@@ -410,6 +430,9 @@ class Kiosk {
             certificate_code = null,
             promo_code = null,
             use_cashback = false,
+            scheduled_start_at = null,
+            scheduled_end_at = null,
+            idempotency_key = null,
         } = req.body || {};
         const effectivePaymentMethod = payment_method || (certificate_code ? 'certificate' : null);
 
@@ -503,6 +526,46 @@ class Kiosk {
         const { data: branch, error: branchError } = await fetchBranchForBooking(branch_id);
         if (branchError) return res.status(500).json({ error: branchError.message });
         if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+        const normalizedIdempotencyKey = normalizeText(idempotency_key);
+        if (normalizedIdempotencyKey && normalizedIdempotencyKey.length > 255) {
+            return res.status(400).json({ error: 'idempotency_key is too long (max 255 chars)' });
+        }
+
+        const normalizedScheduledStartAt = normalizeText(scheduled_start_at);
+        const normalizedScheduledEndAt = normalizeText(scheduled_end_at);
+
+        let scheduledStartAtIso = null;
+        let scheduledEndAtIso = null;
+
+        if (normalizedScheduledStartAt || normalizedScheduledEndAt) {
+            if (!normalizedScheduledStartAt || !normalizedScheduledEndAt) {
+                return res.status(400).json({ error: 'scheduled_start_at and scheduled_end_at are both required' });
+            }
+
+            const start = new Date(normalizedScheduledStartAt);
+            const end = new Date(normalizedScheduledEndAt);
+
+            if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+                return res.status(400).json({ error: 'scheduled_start_at and scheduled_end_at must be valid ISO datetime strings' });
+            }
+
+            if (end <= start) {
+                return res.status(400).json({ error: 'scheduled_end_at must be after scheduled_start_at' });
+            }
+
+            if (normalizedSource === 'site') {
+                const tz = branch?.timezone || DEFAULT_TIMEZONE;
+                const todayLocal = getZonedDateString(new Date(), tz);
+                const startsLocal = getZonedDateString(start, tz);
+                if (todayLocal !== startsLocal) {
+                    return res.status(400).json({ error: 'Only same-day booking is allowed' });
+                }
+            }
+
+            scheduledStartAtIso = start.toISOString();
+            scheduledEndAtIso = end.toISOString();
+        }
 
         const { data: barber, error: barberError } = await supabase
             .from('barbers')
@@ -659,13 +722,197 @@ class Kiosk {
             certificate_id: certificate ? certificate.id : null,
         };
 
+        if (scheduledStartAtIso) insertPayload.scheduled_start_at = scheduledStartAtIso;
+        if (scheduledEndAtIso) insertPayload.scheduled_end_at = scheduledEndAtIso;
+        if (normalizedIdempotencyKey) insertPayload.idempotency_key = normalizedIdempotencyKey;
+
+        const queueEntrySelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, certificate_id';
+
         const { data: entry, error: insertError } = await supabase
             .from('queue_entries')
             .insert(insertPayload)
-            .select('id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, certificate_id')
+            .select(queueEntrySelect)
             .maybeSingle();
 
         if (insertError) {
+            if (insertError.code === '23P01') {
+                return res.status(409).json({ error: 'Selected time slot is no longer available' });
+            }
+
+            if (insertError.code === '23505' && normalizedIdempotencyKey) {
+                const { data: existingEntry, error: existingEntryError } = await supabase
+                    .from('queue_entries')
+                    .select(queueEntrySelect)
+                    .eq('idempotency_key', normalizedIdempotencyKey)
+                    .maybeSingle();
+
+                if (existingEntryError) {
+                    return res.status(409).json({ error: existingEntryError.message });
+                }
+                if (!existingEntry) {
+                    return res.status(409).json({ error: 'Idempotency key already used' });
+                }
+
+                const { data: existingClient, error: existingClientError } = await supabase
+                    .from('clients')
+                    .select('id, phone')
+                    .eq('id', existingEntry.client_id)
+                    .maybeSingle();
+
+                if (existingClientError) {
+                    return res.status(409).json({ error: existingClientError.message });
+                }
+
+                if (existingClient?.phone && String(existingClient.phone) !== String(normalizedPhone)) {
+                    return res.status(409).json({ error: 'Idempotency key already used' });
+                }
+
+                let existingCertificate = null;
+                if (existingEntry.certificate_id) {
+                    const { data: certRow, error: certError } = await supabase
+                        .from('certificates')
+                        .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
+                        .eq('id', existingEntry.certificate_id)
+                        .maybeSingle();
+
+                    if (certError && isMissingColumnError(certError, 'marketplace_barbershop_id')) {
+                        const { data: certFallback, error: certFallbackError } = await supabase
+                            .from('certificates')
+                            .select('id, code, expires_at, is_used, metadata, service_ids')
+                            .eq('id', existingEntry.certificate_id)
+                            .maybeSingle();
+
+                        if (certFallbackError) {
+                            return res.status(409).json({ error: certFallbackError.message });
+                        }
+                        if (certFallback) existingCertificate = { ...certFallback, marketplace_barbershop_id: null };
+                    } else if (certError) {
+                        return res.status(409).json({ error: certError.message });
+                    } else {
+                        existingCertificate = certRow;
+                    }
+                }
+
+                const existingServiceIds = Array.isArray(existingEntry.service_ids) && existingEntry.service_ids.length
+                    ? existingEntry.service_ids
+                    : existingEntry.service_id
+                        ? [existingEntry.service_id]
+                        : [];
+
+                const { data: existingServices, error: existingServicesError } = await supabase
+                    .from('services')
+                    .select('id, base_price')
+                    .in('id', existingServiceIds);
+
+                if (existingServicesError) {
+                    return res.status(409).json({ error: existingServicesError.message });
+                }
+
+                const existingTotal = roundMoney((existingServices || []).reduce((sum, s) => (
+                    sum + Number(s?.base_price || 0)
+                ), 0));
+
+                const { data: promoUsage, error: promoUsageError } = await supabase
+                    .from('promo_code_usage')
+                    .select('id, promo_code_id, order_id, used_at')
+                    .eq('order_id', String(existingEntry.id))
+                    .order('used_at', { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
+
+                if (promoUsageError && promoUsageError.code !== 'PGRST116') {
+                    return res.status(409).json({ error: promoUsageError.message });
+                }
+
+                let promoSummary = null;
+                let promoForDiscount = null;
+
+                if (promoUsage?.promo_code_id) {
+                    const { data: promoRow, error: promoRowError } = await supabase
+                        .from('promo_codes')
+                        .select('code, discount_type, discount_value')
+                        .eq('id', promoUsage.promo_code_id)
+                        .maybeSingle();
+
+                    if (promoRowError) {
+                        return res.status(409).json({ error: promoRowError.message });
+                    }
+
+                    promoForDiscount = promoRow;
+                    promoSummary = promoRow
+                        ? {
+                            code: promoRow.code,
+                            discount_type: promoRow.discount_type,
+                            discount_value: Number(promoRow.discount_value),
+                        }
+                        : null;
+                }
+
+                const existingDiscountedTotal = applyPromoDiscount(existingTotal, promoForDiscount);
+
+                let cashback = null;
+                let payableTotal = existingEntry.certificate_id ? 0 : existingDiscountedTotal;
+
+                try {
+                    const { data: cashbackTx, error: cashbackError } = await supabase
+                        .from('cashback_transactions')
+                        .select('id, amount')
+                        .eq('queue_entry_id', String(existingEntry.id))
+                        .eq('kind', 'spend')
+                        .limit(1)
+                        .maybeSingle();
+
+                    if (cashbackError) {
+                        const msg = String(cashbackError.message || '');
+                        if (!(msg.includes("Could not find the 'cashback_transactions'") || msg.includes('cashback_transactions'))) {
+                            return res.status(409).json({ error: cashbackError.message });
+                        }
+                    } else if (cashbackTx?.id) {
+                        const spentAmount = roundMoney(Number(cashbackTx.amount || 0));
+                        const balance = await getWalletBalance(existingEntry.client_id);
+                        cashback = {
+                            used: spentAmount > 0,
+                            spent_amount: spentAmount,
+                            balance,
+                            transaction_id: cashbackTx.id,
+                        };
+                        payableTotal = roundMoney(Math.max(0, payableTotal - spentAmount));
+                    }
+                } catch (cashbackUnhandled) {
+                    return res.status(409).json({ error: cashbackUnhandled?.message || 'Failed to load cashback data' });
+                }
+
+                return res.status(200).json({
+                    entry: existingEntry,
+                    certificate: existingCertificate,
+                    promo: promoSummary,
+                    promo_usage: promoUsage || null,
+                    totals: {
+                        total: existingTotal,
+                        discounted_total: existingDiscountedTotal,
+                        payable_total: payableTotal,
+                    },
+                    cashback,
+                });
+            }
+
+            if (
+                insertPayload.scheduled_start_at &&
+                (isMissingColumnError(insertError, 'scheduled_start_at') || isMissingColumnError(insertError, 'scheduled_end_at'))
+            ) {
+                return res.status(501).json({
+                    error: 'Scheduling is not configured (missing scheduled_start_at/scheduled_end_at columns)',
+                    hint: 'Apply db/supabase/queue_entries_scheduling.sql and refresh PostgREST schema cache',
+                });
+            }
+
+            if (insertPayload.idempotency_key && isMissingColumnError(insertError, 'idempotency_key')) {
+                return res.status(501).json({
+                    error: 'Idempotency is not configured (missing idempotency_key column)',
+                    hint: 'Apply db/supabase/queue_entries_scheduling.sql and refresh PostgREST schema cache',
+                });
+            }
+
             return res.status(500).json({ error: insertError.message });
         }
 

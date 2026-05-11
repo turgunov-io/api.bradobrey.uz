@@ -41,33 +41,6 @@ begin
   end if;
 end $$;
 
-insert into marketplace_barbershops (
-  name,
-  city,
-  address,
-  work_hours,
-  timezone,
-  is_active,
-  metadata
-)
-select
-  b.name,
-  b.city,
-  b.address,
-  b.work_hours,
-  b.timezone,
-  coalesce(b.is_active, true),
-  jsonb_build_object('legacy_branch_id', b.id)
-from branches b
-where b.marketplace_barbershop_id is null
-  and not exists (
-    select 1
-    from marketplace_barbershops m
-    where m.metadata ->> 'legacy_branch_id' = b.id::text
-  );
-
-update branches b
-set marketplace_barbershop_id = m.id
-from marketplace_barbershops m
-where b.marketplace_barbershop_id is null
-  and m.metadata ->> 'legacy_branch_id' = b.id::text;
+delete from marketplace_barbershops
+where metadata ? 'legacy_branch_id'
+   or metadata ->> 'fallback' = 'true';

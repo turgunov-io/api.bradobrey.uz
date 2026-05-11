@@ -45,12 +45,26 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - `POST /api/services` — create service (admin roles)
 - Note: if your DB is missing `service_ids` column in `queue_entries`, apply the SQL in `schema.sql` (or run `ALTER TABLE queue_entries ADD COLUMN service_ids uuid[];`). Code will gracefully fall back to single `service_id` but multi-service sums require the column.
 
-- Marketplace barbershops catalog (barbershop = row in `branches`):
+- Marketplace barbershops (admin-managed catalog):
+  - Apply `db/supabase/marketplace_catalog.sql` (creates `marketplace_barbershops` and adds `branches.marketplace_barbershop_id`).
   - `GET /api/marketplace/barbershops` (`?active=true` optional)
   - `GET /api/marketplace/barbershops/:id`
-  - `POST /api/marketplace/barbershops`
-  - `PATCH /api/marketplace/barbershops/:id`
+  - `POST /api/marketplace/barbershops` (optional `branch_ids: uuid[]` to attach branches)
+  - `PATCH /api/marketplace/barbershops/:id` (optional `branch_ids: uuid[]`)
   - `POST /api/marketplace/barbershops/:id/{activate|deactivate}`
+
+- Marketplace client app catalog + booking:
+  - Optional: apply `db/supabase/queue_entries_scheduling.sql` to enable same-day time-slot booking and double-booking protection.
+  - `GET /api/marketplace/catalog/barbershops` (`?city=...`, `?active=true` optional)
+  - `GET /api/marketplace/catalog/barbershops/:id`
+  - `GET /api/marketplace/catalog/barbershops/:id/branches`
+  - `GET /api/marketplace/catalog/branches/:id` (branch + barbers + services + categories)
+  - `GET /api/marketplace/catalog/branches/:id/barbers`
+  - `GET /api/marketplace/catalog/branches/:id/services`
+  - `GET /api/marketplace/catalog/barbershops/:id/payment-options`
+  - `GET /api/marketplace/catalog/branches/:id/availability?barber_id=...&service_ids=...&date=YYYY-MM-DD`
+  - `POST /api/marketplace/catalog/bookings/quote`
+  - `POST /api/marketplace/catalog/bookings` (accepts optional `scheduled_start_at`, `scheduled_end_at`, `Idempotency-Key` header)
 
 ## Notes
 
