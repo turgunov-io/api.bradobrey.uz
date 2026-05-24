@@ -11,7 +11,7 @@ create table if not exists queue_entries (
   started_at timestamptz,
   finished_at timestamptz,
   swapped_flag boolean default false,
-  payment_method text check (payment_method in ('cash', 'card', 'certificate')),
+  payment_method text check (payment_method in ('cash', 'card', 'certificate', 'mixed')),
   certificate_id uuid,
   price_override numeric(12,2) check (price_override is null or price_override >= 0),
   price_override_reason text,
@@ -36,7 +36,7 @@ begin
     from information_schema.columns
     where table_name = 'queue_entries' and column_name = 'payment_method'
   ) then
-    alter table queue_entries add column payment_method text check (payment_method in ('cash', 'card', 'certificate'));
+    alter table queue_entries add column payment_method text check (payment_method in ('cash', 'card', 'certificate', 'mixed'));
   end if;
 
   if not exists (
@@ -55,6 +55,15 @@ begin
   alter table queue_entries
     add constraint queue_entries_status_check
     check (status in ('waiting', 'called', 'swapped', 'rejected', 'in_progress', 'completed', 'cancelled', 'no_show', 'not_in_time'));
+
+  begin
+    execute 'alter table queue_entries drop constraint if exists queue_entries_payment_method_check';
+  exception when undefined_object then null;
+  end;
+
+  alter table queue_entries
+    add constraint queue_entries_payment_method_check
+    check (payment_method is null or payment_method in ('cash', 'card', 'certificate', 'mixed'));
 end $$;
 
 create index if not exists idx_queue_entries_certificate_id on queue_entries (certificate_id);

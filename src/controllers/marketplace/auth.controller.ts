@@ -111,7 +111,7 @@ export async function verifyMarketplaceClient(req: Request, res: Response) {
       return serverError(res, 'JWT secret not configured');
     }
 
-    const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+    const expiresIn = process.env.JWT_EXPIRES_IN || '12h';
 
     const nowIso = new Date().toISOString();
 

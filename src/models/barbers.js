@@ -13,6 +13,8 @@ const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'manager'
 const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber']);
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
+const PAYMENT_PART_METHODS = new Set(['cash', 'card', 'certificate']);
+const QUEUE_PAYMENT_METHODS = new Set(['cash', 'card', 'certificate', 'mixed']);
 
 const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
@@ -88,7 +90,7 @@ const signUserToken = ({ id, login, role, branch_id = null }) => jwt.sign(
         branchId: branch_id,
     },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+    { expiresIn: process.env.JWT_EXPIRES_IN || '12h' }
 );
 
 const isBarberWorkspaceRole = (role) => BARBER_WORKSPACE_ROLES.has(role);
@@ -316,6 +318,136 @@ const serviceIdsForEntry = (entry) => {
 
     if (serviceIds.length) return serviceIds;
     return entry?.service_id ? [entry.service_id] : [];
+};
+
+const roundMoneyAmount = (value) => {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : 0;
+};
+
+const hasExplicitAmount = (value) => (
+    value !== undefined
+    && value !== null
+    && String(value).trim() !== ''
+);
+
+const getQueueEntryAmount = async (entry) => {
+    if (hasExplicitAmount(entry?.price_override)) {
+        return roundMoneyAmount(entry.price_override);
+    }
+
+    const serviceIds = serviceIdsForEntry(entry);
+
+    if (!serviceIds.length) {
+        return 0;
+    }
+
+    const { data, error } = await supabase
+        .from('services')
+        .select('id, base_price')
+        .in('id', serviceIds);
+
+    if (error) {
+        throw new Error(error.message);
+    }
+
+    return roundMoneyAmount((data || []).reduce((sum, service) => {
+        return sum + roundMoneyAmount(service?.base_price);
+    }, 0));
+};
+
+const normalizePaymentMethod = (value) => {
+    const method = String(value || '').trim().toLowerCase();
+    return method || null;
+};
+
+const normalizePaymentParts = (value) => {
+    if (value === undefined || value === null) {
+        return [];
+    }
+
+    if (!Array.isArray(value)) {
+        const error = new Error('payments must be an array');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const payments = value
+        .map((item) => ({
+            amount: roundMoneyAmount(item?.amount),
+            method: normalizePaymentMethod(item?.method),
+        }))
+        .filter((item) => item.amount > 0);
+
+    for (const item of payments) {
+        if (!PAYMENT_PART_METHODS.has(item.method)) {
+            const error = new Error('payment method must be cash, card, or certificate');
+            error.statusCode = 400;
+            throw error;
+        }
+    }
+
+    if (payments.some((item) => item.method === 'certificate') && payments.length > 1) {
+        const error = new Error('certificate payment cannot be mixed with other methods');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    return payments;
+};
+
+const getFinalPaymentMethod = ({ currentMethod, paymentMethod, payments }) => {
+    if (payments.length > 1) {
+        return 'mixed';
+    }
+
+    if (payments.length === 1) {
+        return payments[0].method;
+    }
+
+    const normalized = normalizePaymentMethod(paymentMethod || currentMethod);
+
+    if (!normalized) {
+        return null;
+    }
+
+    if (!QUEUE_PAYMENT_METHODS.has(normalized)) {
+        const error = new Error('payment_method must be cash, card, certificate, or mixed');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    return normalized;
+};
+
+const replaceQueueEntryPayments = async ({ queueEntryId, payments }) => {
+    if (!payments.length) {
+        return [];
+    }
+
+    const { error: deleteError } = await supabase
+        .from('payments')
+        .delete()
+        .eq('queue_entry_id', queueEntryId);
+
+    if (deleteError) {
+        throw new Error(deleteError.message);
+    }
+
+    const { data, error } = await supabase
+        .from('payments')
+        .insert(payments.map((payment) => ({
+            amount: payment.amount,
+            method: payment.method,
+            queue_entry_id: queueEntryId,
+        })))
+        .select('id, queue_entry_id, amount, method, created_at');
+
+    if (error) {
+        throw new Error(error.message);
+    }
+
+    return data || [];
 };
 
 const isMissingPriceOverrideColumn = (error) => {
@@ -1753,6 +1885,7 @@ class Barbers {
 
     async completeQueueEntry(req, res) {
         const { id } = req.params || {};
+        const { payment_method, payments: paymentsInput } = req.body || {};
 
         const authHeader = req.headers.authorization || "";
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -1778,9 +1911,17 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
+        let paymentParts;
+
+        try {
+            paymentParts = normalizePaymentParts(paymentsInput);
+        } catch (error) {
+            return res.status(error.statusCode || 400).json({ error: error.message });
+        }
+
         const { data: entry, error: entryError } = await supabase
             .from('queue_entries')
-            .select('id, barber_id, status')
+            .select('id, barber_id, status, service_id, service_ids, payment_method, client_id, price_override')
             .eq('id', id)
             .eq('barber_id', barberId)
             .maybeSingle();
@@ -1796,14 +1937,41 @@ class Barbers {
             return res.status(400).json({ error: 'Queue entry is already completed' });
         }
 
+        let orderAmount = 0;
+        let finalPaymentMethod = null;
+
+        try {
+            orderAmount = await getQueueEntryAmount(entry);
+            finalPaymentMethod = getFinalPaymentMethod({
+                currentMethod: entry.payment_method,
+                paymentMethod: payment_method,
+                payments: paymentParts,
+            });
+        } catch (error) {
+            return res.status(error.statusCode || 500).json({ error: error.message });
+        }
+
+        const paidAmount = roundMoneyAmount(paymentParts.reduce((sum, payment) => sum + payment.amount, 0));
+
+        if (paymentParts.length && orderAmount > 0 && Math.abs(paidAmount - orderAmount) >= 0.01) {
+            return res.status(400).json({
+                error: 'Payment parts total must match queue entry amount',
+                expected_amount: orderAmount,
+                paid_amount: paidAmount,
+            });
+        }
+
         clearCallTimer(id);
+
+        const updatePayload = {
+            status: 'completed',
+            finished_at: new Date().toISOString(),
+            ...(finalPaymentMethod ? { payment_method: finalPaymentMethod } : {}),
+        };
 
         const { data: updated, error: updateError } = await supabase
             .from('queue_entries')
-            .update({
-                status: 'completed',
-                finished_at: new Date().toISOString(),
-            })
+            .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
             .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id, price_override, price_override_reason')
@@ -1813,9 +1981,20 @@ class Barbers {
             return res.status(500).json({ error: updateError.message });
         }
 
+        let payments = [];
+
+        try {
+            payments = await replaceQueueEntryPayments({
+                payments: paymentParts,
+                queueEntryId: id,
+            });
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
+
         const cashback = await awardCashbackForCompletedQueueEntry(updated);
 
-        return res.json({ entry: updated, cashback });
+        return res.json({ entry: { ...updated, payments }, cashback });
     }
 
     async updateProfile(req, res) {

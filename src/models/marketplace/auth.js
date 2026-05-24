@@ -26,7 +26,7 @@ const signMarketplaceToken = ({ id, email }) => {
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
 
-  const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+  const expiresIn = process.env.JWT_EXPIRES_IN || '12h';
   return jwt.sign({ sub: id, email, role: MARKETPLACE_ROLE }, jwtSecret, { expiresIn });
 };
 
@@ -336,7 +336,7 @@ class MarketplaceAuth {
         return res.status(400).json({ error: 'Invalid credentials' });
       }
 
-      const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+      const expiresIn = process.env.JWT_EXPIRES_IN || '12h';
 
       let token;
       try {
