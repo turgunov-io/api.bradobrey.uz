@@ -91,9 +91,64 @@ const enrichQueueEntriesWithAmounts = async (entries) => {
     });
 };
 
-const prepareHistoryEntries = async (entries) => (
-    enrichQueueEntriesWithAmounts(normalizeQueueEntriesTimestamps(entries || []))
-);
+const isMissingPaymentsTableError = (error) => {
+    const code = String(error?.code || '').trim();
+    const message = String(error?.message || error?.details || '').toLowerCase();
+
+    return code === '42P01'
+        || code === 'PGRST205'
+        || (message.includes('payments') && (
+            message.includes('does not exist')
+            || message.includes('not found')
+            || message.includes('schema cache')
+            || message.includes('could not find')
+        ));
+};
+
+const enrichQueueEntriesWithPayments = async (entries) => {
+    const items = Array.isArray(entries) ? entries : [];
+    const entryIds = Array.from(new Set(items.map((entry) => entry?.id).filter(Boolean)));
+
+    if (!entryIds.length) return items;
+
+    const { data, error } = await supabase
+        .from('payments')
+        .select('queue_entry_id, amount, method, created_at')
+        .in('queue_entry_id', entryIds);
+
+    if (error) {
+        if (isMissingPaymentsTableError(error)) {
+            return items.map((entry) => ({ ...entry, payments: entry?.payments || [] }));
+        }
+
+        throw new Error(error.message);
+    }
+
+    const paymentsByEntryId = new Map();
+
+    for (const payment of data || []) {
+        const entryId = payment?.queue_entry_id;
+        if (!entryId) continue;
+
+        const current = paymentsByEntryId.get(entryId) || [];
+        current.push({
+            amount: payment.amount,
+            created_at: payment.created_at,
+            method: payment.method,
+        });
+        paymentsByEntryId.set(entryId, current);
+    }
+
+    return items.map((entry) => ({
+        ...entry,
+        payments: paymentsByEntryId.get(entry.id) || entry?.payments || [],
+    }));
+};
+
+const prepareHistoryEntries = async (entries) => {
+    const withAmounts = await enrichQueueEntriesWithAmounts(normalizeQueueEntriesTimestamps(entries || []));
+    return enrichQueueEntriesWithPayments(withAmounts);
+};
 
 const getBearerToken = (req) => {
     const authHeader = req.headers.authorization || "";
