@@ -4,6 +4,7 @@ const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBen
 
 const BARBER_HISTORY_ROLES = new Set(['barber', 'super-barber']);
 const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
+const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
 
 const toAmount = (value) => {
     const amount = Number(value);
@@ -135,9 +136,9 @@ class History {
             ? statusesParam
             : statusesParam
                 ? String(statusesParam).split(',').map((s) => s.trim()).filter(Boolean)
-                : ['completed', 'cancelled', 'not_in_time'];
+                : HISTORY_STATUSES;
 
-        const allowedStatuses = ['completed', 'cancelled', 'not_in_time'];
+        const allowedStatuses = HISTORY_STATUSES;
         const validStatuses = statusList.filter((s) => allowedStatuses.includes(s));
         const finalStatuses = validStatuses.length ? validStatuses : allowedStatuses;
 
@@ -156,6 +157,7 @@ class History {
                 price_override,
                 price_override_reason,
                 branch_id,
+                barber_id,
                 client:clients ( id, name, phone )
             `;
 
@@ -170,6 +172,7 @@ class History {
                 price_override,
                 price_override_reason,
                 branch_id,
+                barber_id,
                 client:clients ( id, name, phone )
             `;
 
@@ -238,9 +241,11 @@ class History {
             price_override,
             price_override_reason,
             branch_id,
+            barber_id,
             client:clients ( id, name, phone, rank, completed_visits ),
             barber:barbers ( id, name )
         `, { count: 'exact' })
+            .in('status', HISTORY_STATUSES)
             .order('finished_at', { ascending: false })
             .limit(100);
 
@@ -307,9 +312,13 @@ class History {
                 price_override,
                 price_override_reason,
                 branch_id,
-                client:clients ( id, name, phone, rank, completed_visits )
+                barber_id,
+                client:clients ( id, name, phone, rank, completed_visits ),
+                barber:barbers ( id, name )
             `)
-            .eq('branch_id', id);
+            .eq('branch_id', id)
+            .in('status', HISTORY_STATUSES)
+            .order('finished_at', { ascending: false });
 
         if (error) {
             return res.status(500).json({ error: error.message });
