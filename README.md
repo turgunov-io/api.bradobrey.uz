@@ -208,7 +208,7 @@ Apply `db/supabase/finance_snapshots.sql` if the database does not have `finance
 
 - `POST /api/barbers/admin/login`
 - Body: `{ "login": "...", "password": "..." }`
-- Roles: `admin_network`, `admin_branch`, `admin`, `manager`, `super-manager`
+- Roles: `admin_network`, `admin_branch`, `admin`, `manager`, `super-manager`, `merchant`
 - Response: `{ "token": "...", "user": { "id", "login", "role", "branch_id" } }`
 - `branch_id` is optional for admins, but if it exists in `users`, it is included in both JWT `branchId` and response `user.branch_id`
 - Backward compatibility: the same admin/merchant roles are accepted by `POST /api/barbers/login`; barber roles still require `branch_id` there.

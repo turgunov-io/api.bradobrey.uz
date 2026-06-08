@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { supabase } = require('../config/supabase');
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
+const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 const BARBER_ROLES = new Set(['barber', 'super-barber']);
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const EVENT_TYPES = new Set([

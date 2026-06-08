@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 
 const { supabase } = require('../config/supabase');
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin']);
+const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 
 const getBearerToken = (req) => {
   const authHeader = req.headers.authorization || '';
