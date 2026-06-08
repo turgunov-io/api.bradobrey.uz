@@ -11,6 +11,7 @@ const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: D
 const callTimers = new Map(); // queueEntryId -> timer
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager']);
 const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber']);
+const LEGACY_LOGIN_ROLES = new Set([...ADMIN_ROLES, ...BARBER_WORKSPACE_ROLES]);
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
 const PAYMENT_PART_METHODS = new Set(['cash', 'card', 'certificate']);
@@ -965,61 +966,81 @@ class Barbers {
             return res.status(400).json({ error: 'Login and password are required' });
         }
 
-        if (!branch_id) return res.status(400).json({ error: 'Branch ID is required' });
-
-        const { data: users, error: barberError } = await supabase
+        const { data: users, error: userError } = await supabase
             .from('users')
-            .select('*')
+            .select('id, login, role, branch_id, password_hash')
             .eq('login', login)
-            .in('role', Array.from(BARBER_WORKSPACE_ROLES))
+            .in('role', Array.from(LEGACY_LOGIN_ROLES))
             .limit(1);
 
-        if (barberError) {
+        if (userError) {
             return res.status(500).json({ error: 'Failed to verify credentials' });
         }
 
-        const barberData = Array.isArray(users) ? users[0] : null;
-        if (!barberData) {
+        const userData = Array.isArray(users) ? users[0] : null;
+        if (!userData) {
             return res.status(400).json({ error: 'Invalid credentials' });
         }
 
-        const passwordCheck = bcrypto.compareSync(password, barberData.password_hash);
+        const passwordCheck = bcrypto.compareSync(password, userData.password_hash);
         if (!passwordCheck) {
             return res.status(400).json({ error: 'Invalid credentials' });
         }
 
+        if (ADMIN_ROLES.has(userData.role)) {
+            const effectiveBranchId = userData.branch_id || null;
+            const token = signUserToken({
+                branch_id: effectiveBranchId,
+                id: userData.id,
+                login: userData.login,
+                role: userData.role,
+            });
+
+            return res.json({
+                token,
+                user: {
+                    id: userData.id,
+                    login: userData.login,
+                    role: userData.role,
+                    branch_id: effectiveBranchId,
+                },
+            });
+        }
+
+        if (!branch_id) return res.status(400).json({ error: 'Branch ID is required' });
+
         await supabase
             .from('users')
             .update({ branch_id })
-            .eq('id', barberData.id);
+            .eq('id', userData.id);
         await supabase
             .from('barbers')
             .update({ branch_id, is_on_shift: true })
-            .eq('id', barberData.id);
+            .eq('id', userData.id);
 
         const token = signUserToken({
             branch_id,
-            id: barberData.id,
-            login: barberData.login,
-            role: barberData.role,
+            id: userData.id,
+            login: userData.login,
+            role: userData.role,
         });
 
         await logVerifixEvent({
-            actorId: barberData.id,
-            actorRole: barberData.role,
-            barberId: barberData.id,
+            actorId: userData.id,
+            actorRole: userData.role,
+            barberId: userData.id,
             branchId: branch_id,
             eventType: 'login',
             io: req.app.get('io'),
-            metadata: { login: barberData.login },
+            metadata: { login: userData.login },
         });
 
         return res.json({
             token,
             user: {
-                id: barberData.id,
-                login: barberData.login,
-                role: barberData.role,
+                id: userData.id,
+                login: userData.login,
+                role: userData.role,
                 branch_id,
             },
         });

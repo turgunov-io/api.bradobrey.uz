@@ -71,7 +71,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - Swap logic on reject: first reject pushes the entry behind the next waiting client and sets `swapped_flag`; second reject marks `rejected`.
 - `pause` falls back to `status=waiting` because the DB check constraint does not allow a dedicated paused status.
 - Socket rooms use `branch:{branch_id}`; monitors can join via `join_branch` event.
-- Barber login requires `branch_id` to pin the session to a branch (updates `users.branch_id` and `barbers.branch_id` for kiosk visibility).
+- Barber-role login requires `branch_id` to pin the session to a branch (updates `users.branch_id` and `barbers.branch_id` for kiosk visibility). Admin/merchant roles can also sign in through `POST /api/barbers/login` for legacy clients, without `branch_id`.
 - Monitor enqueue accepts `service_id` or `service_ids` array; first ID is stored as `service_id`, full list saved in `service_ids`.
 - Payments: if `amount` is omitted on `POST /api/queue/:id/complete`, it is calculated by summing `base_price` of all `service_ids` attached to the entry.
 
@@ -208,9 +208,10 @@ Apply `db/supabase/finance_snapshots.sql` if the database does not have `finance
 
 - `POST /api/barbers/admin/login`
 - Body: `{ "login": "...", "password": "..." }`
-- Roles: `admin_network`, `admin_branch`
+- Roles: `admin_network`, `admin_branch`, `admin`, `manager`, `super-manager`
 - Response: `{ "token": "...", "user": { "id", "login", "role", "branch_id" } }`
 - `branch_id` is optional for admins, but if it exists in `users`, it is included in both JWT `branchId` and response `user.branch_id`
+- Backward compatibility: the same admin/merchant roles are accepted by `POST /api/barbers/login`; barber roles still require `branch_id` there.
 
 ## Kiosk Ads (YouTube)
 
