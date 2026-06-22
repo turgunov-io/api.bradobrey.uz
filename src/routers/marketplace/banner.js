@@ -15,6 +15,7 @@ BannerRouter.get('/:id', (req, res) => BannerMarketplace.getById(req, res));
 BannerRouter.post('/', upload.single('file'), (req, res) => BannerMarketplace.create(req, res));
 
 BannerRouter.put('/:id', upload.single('file'), (req, res) => BannerMarketplace.update(req, res));
+BannerRouter.patch('/:id', upload.single('file'), (req, res) => BannerMarketplace.update(req, res));
 
 BannerRouter.delete('/:id', (req, res) => BannerMarketplace.deactivate(req, res));
 

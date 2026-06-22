@@ -284,17 +284,21 @@ class BannerMarketplace {
 
     async deactivate(req, res) {
         const { id } = req.params;
-        const { is_active } = req.body;
+        const isActive = req.body?.is_active === undefined ? false : Boolean(req.body.is_active);
 
         const { data, error } = await db
             .from('banners')
-            .update({ is_active })
+            .update({ is_active: isActive })
             .eq('id', id)
             .select('*')
-            .single();
+            .maybeSingle();
 
         if (error) {
             return res.status(500).json({ error: error.message });
+        }
+
+        if (!data) {
+            return res.status(404).json({ error: 'Banner not found' });
         }
 
         return res.status(200).json({ entry: formatBanner(data, 0) });

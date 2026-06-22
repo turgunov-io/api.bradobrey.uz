@@ -5,5 +5,9 @@ create table if not exists branches (
   city text,
   work_hours jsonb,
   timezone text,
+  marketplace_barbershop_id uuid,
   is_active boolean default true
 );
+
+alter table if exists branches
+  add column if not exists marketplace_barbershop_id uuid;

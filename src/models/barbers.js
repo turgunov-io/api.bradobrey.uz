@@ -12,6 +12,7 @@ const callTimers = new Map(); // queueEntryId -> timer
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'merchant']);
 const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber']);
 const LEGACY_LOGIN_ROLES = new Set([...ADMIN_ROLES, ...BARBER_WORKSPACE_ROLES]);
+const EMPLOYEE_ROLES = new Set(['admin', 'manager', 'barber', 'super-barber', 'super-manager']);
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
 const PAYMENT_PART_METHODS = new Set(['cash', 'card', 'certificate']);
@@ -232,6 +233,167 @@ const authenticateBarberWorkspace = (req, res, forbiddenMessage) => {
     }
 
     return { barberId, payload };
+};
+
+const isMissingRelationError = (error, relation) => {
+    const message = String(error?.message || error?.details || '').toLowerCase();
+    return Boolean(error) && message.includes(relation.toLowerCase()) && (
+        message.includes('does not exist') ||
+        message.includes('could not find') ||
+        message.includes('schema cache')
+    );
+};
+
+const normalizeText = (value) => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const text = String(value).trim();
+    return text || null;
+};
+
+const toArray = (value) => {
+    if (value === undefined || value === null) return [];
+    return Array.isArray(value) ? value : [value];
+};
+
+const normalizePermissions = (value) => Array.from(
+    new Set(
+        toArray(value)
+            .flatMap((item) => {
+                if (typeof item !== 'string') return [item];
+                if (!item.includes(',')) return [item];
+                return item.split(',');
+            })
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+    )
+);
+
+const syncUserPermissions = async (userId, permissions) => {
+    const deleteResult = await db
+        .from('user_permissions')
+        .delete()
+        .eq('user_id', userId);
+
+    if (deleteResult.error) {
+        if (isMissingRelationError(deleteResult.error, 'user_permissions')) return null;
+        throw new Error(deleteResult.error.message);
+    }
+
+    const rows = normalizePermissions(permissions).map((permission) => ({
+        permission,
+        user_id: userId,
+    }));
+
+    if (!rows.length) return null;
+
+    const insertResult = await db.from('user_permissions').insert(rows);
+    if (insertResult.error) {
+        if (isMissingRelationError(insertResult.error, 'user_permissions')) return null;
+        throw new Error(insertResult.error.message);
+    }
+
+    return null;
+};
+
+const fetchPermissionsByUserIds = async (userIds) => {
+    if (!userIds.length) return new Map();
+
+    const { data, error } = await db
+        .from('user_permissions')
+        .select('user_id, permission')
+        .in('user_id', userIds);
+
+    if (error) {
+        if (isMissingRelationError(error, 'user_permissions')) return new Map();
+        throw new Error(error.message);
+    }
+
+    const map = new Map();
+    for (const row of data || []) {
+        const key = String(row.user_id);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(row.permission);
+    }
+
+    return map;
+};
+
+const uploadEmployeePhoto = async (req, userId) => {
+    if (req.file) {
+        const { data, error } = await uploadBufferImage(
+            req.file.buffer,
+            req.file.mimetype || 'image/png',
+            userId
+        );
+
+        if (error) throw new Error(error.message || 'Failed to upload image');
+        return data?.publicUrl || null;
+    }
+
+    if (req.body?.image_base64) {
+        const { data, error } = await uploadBase64Image(
+            req.body.image_base64,
+            req.body.content_type,
+            userId
+        );
+
+        if (error) throw new Error(error.message || 'Failed to upload image');
+        return data?.publicUrl || null;
+    }
+
+    return undefined;
+};
+
+const employeeItem = ({ user, barber, permissions = [] }) => ({
+    branch_id: barber?.branch_id || user.branch_id || null,
+    id: user.id,
+    is_authorized: barber?.is_authorized ?? null,
+    is_on_shift: barber?.is_on_shift ?? null,
+    login: user.login || null,
+    name: barber?.name || user.login || null,
+    permissions,
+    photo_url: barber?.photo_url || null,
+    phone: barber?.phone || null,
+    role: user.role || null,
+    specialization: barber?.specialization || null,
+});
+
+const loadEmployeeDirectory = async ({ branchId, role } = {}) => {
+    let query = db
+        .from('users')
+        .select('id, login, role, branch_id', { count: 'exact' })
+        .in('role', Array.from(EMPLOYEE_ROLES));
+
+    if (branchId) query = query.eq('branch_id', branchId);
+    if (role && EMPLOYEE_ROLES.has(role)) query = query.eq('role', role);
+
+    const { data: users, error: usersError, count } = await query
+        .order('login', { ascending: true });
+
+    if (usersError) throw new Error(usersError.message);
+
+    const userIds = (users || []).map((user) => user.id).filter(Boolean);
+    const [barbersResult, permissionsByUser] = await Promise.all([
+        userIds.length
+            ? db
+                .from('barbers')
+                .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, specialization, phone')
+                .in('id', userIds)
+            : Promise.resolve({ data: [], error: null }),
+        fetchPermissionsByUserIds(userIds),
+    ]);
+
+    if (barbersResult.error) throw new Error(barbersResult.error.message);
+
+    const barbersById = new Map((barbersResult.data || []).map((barber) => [String(barber.id), barber]));
+    const items = (users || []).map((user) => employeeItem({
+        barber: barbersById.get(String(user.id)) || null,
+        permissions: permissionsByUser.get(String(user.id)) || [],
+        user,
+    }));
+
+    return { items, total: count ?? items.length };
 };
 
 const clearCallTimer = (entryId) => {
@@ -771,6 +933,156 @@ process.on('SIGTERM', cleanupShiftTimers);
 process.on('SIGINT', cleanupShiftTimers);
 
 class Barbers {
+    async list(req, res) {
+        try {
+            const mode = String(req.query?.mode || '').trim();
+            if (mode && mode !== 'employees') {
+                return res.status(400).json({ error: 'Unsupported barbers list mode' });
+            }
+
+            const branchId = normalizeText(req.query?.branch_id);
+            const role = normalizeText(req.query?.role);
+
+            const result = await loadEmployeeDirectory({ branchId, role });
+            return res.json(result);
+        } catch (error) {
+            return res.status(500).json({ error: error.message || 'Failed to load employees' });
+        }
+    }
+
+    async updateEmployee(req, res) {
+        try {
+            const { id } = req.params || {};
+            if (!id) return res.status(400).json({ error: 'Employee id is required' });
+
+            const {
+                branch_id,
+                login,
+                name,
+                password,
+                permissions,
+                phone,
+                role,
+                specialization,
+            } = req.body || {};
+
+            const normalizedLogin = normalizeText(login);
+            const normalizedName = normalizeText(name);
+            const normalizedRole = normalizeText(role);
+            const normalizedBranchId = normalizeText(branch_id);
+
+            if (!normalizedLogin) return res.status(400).json({ error: 'login is required' });
+            if (!normalizedName) return res.status(400).json({ error: 'name is required' });
+            if (!normalizedBranchId) return res.status(400).json({ error: 'branch_id is required' });
+            if (!EMPLOYEE_ROLES.has(normalizedRole)) return res.status(400).json({ error: 'role is invalid' });
+            if (password !== undefined && String(password || '').trim() && String(password).length < 6) {
+                return res.status(400).json({ error: 'password must be at least 6 characters' });
+            }
+
+            const userUpdate = {
+                branch_id: normalizedBranchId,
+                login: normalizedLogin,
+                role: normalizedRole,
+            };
+
+            if (password !== undefined && String(password || '').trim()) {
+                userUpdate.password_hash = bcrypto.hashSync(password, 10);
+            }
+
+            const { data: user, error: userError } = await db
+                .from('users')
+                .update(userUpdate)
+                .eq('id', id)
+                .select('id, login, role, branch_id')
+                .maybeSingle();
+
+            if (userError) {
+                const status = userError.code === '23505' ? 409 : 500;
+                return res.status(status).json({ error: userError.code === '23505' ? 'login already taken' : userError.message });
+            }
+            if (!user) return res.status(404).json({ error: 'Employee not found' });
+
+            const uploadedPhotoUrl = await uploadEmployeePhoto(req, id);
+            const photoUrl = uploadedPhotoUrl !== undefined
+                ? uploadedPhotoUrl
+                : req.body && Object.prototype.hasOwnProperty.call(req.body, 'photo_url')
+                    ? normalizeText(req.body.photo_url)
+                    : undefined;
+
+            const barberPayload = {
+                branch_id: normalizedBranchId,
+                id,
+                name: normalizedName,
+                phone: normalizeText(phone) ?? null,
+                specialization: normalizeText(specialization) ?? null,
+            };
+
+            if (photoUrl !== undefined) barberPayload.photo_url = photoUrl;
+
+            const { data: barber, error: barberError } = await db
+                .from('barbers')
+                .upsert(barberPayload, { onConflict: 'id' })
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, photo_url')
+                .maybeSingle();
+
+            if (barberError) return res.status(500).json({ error: barberError.message });
+
+            await syncUserPermissions(id, permissions);
+            const permissionMap = await fetchPermissionsByUserIds([id]);
+            const item = employeeItem({
+                barber,
+                permissions: permissionMap.get(String(id)) || [],
+                user,
+            });
+
+            return res.json({ item, barber, user });
+        } catch (error) {
+            return res.status(500).json({ error: error.message || 'Failed to update employee' });
+        }
+    }
+
+    async removeEmployee(req, res) {
+        try {
+            const { id } = req.params || {};
+            if (!id) return res.status(400).json({ error: 'Employee id is required' });
+
+            const { data: existing, error: existingError } = await db
+                .from('users')
+                .select('id')
+                .eq('id', id)
+                .maybeSingle();
+
+            if (existingError) return res.status(500).json({ error: existingError.message });
+            if (!existing) return res.status(404).json({ error: 'Employee not found' });
+
+            const permissionDelete = await db
+                .from('user_permissions')
+                .delete()
+                .eq('user_id', id);
+
+            if (permissionDelete.error && !isMissingRelationError(permissionDelete.error, 'user_permissions')) {
+                return res.status(500).json({ error: permissionDelete.error.message });
+            }
+
+            await db
+                .from('barbers')
+                .update({ is_authorized: false, is_on_shift: false })
+                .eq('id', id);
+
+            const { data, error } = await db
+                .from('users')
+                .delete()
+                .eq('id', id)
+                .select('id')
+                .maybeSingle();
+
+            if (error) return res.status(500).json({ error: error.message });
+            return res.json({ deleted: true, id: data?.id || id });
+        } catch (error) {
+            return res.status(500).json({ error: error.message || 'Failed to delete employee' });
+        }
+    }
+
     async takeBreak(req, res) {
         const authHeader = req.headers.authorization || "";
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -1093,10 +1405,24 @@ class Barbers {
     }
 
     async register(req, res) {
-        const { login, password, name, branch_id = null, phone, specialization = null } = req.body || {};
+        const {
+            branch_id = null,
+            login,
+            name,
+            password,
+            permissions,
+            phone,
+            role = 'barber',
+            specialization = null,
+        } = req.body || {};
 
         if (!login || !password || !name || !branch_id) {
             return res.status(400).json({ error: 'login, password, name, and branch_id are required' });
+        }
+
+        const normalizedRole = normalizeText(role) || 'barber';
+        if (!EMPLOYEE_ROLES.has(normalizedRole)) {
+            return res.status(400).json({ error: 'role is invalid' });
         }
 
         if (String(password).length < 6) {
@@ -1120,7 +1446,7 @@ class Barbers {
 
         const { data: userRow, error: userError } = await db
             .from('users')
-            .insert({ login, password_hash, role: 'barber', branch_id })
+            .insert({ login, password_hash, role: normalizedRole, branch_id })
             .select('id, login, role, branch_id')
             .maybeSingle();
 
@@ -1128,13 +1454,22 @@ class Barbers {
             return res.status(500).json({ error: userError?.message || 'failed to create user' });
         }
 
+        let uploadedPhotoUrl;
+        try {
+            uploadedPhotoUrl = await uploadEmployeePhoto(req, userRow.id);
+        } catch (error) {
+            await db.from('users').delete().eq('id', userRow.id);
+            return res.status(500).json({ error: error.message || 'Failed to upload image' });
+        }
+
         const barberPayload = {
-            id: userRow.id,
-            name,
             branch_id,
-            phone: phone || null,
-            specialization: specialization || null,
+            id: userRow.id,
             is_on_shift: false,
+            name,
+            phone: normalizeText(phone) ?? null,
+            photo_url: uploadedPhotoUrl !== undefined ? uploadedPhotoUrl : normalizeText(req.body?.photo_url) ?? null,
+            specialization: normalizeText(specialization) ?? null,
         };
 
         const { data: barberRow, error: barberError } = await db
@@ -1148,9 +1483,25 @@ class Barbers {
             return res.status(500).json({ error: barberError?.message || 'failed to create barber' });
         }
 
+        try {
+            await syncUserPermissions(userRow.id, permissions);
+        } catch (error) {
+            await db.from('barbers').delete().eq('id', userRow.id);
+            await db.from('users').delete().eq('id', userRow.id);
+            return res.status(500).json({ error: error.message || 'failed to save permissions' });
+        }
+
+        const permissionMap = await fetchPermissionsByUserIds([userRow.id]);
+        const item = employeeItem({
+            barber: barberRow,
+            permissions: permissionMap.get(String(userRow.id)) || [],
+            user: userRow,
+        });
+
         return res.status(201).json({
             user: userRow,
             barber: barberRow,
+            item,
         });
     }
 

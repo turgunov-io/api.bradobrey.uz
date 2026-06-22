@@ -7,9 +7,13 @@ const { uploadRoot } = require('./config/uploads');
 
 const kiosk = require('./routers/kiosk');
 const certificate = require('./routers/certificate');
+const finance = require('./routers/finance');
 const services = require('./routers/services');
+const serviceCategories = require('./routers/serviceCategories');
 const history = require('./routers/history');
 const barbers = require('./routers/barbers');
+const branches = require('./routers/branches');
+const merchant = require('./routers/merchant');
 const marketplace = require('./routers/marketplace');
 const statistics = require('./routers/statistics');
 const promoCode = require('./routers/promocode');
@@ -43,16 +47,25 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.get('/api/health', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 app.use('/api/barbers', barbers);
+app.use('/api/branches', branches);
 app.use('/api/kiosk', kiosk);
 app.use('/api/certificate', certificate);
+app.use('/api/finance', finance);
 app.use('/api/services', services);
+app.use('/api/service-categories', serviceCategories);
 app.use('/api/history', history);
 app.use('/api/statistics', statistics);
 app.use('/api/promo-code', promoCode);
 app.use('/api/loyalty', loyalty);
 app.use('/api/kiosk-ads', kioskAds);
 app.use('/api/verifix', verifix);
+app.use('/api/merchant', merchant);
 
 // Marketplace App
 app.use('/api/marketplace', marketplace);

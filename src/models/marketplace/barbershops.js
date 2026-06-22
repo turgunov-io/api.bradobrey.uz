@@ -1,3 +1,4 @@
+const bcrypto = require('bcryptjs');
 const { db } = require('../../config/postgres');
 
 const normalizeText = (value) => {
@@ -73,6 +74,23 @@ const isRealMarketplaceBarbershop = (row) => !row?.metadata?.legacy_branch_id &&
 
 const selectFields = 'id,name,description,logo_url,cover_url,address,city,work_hours,timezone,is_active,sort_order,metadata,created_at,updated_at';
 const tableName = 'marketplace_barbershops';
+
+const merchantItem = (row) => ({
+  branch_id: row?.branch_id || null,
+  id: row?.id,
+  login: row?.login || null,
+  marketplace_barbershop_id: row?.marketplace_barbershop_id || null,
+  role: row?.role || null,
+});
+
+const isMissingColumnError = (error, column) => {
+  const message = String(error?.message || error?.details || '').toLowerCase();
+  return Boolean(error) && message.includes(column.toLowerCase()) && (
+    message.includes('does not exist') ||
+    message.includes('could not find') ||
+    message.includes('schema cache')
+  );
+};
 
 class MarketplaceBarbershops {
   async list(req, res) {
@@ -325,6 +343,161 @@ class MarketplaceBarbershops {
       if (!data) return res.status(404).json({ error: 'Barbershop not found' });
 
       return res.json({ entry: data });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+  }
+
+  async remove(req, res) {
+    try {
+      const { id } = req.params || {};
+      if (!id) return res.status(400).json({ error: 'id is required' });
+
+      const clearResults = await Promise.all([
+        db.from('branches').update({ marketplace_barbershop_id: null }).eq('marketplace_barbershop_id', id),
+        db.from('users').update({ marketplace_barbershop_id: null }).eq('marketplace_barbershop_id', id),
+      ]);
+
+      const clearError = clearResults.find((result) => result.error && !isMissingColumnError(result.error, 'marketplace_barbershop_id'))?.error;
+      if (clearError) return res.status(500).json({ error: clearError.message });
+
+      const { data, error } = await db
+        .from(tableName)
+        .delete()
+        .eq('id', id)
+        .select('id')
+        .maybeSingle();
+
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data) return res.status(404).json({ error: 'Barbershop not found' });
+
+      return res.json({ deleted: true, id: data.id });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+  }
+
+  async listMerchants(req, res) {
+    try {
+      const { id } = req.params || {};
+      if (!id) return res.status(400).json({ error: 'id is required' });
+
+      const { data: shop, error: shopError } = await db
+        .from(tableName)
+        .select('id')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (shopError) return res.status(500).json({ error: shopError.message });
+      if (!shop) return res.status(404).json({ error: 'Barbershop not found' });
+
+      const { data, error, count } = await db
+        .from('users')
+        .select('id, login, role, branch_id, marketplace_barbershop_id', { count: 'exact' })
+        .eq('marketplace_barbershop_id', id)
+        .eq('role', 'merchant')
+        .order('login', { ascending: true });
+
+      if (error) {
+        if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+          return res.status(501).json({
+            error: 'users.marketplace_barbershop_id column is missing',
+            hint: 'Apply db/postgres/users.sql on the backend database.',
+          });
+        }
+        return res.status(500).json({ error: error.message });
+      }
+
+      const items = (data || []).map(merchantItem);
+      return res.json({ items, total: count ?? items.length });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+  }
+
+  async createMerchant(req, res) {
+    try {
+      const { id } = req.params || {};
+      const { login, password } = req.body || {};
+
+      if (!id) return res.status(400).json({ error: 'id is required' });
+      const normalizedLogin = normalizeText(login);
+      if (!normalizedLogin) return res.status(400).json({ error: 'login is required' });
+      if (!password || String(password).length < 6) {
+        return res.status(400).json({ error: 'password must be at least 6 characters' });
+      }
+
+      const { data: shop, error: shopError } = await db
+        .from(tableName)
+        .select('id')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (shopError) return res.status(500).json({ error: shopError.message });
+      if (!shop) return res.status(404).json({ error: 'Barbershop not found' });
+
+      const { data, error } = await db
+        .from('users')
+        .insert({
+          login: normalizedLogin,
+          marketplace_barbershop_id: id,
+          password_hash: bcrypto.hashSync(String(password), 10),
+          role: 'merchant',
+        })
+        .select('id, login, role, branch_id, marketplace_barbershop_id')
+        .maybeSingle();
+
+      if (error) {
+        if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+          return res.status(501).json({
+            error: 'users.marketplace_barbershop_id column is missing',
+            hint: 'Apply db/postgres/users.sql on the backend database.',
+          });
+        }
+
+        const status = error.code === '23505' ? 409 : 500;
+        return res.status(status).json({ error: error.code === '23505' ? 'login already taken' : error.message });
+      }
+
+      return res.status(201).json({ item: merchantItem(data) });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+  }
+
+  async deleteMerchant(req, res) {
+    try {
+      const { id } = req.params || {};
+      const merchantId = normalizeText(req.body?.id || req.query?.id);
+      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!merchantId) return res.status(400).json({ error: 'merchant id is required' });
+
+      const { data, error } = await db
+        .from('users')
+        .delete()
+        .eq('id', merchantId)
+        .eq('marketplace_barbershop_id', id)
+        .eq('role', 'merchant')
+        .select('id, login, role, branch_id, marketplace_barbershop_id')
+        .maybeSingle();
+
+      if (error) {
+        if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
+          return res.status(501).json({
+            error: 'users.marketplace_barbershop_id column is missing',
+            hint: 'Apply db/postgres/users.sql on the backend database.',
+          });
+        }
+        return res.status(500).json({ error: error.message });
+      }
+
+      if (!data) return res.status(404).json({ error: 'Merchant account not found' });
+
+      return res.json({ deleted: true, id: data.id, item: merchantItem(data) });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: error.message || 'Internal server error' });

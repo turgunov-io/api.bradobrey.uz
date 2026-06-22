@@ -1,4 +1,5 @@
 const { db } = require("../config/postgres");
+const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
 
 const DEFAULT_CATEGORY_LABEL = "Uncategorized";
 
@@ -6,6 +7,39 @@ const normalizeCategory = (category) => {
     if (category === undefined || category === null) return null;
     const trimmed = String(category).trim();
     return trimmed.length ? trimmed : null;
+};
+
+const normalizeText = (value) => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const trimmed = String(value).trim();
+    return trimmed.length ? trimmed : null;
+};
+
+const parseBoolean = (value, fallback = undefined) => {
+    if (value === undefined) return fallback;
+    if (value === null) return null;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+
+    const normalized = String(value).trim().toLowerCase();
+    if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+    return fallback;
+};
+
+const uploadServiceImage = async (req) => {
+    if (!req.file) return undefined;
+
+    const { data, error } = await uploadBufferImageWithFolder(
+        req.file.buffer,
+        req.file.mimetype || "image/png",
+        "services",
+        "service"
+    );
+
+    if (error) throw new Error(error.message || "Failed to upload service image");
+    return data?.publicUrl || null;
 };
 
 const groupServicesByCategory = (services = []) => {
@@ -71,30 +105,55 @@ class Services {
     }
 
     async create(req, res) {
-        const { name, duration_minutes, base_price = null, is_active = true, category } = req.body || {};
+        const {
+            base_price,
+            branch_id,
+            category,
+            category_name,
+            duration,
+            duration_minutes,
+            image,
+            is_active = true,
+            marketplace_barbershop_id,
+            name,
+            price,
+        } = req.body || {};
 
         if (!name || !String(name).trim()) {
             return res.status(400).json({ error: "name is required" });
         }
-        const duration = Number(duration_minutes);
-        if (!Number.isInteger(duration) || duration <= 0) {
+        const durationValue = Number(duration_minutes ?? duration);
+        if (!Number.isInteger(durationValue) || durationValue <= 0) {
             return res.status(400).json({ error: "duration_minutes must be a positive integer" });
         }
-        const price = base_price === null || base_price === undefined ? null : Number(base_price);
-        if (price !== null && (!Number.isFinite(price) || price < 0)) {
+        const priceInput = req.body?.base_price ?? price;
+        const priceValue = priceInput === null || priceInput === undefined || priceInput === ""
+            ? null
+            : Number(priceInput);
+        if (priceValue !== null && (!Number.isFinite(priceValue) || priceValue < 0)) {
             return res.status(400).json({ error: "base_price must be a non-negative number" });
         }
 
-        const normalizedCategory = normalizeCategory(category);
+        let uploadedImageUrl;
+        try {
+            uploadedImageUrl = await uploadServiceImage(req);
+        } catch (uploadError) {
+            return res.status(500).json({ error: uploadError.message });
+        }
+
+        const normalizedCategory = normalizeCategory(category ?? category_name);
 
         const { data, error } = await db
             .from("services")
             .insert({
-                name: String(name).trim(),
-                duration_minutes: duration,
-                base_price: price,
-                is_active: Boolean(is_active),
+                base_price: priceValue,
+                branch_id: normalizeText(branch_id),
                 category: normalizedCategory,
+                duration_minutes: durationValue,
+                image: uploadedImageUrl !== undefined ? uploadedImageUrl : normalizeText(image),
+                is_active: parseBoolean(is_active, true),
+                marketplace_barbershop_id: normalizeText(marketplace_barbershop_id),
+                name: String(name).trim(),
             })
             .select("*")
             .maybeSingle();
@@ -107,43 +166,77 @@ class Services {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: "Service id is required" });
 
-        const { name, duration_minutes, base_price, is_active, image, category } = req.body || {};
+        const {
+            base_price,
+            branch_id,
+            category,
+            category_name,
+            duration,
+            duration_minutes,
+            image,
+            is_active,
+            marketplace_barbershop_id,
+            name,
+            price,
+        } = req.body || {};
         const update = {};
 
         if (name !== undefined) {
             if (!String(name).trim()) return res.status(400).json({ error: "name cannot be empty" });
             update.name = String(name).trim();
         }
-        if (duration_minutes !== undefined) {
-            const duration = Number(duration_minutes);
-            if (!Number.isInteger(duration) || duration <= 0) {
+        if (duration_minutes !== undefined || duration !== undefined) {
+            const durationValue = Number(duration_minutes ?? duration);
+            if (!Number.isInteger(durationValue) || durationValue <= 0) {
                 return res.status(400).json({ error: "duration_minutes must be a positive integer" });
             }
-            update.duration_minutes = duration;
+            update.duration_minutes = durationValue;
         }
-        if (base_price !== undefined) {
-            const price = base_price === null ? null : Number(base_price);
-            if (price !== null && (!Number.isFinite(price) || price < 0)) {
+        if (base_price !== undefined || price !== undefined) {
+            const priceInput = base_price ?? price;
+            const priceValue = priceInput === null || priceInput === "" ? null : Number(priceInput);
+            if (priceValue !== null && (!Number.isFinite(priceValue) || priceValue < 0)) {
                 return res.status(400).json({ error: "base_price must be a non-negative number or null" });
             }
-            update.base_price = price;
+            update.base_price = priceValue;
         }
 
         if (is_active !== undefined) {
-            update.is_active = Boolean(is_active);
+            const activeFlag = parseBoolean(is_active, null);
+            if (activeFlag === null) return res.status(400).json({ error: "is_active must be a boolean" });
+            update.is_active = activeFlag;
         }
 
-        if (image !== undefined) {
-            update.image = String(image);
+        let uploadedImageUrl;
+        try {
+            uploadedImageUrl = await uploadServiceImage(req);
+        } catch (uploadError) {
+            return res.status(500).json({ error: uploadError.message });
         }
 
-        if (category !== undefined) {
-            update.category = normalizeCategory(category);
+        if (uploadedImageUrl !== undefined) {
+            update.image = uploadedImageUrl;
+        } else if (image !== undefined) {
+            update.image = normalizeText(image);
+        }
+
+        if (category !== undefined || category_name !== undefined) {
+            update.category = normalizeCategory(category ?? category_name);
+        }
+
+        if (branch_id !== undefined) {
+            update.branch_id = normalizeText(branch_id);
+        }
+
+        if (marketplace_barbershop_id !== undefined) {
+            update.marketplace_barbershop_id = normalizeText(marketplace_barbershop_id);
         }
 
         if (Object.keys(update).length === 0) {
             return res.status(400).json({ error: "No fields to update" });
         }
+
+        update.updated_at = new Date().toISOString();
 
         const { data, error } = await db
             .from("services")

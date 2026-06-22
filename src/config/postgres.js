@@ -8,6 +8,23 @@ types.setTypeParser(1700, (value) => (value === null ? null : Number(value))); /
 
 const SSL_ENABLED_VALUES = new Set(['1', 'true', 'yes', 'require']);
 
+const hasDiscretePostgresConfig = () => Boolean(
+  (process.env.PGDATABASE || process.env.POSTGRES_DB) &&
+  (process.env.PGHOST || process.env.POSTGRES_HOST) &&
+  (process.env.PGUSER || process.env.POSTGRES_USER)
+);
+
+const isValidConnectionString = (value) => {
+  if (!value) return false;
+
+  try {
+    const parsed = new URL(value);
+    return ['postgres:', 'postgresql:'].includes(parsed.protocol);
+  } catch (_err) {
+    return false;
+  }
+};
+
 const createPoolConfig = () => {
   const connectionString =
     process.env.DATABASE_URL ||
@@ -19,13 +36,19 @@ const createPoolConfig = () => {
     ? { rejectUnauthorized: String(process.env.POSTGRES_SSL_REJECT_UNAUTHORIZED || 'true') !== 'false' }
     : undefined;
 
-  if (connectionString) {
+  if (connectionString && isValidConnectionString(connectionString)) {
     return {
       connectionString,
       max: Number(process.env.POSTGRES_POOL_MAX || 10),
       idleTimeoutMillis: Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 30000),
       ...(ssl ? { ssl } : {}),
     };
+  }
+
+  if (connectionString && !hasDiscretePostgresConfig()) {
+    throw new Error(
+      'Postgres DATABASE_URL is invalid: use a valid postgres:// URL or set PGHOST, PGPORT, PGDATABASE, PGUSER and PGPASSWORD'
+    );
   }
 
   if (!process.env.PGDATABASE && !process.env.POSTGRES_DB) {

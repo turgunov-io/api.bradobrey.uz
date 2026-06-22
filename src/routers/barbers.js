@@ -9,7 +9,8 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
-router.post('/register', (req, res) => barbers.register(req, res));
+router.get("/", (req, res) => barbers.list(req, res));
+router.post('/register', upload.single('file'), (req, res) => barbers.register(req, res));
 router.post('/login', (req, res) => barbers.login(req, res));
 router.post('/admin/login', (req, res) => barbers.adminLogin(req, res));
 router.post('/logout', (req, res) => barbers.logout(req, res));
@@ -30,5 +31,7 @@ router.patch("/queue/:id/not-in-time", (req, res) => barbers.markNotInTime(req, 
 
 router.post("/break", (req, res) => barbers.takeBreak(req, res));
 router.post("/return", (req, res) => barbers.returnFromBreak(req, res));
+router.patch("/:id", upload.single('file'), (req, res) => barbers.updateEmployee(req, res));
+router.delete("/:id", (req, res) => barbers.removeEmployee(req, res));
 
 module.exports = router;
