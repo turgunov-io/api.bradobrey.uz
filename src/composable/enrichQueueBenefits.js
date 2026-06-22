@@ -1,4 +1,4 @@
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const uniq = (items) => Array.from(new Set((items || []).filter(Boolean)));
 
@@ -19,7 +19,7 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
 
   const certificateById = new Map();
   if (certificateIds.length) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('certificates')
       .select('id, code')
       .in('id', certificateIds);
@@ -35,7 +35,7 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
 
   const usageByOrderId = new Map();
   if (orderIds.length) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('promo_code_usage')
       .select('promo_code_id, order_id, used_at')
       .in('order_id', orderIds)
@@ -60,7 +60,7 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
 
   const promoById = new Map();
   if (promoCodeIds.length) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('promo_codes')
       .select('id, code, discount_type, discount_value')
       .in('id', promoCodeIds);
@@ -76,7 +76,7 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
 
   const cashbackByOrderId = new Map();
   if (orderIds.length) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('cashback_transactions')
       .select('queue_entry_id, kind, amount')
       .in('queue_entry_id', orderIds)

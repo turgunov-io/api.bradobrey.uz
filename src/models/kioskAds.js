@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 
@@ -82,7 +82,7 @@ class KioskAds {
     const auth = requireAdmin(req, res);
     if (!auth) return;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('kiosk_ad_settings')
       .select('id, regular_urls, kids_urls, updated_at')
       .eq('id', 1)
@@ -94,7 +94,7 @@ class KioskAds {
 
     if (data) return res.json({ settings: data });
 
-    const { data: created, error: createError } = await supabase
+    const { data: created, error: createError } = await db
       .from('kiosk_ad_settings')
       .insert({ id: 1 })
       .select('id, regular_urls, kids_urls, updated_at')
@@ -129,7 +129,7 @@ class KioskAds {
     if (regularParsed.provided) payload.regular_urls = regularParsed.urls;
     if (kidsParsed.provided) payload.kids_urls = kidsParsed.urls;
 
-    const { data: updated, error: updateError } = await supabase
+    const { data: updated, error: updateError } = await db
       .from('kiosk_ad_settings')
       .upsert(payload, { onConflict: 'id' })
       .select('id, regular_urls, kids_urls, updated_at')

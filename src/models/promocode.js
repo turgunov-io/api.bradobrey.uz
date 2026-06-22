@@ -1,4 +1,4 @@
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const normalizeCode = (code = '') => String(code).trim().toUpperCase();
 
@@ -85,7 +85,7 @@ class PromoCodes {
     const allowed = this.ensureAllowed(promo.data);
     if (!allowed.ok) return res.status(400).json({ success: false, message: allowed.message });
 
-    const { error: insertError } = await supabase.from('promo_code_usage').insert({
+    const { error: insertError } = await db.from('promo_code_usage').insert({
       promo_code_id: promo.data.id,
       user_id: user_id || null,
       user_name: user_name || null,
@@ -105,7 +105,7 @@ class PromoCodes {
         return res.status(409).json({ success: false, message: 'Promo code limit reached during update' });
       }
 
-      const { data: updated, error: updateError } = await supabase
+      const { data: updated, error: updateError } = await db
         .from('promo_codes')
         .update({ used_count: nextCount })
         .eq('id', promo.data.id)
@@ -137,7 +137,7 @@ class PromoCodes {
     if (promo.error) return res.status(500).json({ error: promo.error });
     if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
 
-    const { data: usage, error: usageError } = await supabase
+    const { data: usage, error: usageError } = await db
       .from('promo_code_usage')
       .select('user_name, phone, order_id, used_at')
       .eq('promo_code_id', promo.data.id)
@@ -164,7 +164,7 @@ class PromoCodes {
   }
 
   async list(req, res) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('promo_codes')
       .select('*')
       .order('created_at', { ascending: false });
@@ -191,7 +191,7 @@ class PromoCodes {
       used_count: 0,
     };
 
-    let { data, error } = await supabase
+    let { data, error } = await db
       .from('promo_codes')
       .insert(payload)
       .select()
@@ -199,7 +199,7 @@ class PromoCodes {
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
       delete payload.marketplace_barbershop_id;
-      ({ data, error } = await supabase
+      ({ data, error } = await db
         .from('promo_codes')
         .insert(payload)
         .select()
@@ -228,7 +228,7 @@ class PromoCodes {
     }
 
     let updatePayload = parsed.data;
-    let { data, error } = await supabase
+    let { data, error } = await db
       .from('promo_codes')
       .update(updatePayload)
       .eq('id', promo.data.id)
@@ -238,7 +238,7 @@ class PromoCodes {
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
       updatePayload = { ...parsed.data };
       delete updatePayload.marketplace_barbershop_id;
-      ({ data, error } = await supabase
+      ({ data, error } = await db
         .from('promo_codes')
         .update(updatePayload)
         .eq('id', promo.data.id)
@@ -262,14 +262,14 @@ class PromoCodes {
     if (promo.error) return res.status(500).json({ error: promo.error });
     if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
 
-    const { error: usageError } = await supabase
+    const { error: usageError } = await db
       .from('promo_code_usage')
       .delete()
       .eq('promo_code_id', promo.data.id);
 
     if (usageError) return res.status(500).json({ error: usageError.message });
 
-    const { error: deleteError } = await supabase
+    const { error: deleteError } = await db
       .from('promo_codes')
       .delete()
       .eq('id', promo.data.id);
@@ -284,7 +284,7 @@ class PromoCodes {
 
   async fetchPromo(rawCode) {
     const code = normalizeCode(rawCode);
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('promo_codes')
       .select('*')
       .eq('code', code)
@@ -294,7 +294,7 @@ class PromoCodes {
   }
 
   async fetchPromoById(id) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('promo_codes')
       .select('*')
       .eq('id', id)

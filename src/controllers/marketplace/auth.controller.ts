@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 
 import { sendOtpEmail } from '../../utils/mailer';
-import { supabase } from '../../utils/supabase';
+import { db } from '../../utils/postgres';
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 
@@ -42,7 +42,7 @@ export async function registerMarketplaceClient(req: Request, res: Response) {
     const code = generateOtpCode();
     const expiresAt = new Date(Date.now() + OTP_TTL_MS);
 
-    const { error: invalidateError } = await supabase
+    const { error: invalidateError } = await db
       .from('otp_codes')
       .update({ used: true })
       .eq('email', email)
@@ -50,10 +50,10 @@ export async function registerMarketplaceClient(req: Request, res: Response) {
 
     if (invalidateError) {
       console.error(invalidateError);
-      return serverError(res, 'Supabase error');
+      return serverError(res, 'Postgres error');
     }
 
-    const { data: insertedOtp, error: insertError } = await supabase
+    const { data: insertedOtp, error: insertError } = await db
       .from('otp_codes')
       .insert({
         email,
@@ -66,14 +66,14 @@ export async function registerMarketplaceClient(req: Request, res: Response) {
 
     if (insertError || !insertedOtp) {
       console.error(insertError);
-      return serverError(res, 'Supabase error');
+      return serverError(res, 'Postgres error');
     }
 
     try {
       await sendOtpEmail({ to: email, code });
     } catch (smtpErr) {
       console.error(smtpErr);
-      await supabase.from('otp_codes').update({ used: true }).eq('id', insertedOtp.id);
+      await db.from('otp_codes').update({ used: true }).eq('id', insertedOtp.id);
       return serverError(res, 'SMTP error');
     }
 
@@ -115,7 +115,7 @@ export async function verifyMarketplaceClient(req: Request, res: Response) {
 
     const nowIso = new Date().toISOString();
 
-    const { data: otp, error: otpError } = await supabase
+    const { data: otp, error: otpError } = await db
       .from('otp_codes')
       .select('id')
       .eq('email', email)
@@ -128,14 +128,14 @@ export async function verifyMarketplaceClient(req: Request, res: Response) {
 
     if (otpError) {
       console.error(otpError);
-      return serverError(res, 'Supabase error');
+      return serverError(res, 'Postgres error');
     }
 
     if (!otp) {
       return badRequest(res, 'Invalid or expired OTP');
     }
 
-    const { data: client, error: clientError } = await supabase
+    const { data: client, error: clientError } = await db
       .from('marketplace_clients')
       .upsert({ email, last_login_at: nowIso }, { onConflict: 'email' })
       .select('id,email,is_active')
@@ -143,7 +143,7 @@ export async function verifyMarketplaceClient(req: Request, res: Response) {
 
     if (clientError || !client) {
       console.error(clientError);
-      return serverError(res, 'Supabase error');
+      return serverError(res, 'Postgres error');
     }
 
     let token: string;
@@ -157,7 +157,7 @@ export async function verifyMarketplaceClient(req: Request, res: Response) {
     }
 
     const useNowIso = new Date().toISOString();
-    const { data: usedRows, error: useError } = await supabase
+    const { data: usedRows, error: useError } = await db
       .from('otp_codes')
       .update({ used: true })
       .eq('id', otp.id)
@@ -167,7 +167,7 @@ export async function verifyMarketplaceClient(req: Request, res: Response) {
 
     if (useError) {
       console.error(useError);
-      return serverError(res, 'Supabase error');
+      return serverError(res, 'Postgres error');
     }
 
     if (!usedRows || usedRows.length === 0) {

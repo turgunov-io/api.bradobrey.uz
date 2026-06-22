@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 
@@ -44,7 +44,7 @@ class Loyalty {
     const auth = requireAdmin(req, res);
     if (!auth) return;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('client_rank_settings')
       .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
       .eq('id', 1)
@@ -56,7 +56,7 @@ class Loyalty {
 
     if (data) return res.json({ settings: data });
 
-    const { data: created, error: createError } = await supabase
+    const { data: created, error: createError } = await db
       .from('client_rank_settings')
       .insert({ id: 1 })
       .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
@@ -89,7 +89,7 @@ class Loyalty {
       return res.status(400).json({ error: 'gold_min_visits must be a positive integer' });
     }
 
-    const { data: current, error: currentError } = await supabase
+    const { data: current, error: currentError } = await db
       .from('client_rank_settings')
       .select('id, bronze_min_visits, silver_min_visits, gold_min_visits')
       .eq('id', 1)
@@ -122,7 +122,7 @@ class Loyalty {
       return res.status(400).json({ error: 'No fields to update' });
     }
 
-    const { data: updated, error: updateError } = await supabase
+    const { data: updated, error: updateError } = await db
       .from('client_rank_settings')
       .upsert(payload, { onConflict: 'id' })
       .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')

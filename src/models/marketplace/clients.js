@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-const { supabase } = require('../../config/supabase');
+const { db } = require('../../config/postgres');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 
@@ -56,7 +56,7 @@ class MarketplaceClients {
       const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
       const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
 
-      let query = supabase
+      let query = db
         .from('marketplace_clients')
         .select(selectFields, { count: 'exact' });
 
@@ -100,7 +100,7 @@ class MarketplaceClients {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('marketplace_clients')
         .select(selectFields)
         .eq('id', id)
@@ -124,7 +124,7 @@ class MarketplaceClients {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('marketplace_clients')
         .update({ is_active: true })
         .eq('id', id)
@@ -149,7 +149,7 @@ class MarketplaceClients {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('marketplace_clients')
         .update({ is_active: false })
         .eq('id', id)

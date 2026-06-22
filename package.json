@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "build": "echo \"Netlify build step (no-op)\"",
+    "build": "echo \"Build step (no-op)\"",
     "backfill:cashback": "node scripts/backfill-cashback.js",
     "test": "echo \"No automated tests configured\" && exit 0"
   },
@@ -14,7 +14,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@supabase/supabase-js": "^2.90.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -24,8 +23,8 @@
     "multer": "^2.0.2",
     "nodemailer": "^6.10.1",
     "nodemon": "^3.1.11",
+    "pg": "^8.22.0",
     "pm2": "^6.0.14",
-    "serverless-http": "^3.2.0",
     "socket.io": "^4.8.3"
   }
 }

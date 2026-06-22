@@ -1,7 +1,7 @@
-﻿const { supabase } = require("../config/supabase");
+﻿const { db } = require("../config/postgres");
 const bcrypto = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { uploadBase64ToSupabase, uploadBufferToSupabase } = require("../composable/uploadImage");
+const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
 const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback");
 const { recordActivityEvent } = require("./verifix");
@@ -21,7 +21,7 @@ const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
 
 async function endBreak(barberId, branchId, io) {
-    await supabase
+    await db
         .from('barbers')
         .update({ is_on_shift: true })
         .eq('id', barberId);
@@ -58,7 +58,7 @@ const scheduleShiftAutoOff = (barberId, minutes) => {
     const timer = setTimeout(async () => {
         shiftAutoOffTimers.delete(barberId);
         try {
-            await supabase
+            await db
                 .from('barbers')
                 .update({ is_on_shift: false })
                 .eq('id', barberId);
@@ -181,7 +181,7 @@ const getFinanceSnapshotDraft = async ({ branchId, barberId, period }) => {
         return normalizeFinanceDraft(null);
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
         .from('finance_snapshots')
         .select('payload')
         .eq('branch_id', branchId)
@@ -243,7 +243,7 @@ const clearCallTimer = (entryId) => {
 };
 
 const markEntriesNoShow = async ({ barberId, branchId, cutoffIso }) => {
-    const query = supabase
+    const query = db
         .from('queue_entries')
         .update({ status: 'no_show', finished_at: new Date().toISOString() })
         .lte('created_at', cutoffIso)
@@ -263,7 +263,7 @@ const swapCalledEntry = async (entry) => {
     const { id, barber_id, branch_id, created_at } = entry || {};
     if (!id || !barber_id || !created_at) return null;
 
-    const { data: nextEntry, error: nextError } = await supabase
+    const { data: nextEntry, error: nextError } = await db
         .from('queue_entries')
         .select('id, created_at')
         .eq('barber_id', barber_id)
@@ -290,7 +290,7 @@ const swapCalledEntry = async (entry) => {
         updatePayload.created_at = new Date().toISOString();
     }
 
-    const { data: updated, error: updateError } = await supabase
+    const { data: updated, error: updateError } = await db
         .from('queue_entries')
         .update(updatePayload)
         .eq('id', id)
@@ -302,7 +302,7 @@ const swapCalledEntry = async (entry) => {
 };
 
 const markNoShow = async (entryId) => {
-    const { data, error } = await supabase
+    const { data, error } = await db
         .from('queue_entries')
         .update({ status: 'no_show', finished_at: new Date().toISOString() })
         .eq('id', entryId)
@@ -343,7 +343,7 @@ const getQueueEntryAmount = async (entry) => {
         return 0;
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
         .from('services')
         .select('id, base_price')
         .in('id', serviceIds);
@@ -426,7 +426,7 @@ const replaceQueueEntryPayments = async ({ queueEntryId, payments }) => {
         return [];
     }
 
-    const { error: deleteError } = await supabase
+    const { error: deleteError } = await db
         .from('payments')
         .delete()
         .eq('queue_entry_id', queueEntryId);
@@ -435,7 +435,7 @@ const replaceQueueEntryPayments = async ({ queueEntryId, payments }) => {
         throw new Error(deleteError.message);
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
         .from('payments')
         .insert(payments.map((payment) => ({
             amount: payment.amount,
@@ -457,7 +457,7 @@ const isMissingPriceOverrideColumn = (error) => {
 };
 
 const completedRevenueQuery = ({ barberId, branchId, from, to, select }) => {
-    let query = supabase
+    let query = db
         .from('queue_entries')
         .select(select)
         .eq('barber_id', barberId)
@@ -502,7 +502,7 @@ const getCompletedQueueRevenue = async ({ barberId, branchId, from, to }) => {
     let pricesByServiceId = new Map();
 
     if (serviceIds.length) {
-        const { data: services, error: servicesError } = await supabase
+        const { data: services, error: servicesError } = await db
             .from('services')
             .select('id, base_price')
             .in('id', serviceIds);
@@ -574,7 +574,7 @@ const isStaleActiveEntry = (entry, cutoffIso) => {
 };
 
 const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, excludeEntryId = null, requireOnShift = true }) => {
-    const { data: barbers, error: barbersError } = await supabase
+    const { data: barbers, error: barbersError } = await db
         .from('barbers')
         .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active')
         .eq('branch_id', branchId);
@@ -585,7 +585,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
     let allowedBarberIds = new Set();
 
     if (barberIds.length) {
-        const { data: users, error: usersError } = await supabase
+        const { data: users, error: usersError } = await db
             .from('users')
             .select('id, role')
             .in('id', barberIds)
@@ -604,7 +604,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
     const candidateIds = new Set(candidates.map((barber) => barber.id));
     const statsByBarber = new Map();
 
-    let queueQuery = supabase
+    let queueQuery = db
         .from('queue_entries')
         .select('id, barber_id, status, service_id, service_ids')
         .eq('branch_id', branchId)
@@ -623,7 +623,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
 
     let durationByServiceId = new Map();
     if (allServiceIds.length) {
-        const { data: services, error: servicesError } = await supabase
+        const { data: services, error: servicesError } = await db
             .from('services')
             .select('id, duration_minutes')
             .in('id', allServiceIds);
@@ -681,7 +681,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
 };
 
 const getQueueTailCreatedAt = async ({ branchId, barberId }) => {
-    const { data: tailEntry, error } = await supabase
+    const { data: tailEntry, error } = await db
         .from('queue_entries')
         .select('id, created_at')
         .eq('branch_id', branchId)
@@ -708,7 +708,7 @@ const scheduleCallFollowUp = (entry, io) => {
     const timer = setTimeout(async () => {
         callTimers.delete(entry.id);
         try {
-            const { data: fresh, error } = await supabase
+            const { data: fresh, error } = await db
                 .from('queue_entries')
                 .select('id, status, swapped_flag, created_at, branch_id, barber_id')
                 .eq('id', entry.id)
@@ -798,7 +798,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data: barber, error: barberError } = await supabase
+        const { data: barber, error: barberError } = await db
             .from('barbers')
             .select('id, branch_id')
             .eq('id', barberId)
@@ -834,7 +834,7 @@ class Barbers {
             return res.json({ status: 'ok', ended_early: true });
         }
 
-        const { error: updateError } = await supabase
+        const { error: updateError } = await db
             .from('barbers')
             .update({ is_active: false })
             .eq('id', barberId);
@@ -908,7 +908,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data: barber, error: barberError } = await supabase
+        const { data: barber, error: barberError } = await db
             .from('barbers')
             .select('id, branch_id')
             .eq('id', barberId)
@@ -926,7 +926,7 @@ class Barbers {
             breakTimers.delete(barberId);
         }
 
-        const { error: updateError } = await supabase
+        const { error: updateError } = await db
             .from('barbers')
             .update({ is_active: true })
             .eq('id', barberId);
@@ -966,7 +966,7 @@ class Barbers {
             return res.status(400).json({ error: 'Login and password are required' });
         }
 
-        const { data: users, error: userError } = await supabase
+        const { data: users, error: userError } = await db
             .from('users')
             .select('id, login, role, branch_id, password_hash')
             .eq('login', login)
@@ -1009,11 +1009,11 @@ class Barbers {
 
         if (!branch_id) return res.status(400).json({ error: 'Branch ID is required' });
 
-        await supabase
+        await db
             .from('users')
             .update({ branch_id })
             .eq('id', userData.id);
-        await supabase
+        await db
             .from('barbers')
             .update({ branch_id, is_on_shift: true })
             .eq('id', userData.id);
@@ -1053,7 +1053,7 @@ class Barbers {
             return res.status(400).json({ error: 'Login and password are required' });
         }
 
-        const { data: users, error: userError } = await supabase
+        const { data: users, error: userError } = await db
             .from('users')
             .select('id, login, role, branch_id, password_hash')
             .eq('login', login)
@@ -1103,7 +1103,7 @@ class Barbers {
             return res.status(400).json({ error: 'password must be at least 6 characters' });
         }
 
-        const { data: existing, error: existingError } = await supabase
+        const { data: existing, error: existingError } = await db
             .from('users')
             .select('id')
             .eq('login', login)
@@ -1118,7 +1118,7 @@ class Barbers {
 
         const password_hash = bcrypto.hashSync(password, 10);
 
-        const { data: userRow, error: userError } = await supabase
+        const { data: userRow, error: userError } = await db
             .from('users')
             .insert({ login, password_hash, role: 'barber', branch_id })
             .select('id, login, role, branch_id')
@@ -1137,14 +1137,14 @@ class Barbers {
             is_on_shift: false,
         };
 
-        const { data: barberRow, error: barberError } = await supabase
+        const { data: barberRow, error: barberError } = await db
             .from('barbers')
             .insert(barberPayload)
             .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, photo_url')
             .maybeSingle();
 
         if (barberError || !barberRow) {
-            await supabase.from('users').delete().eq('id', userRow.id);
+            await db.from('users').delete().eq('id', userRow.id);
             return res.status(500).json({ error: barberError?.message || 'failed to create barber' });
         }
 
@@ -1171,7 +1171,7 @@ class Barbers {
 
         const userId = payload.sub || payload.id;
 
-        const { data: user, error: userError } = await supabase
+        const { data: user, error: userError } = await db
             .from('users')
             .select('id, login, role, branch_id')
             .eq('id', userId)
@@ -1187,7 +1187,7 @@ class Barbers {
 
         let barber = null;
         if (isBarberWorkspaceRole(user.role)) {
-            const { data: barberData, error: barberError } = await supabase
+            const { data: barberData, error: barberError } = await db
                 .from('barbers')
                 .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
                 .eq('id', user.id)
@@ -1259,7 +1259,7 @@ class Barbers {
             console.error('stale queue cleanup failed:', e.message);
         }
 
-        let { data, error } = await supabase
+        let { data, error } = await db
             .from('queue_entries')
             .select(`
                 id,
@@ -1280,7 +1280,7 @@ class Barbers {
             .order('created_at', { ascending: true });
 
         if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
-            ({ data, error } = await supabase
+            ({ data, error } = await db
                 .from('queue_entries')
                 .select(`
                     id,
@@ -1343,7 +1343,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        let { data, error } = await supabase
+        let { data, error } = await db
             .from('queue_entries')
             .select(`
                 id,
@@ -1362,7 +1362,7 @@ class Barbers {
             .maybeSingle();
 
         if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
-            ({ data, error } = await supabase
+            ({ data, error } = await db
                 .from('queue_entries')
                 .select(`
                     id,
@@ -1426,7 +1426,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status, swapped_flag, branch_id, created_at')
             .eq('id', id)
@@ -1483,7 +1483,7 @@ class Barbers {
             return res.status(400).json({ error: 'No fields to update' });
         }
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update(updatePayload)
             .eq('id', id)
@@ -1522,7 +1522,7 @@ class Barbers {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, created_at')
             .eq('id', id)
@@ -1574,7 +1574,7 @@ class Barbers {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, created_at')
             .eq('id', id)
@@ -1628,7 +1628,7 @@ class Barbers {
                 barberId: selectedBarber.id,
             });
 
-            const { data: updated, error: updateError } = await supabase
+            const { data: updated, error: updateError } = await db
                 .from('queue_entries')
                 .update({
                     barber_id: selectedBarber.id,
@@ -1699,7 +1699,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status')
             .eq('id', id)
@@ -1719,7 +1719,7 @@ class Barbers {
 
         const io = req.app.get('io');
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update({
                 status: 'called',
@@ -1766,7 +1766,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status')
             .eq('id', id)
@@ -1786,7 +1786,7 @@ class Barbers {
 
         clearCallTimer(id);
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update({
                 status: 'in_progress',
@@ -1840,7 +1840,7 @@ class Barbers {
         }
 
         // Fetch the cheapest service price to enforce a floor
-        const { data: cheapestService, error: serviceError } = await supabase
+        const { data: cheapestService, error: serviceError } = await db
             .from('services')
             .select('base_price')
             .order('base_price', { ascending: true })
@@ -1858,7 +1858,7 @@ class Barbers {
 
         const barberId = payload.sub || payload.id;
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status')
             .eq('id', id)
@@ -1883,7 +1883,7 @@ class Barbers {
             updated_at: new Date().toISOString(),
         };
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update(updatePayload)
             .eq('id', id)
@@ -1940,7 +1940,7 @@ class Barbers {
             return res.status(error.statusCode || 400).json({ error: error.message });
         }
 
-        const { data: entry, error: entryError } = await supabase
+        const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status, service_id, service_ids, payment_method, client_id, price_override')
             .eq('id', id)
@@ -1990,7 +1990,7 @@ class Barbers {
             ...(finalPaymentMethod ? { payment_method: finalPaymentMethod } : {}),
         };
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update(updatePayload)
             .eq('id', id)
@@ -2054,7 +2054,7 @@ class Barbers {
 
         if (!finalPhotoUrl && req.file) {
             const { buffer, mimetype } = req.file;
-            const { data: uploadRes, error: uploadErr } = await uploadBufferToSupabase(
+            const { data: uploadRes, error: uploadErr } = await uploadBufferImage(
                 buffer,
                 mimetype || 'image/png',
                 barberId
@@ -2067,7 +2067,7 @@ class Barbers {
 
         if (!finalPhotoUrl && image_base64) {
             try {
-                const { data: uploadRes, error: uploadErr } = await uploadBase64ToSupabase(
+                const { data: uploadRes, error: uploadErr } = await uploadBase64Image(
                     image_base64,
                     content_type,
                     barberId
@@ -2086,7 +2086,7 @@ class Barbers {
 
         const updatePayload = { photo_url: finalPhotoUrl };
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('barbers')
             .update(updatePayload)
             .eq('id', barberId)
@@ -2104,7 +2104,7 @@ class Barbers {
         try {
             const { barber_id, is_on_shift = false } = req.body;
 
-            const { data: updated, error: updateError } = await supabase
+            const { data: updated, error: updateError } = await db
                 .from('barbers')
                 .update({ is_on_shift })
                 .eq('id', barber_id)
@@ -2135,7 +2135,7 @@ class Barbers {
         const { id } = req.params || {};
         const { no_show = true } = req.body || {};
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update({ status: no_show ? 'no_show' : 'waiting', finished_at: no_show ? new Date().toISOString() : null })
             .eq('id', id)
@@ -2160,7 +2160,7 @@ class Barbers {
 
         clearCallTimer(id);
 
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
             .from('queue_entries')
             .update({ status: 'not_in_time', finished_at: new Date().toISOString() })
             .eq('id', id)

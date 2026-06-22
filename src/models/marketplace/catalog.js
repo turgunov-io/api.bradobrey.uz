@@ -1,4 +1,4 @@
-const { supabase } = require('../../config/supabase');
+const { db } = require('../../config/postgres');
 const kiosk = require('../kiosk');
 const { applyPromoDiscount, roundMoney } = require('../../composable/cashback');
 
@@ -103,14 +103,14 @@ const formatBranchAsBarbershop = (row) => ({
 });
 
 const getBranch = async (branchId) => {
-  let { data, error } = await supabase
+  let { data, error } = await db
     .from('branches')
     .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id')
     .eq('id', branchId)
     .maybeSingle();
 
   if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-    ({ data, error } = await supabase
+    ({ data, error } = await db
       .from('branches')
       .select('id, name, address, city, work_hours, timezone, is_active')
       .eq('id', branchId)
@@ -123,7 +123,7 @@ const getBranch = async (branchId) => {
 };
 
 const getServices = async () => {
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('services')
     .select('id, name, duration_minutes, base_price, category, is_active')
     .eq('is_active', true)
@@ -136,7 +136,7 @@ const getServices = async () => {
 };
 
 const getVisibleBarbers = async (branchId) => {
-  const { data: barbers, error: barbersError } = await supabase
+  const { data: barbers, error: barbersError } = await db
     .from('barbers')
     .select('id, name, branch_id, photo_url, specialization, is_on_shift, is_active')
     .eq('branch_id', branchId);
@@ -146,7 +146,7 @@ const getVisibleBarbers = async (branchId) => {
   const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
   if (!barberIds.length) return [];
 
-  const { data: users, error: usersError } = await supabase
+  const { data: users, error: usersError } = await db
     .from('users')
     .select('id, role')
     .in('id', barberIds)
@@ -159,7 +159,7 @@ const getVisibleBarbers = async (branchId) => {
     allowedBarberIds.has(barber.id) && barber.is_active !== false
   ));
 
-  const { data: queues, error: queueError } = await supabase
+  const { data: queues, error: queueError } = await db
     .from('queue_entries')
     .select('id, barber_id, service_id, service_ids, status')
     .eq('branch_id', branchId)
@@ -178,7 +178,7 @@ const getVisibleBarbers = async (branchId) => {
 
   let serviceDurationById = new Map();
   if (serviceIds.length) {
-    const { data: services, error: servicesError } = await supabase
+    const { data: services, error: servicesError } = await db
       .from('services')
       .select('id, duration_minutes')
       .in('id', serviceIds);
@@ -231,7 +231,7 @@ const validatePromo = async ({ code, total, branch }) => {
   const normalizedCode = normalizeCode(code);
   if (!normalizedCode) return { promo: null, discountedTotal: total };
 
-  const { data: promo, error } = await supabase
+  const { data: promo, error } = await db
     .from('promo_codes')
     .select('*')
     .eq('code', normalizedCode)
@@ -270,14 +270,14 @@ const validatePromo = async ({ code, total, branch }) => {
 };
 
 const fetchCertificateByCode = async (code) => {
-  let { data, error } = await supabase
+  let { data, error } = await db
     .from('certificates')
     .select('id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id')
     .eq('code', code)
     .maybeSingle();
 
   if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-    ({ data, error } = await supabase
+    ({ data, error } = await db
       .from('certificates')
       .select('id, code, service_ids, expires_at, is_used, metadata')
       .eq('code', code)
@@ -337,7 +337,7 @@ class MarketplaceCatalog {
     try {
       const active = parseBoolean(req.query?.active, true);
 
-      let query = supabase
+      let query = db
         .from('marketplace_barbershops')
         .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata');
 
@@ -356,7 +356,7 @@ class MarketplaceCatalog {
         return this.listBranchFallbackBarbershops(req, res);
       }
 
-      const { data: branches } = await supabase
+      const { data: branches } = await db
         .from('branches')
         .select('id, marketplace_barbershop_id, is_active');
 
@@ -378,7 +378,7 @@ class MarketplaceCatalog {
 
   async listBranchFallbackBarbershops(req, res) {
     const active = parseBoolean(req.query?.active, true);
-    let query = supabase
+    let query = db
       .from('branches')
       .select('id, name, address, city, work_hours, timezone, is_active');
 
@@ -396,7 +396,7 @@ class MarketplaceCatalog {
       const id = normalizeId(req.params?.id);
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('marketplace_barbershops')
         .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata')
         .eq('id', id)
@@ -424,7 +424,7 @@ class MarketplaceCatalog {
       if (!id) return res.status(400).json({ error: 'id is required' });
 
       const active = parseBoolean(req.query?.active, true);
-      let query = supabase
+      let query = db
         .from('branches')
         .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id')
         .eq('marketplace_barbershop_id', id);
@@ -434,7 +434,7 @@ class MarketplaceCatalog {
       let { data, error } = await query.order('name', { ascending: true });
 
       if (isMissingColumnError(error, 'marketplace_barbershop_id') || (!error && (!data || !data.length))) {
-        let fallbackQuery = supabase
+        let fallbackQuery = db
           .from('branches')
           .select('id, name, address, city, work_hours, timezone, is_active')
           .eq('id', id);
@@ -527,14 +527,14 @@ class MarketplaceCatalog {
       const id = normalizeId(req.params?.id);
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      let { data: certificates, error } = await supabase
+      let { data: certificates, error } = await db
         .from('certificates')
         .select('id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id')
         .eq('is_used', false)
         .order('code', { ascending: true });
 
       if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-        ({ data: certificates, error } = await supabase
+        ({ data: certificates, error } = await db
           .from('certificates')
           .select('id, code, service_ids, expires_at, is_used, metadata')
           .eq('is_used', false)
@@ -592,7 +592,7 @@ class MarketplaceCatalog {
       if (branchError) return res.status(500).json({ error: branchError.message });
       if (!branch || branch.is_active === false) return res.status(404).json({ error: 'Branch not found' });
 
-      const { data: barber, error: barberError } = await supabase
+      const { data: barber, error: barberError } = await db
         .from('barbers')
         .select('id, name, branch_id, is_active, is_on_shift')
         .eq('id', barberId)
@@ -603,7 +603,7 @@ class MarketplaceCatalog {
         return res.status(400).json({ error: 'Selected barber is not available for this branch' });
       }
 
-      const { data: barberUser, error: barberUserError } = await supabase
+      const { data: barberUser, error: barberUserError } = await db
         .from('users')
         .select('id, role')
         .eq('id', barberId)
@@ -613,7 +613,7 @@ class MarketplaceCatalog {
       if (barberUserError) return res.status(500).json({ error: barberUserError.message });
       if (!barberUser) return res.status(400).json({ error: 'Selected employee is not available as a barber' });
 
-      const { data: services, error: servicesError } = await supabase
+      const { data: services, error: servicesError } = await db
         .from('services')
         .select('id, name, duration_minutes, base_price, category, is_active')
         .in('id', serviceIds);

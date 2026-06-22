@@ -1,4 +1,4 @@
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const percent = (count, total) => (total ? Number(((count / total) * 100).toFixed(1)) : 0);
 
@@ -52,7 +52,7 @@ class Statistics {
   }
 
   async fetchEntries({ start_date, end_date, branchId, barberId }) {
-    const query = supabase
+    const query = db
       .from('queue_entries')
       .select('id, client_id, branch_id, barber_id, source, status, payment_method, created_at, finished_at');
 
@@ -165,7 +165,7 @@ class Statistics {
     let lookup = {};
 
     if (ids.length) {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(table)
         .select('id, name')
         .in('id', ids);

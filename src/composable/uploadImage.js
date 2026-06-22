@@ -1,7 +1,32 @@
-const { supabase } = require("../config/supabase");
 const { randomUUID } = require("crypto");
+const fs = require("fs/promises");
+const path = require("path");
+const { removeUploadedFile, resolveUploadPath, toPublicUrl } = require("../config/uploads");
 
-async function uploadBase64ToSupabase(imageBase64, contentTypeInput, barberId) {
+const EXTENSION_BY_CONTENT_TYPE = {
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm",
+};
+
+const sanitizePathSegment = (value, fallback) => {
+    const cleaned = String(value || "")
+        .replace(/\\/g, "/")
+        .split("/")
+        .filter(Boolean)
+        .map((segment) => segment.replace(/[^A-Za-z0-9._-]/g, "-"))
+        .filter(Boolean)
+        .join("/");
+
+    return cleaned || fallback;
+};
+
+async function uploadBase64Image(imageBase64, contentTypeInput, barberId) {
     let base64 = imageBase64;
     let contentType = contentTypeInput;
     const dataUrlMatch = /^data:(.+?);base64,(.+)$/.exec(imageBase64 || '');
@@ -15,31 +40,40 @@ async function uploadBase64ToSupabase(imageBase64, contentTypeInput, barberId) {
     }
 
     const buffer = Buffer.from(base64, 'base64');
-    return uploadBufferToSupabase(buffer, contentType, barberId);
+    return uploadBufferImage(buffer, contentType, barberId);
 }
 
-async function uploadBufferToSupabase(buffer, contentType, barberId) {
-    return uploadBufferToSupabaseWithFolder(buffer, contentType, 'avatars', barberId);
+async function uploadBufferImage(buffer, contentType, barberId) {
+    return uploadBufferImageWithFolder(buffer, contentType, 'avatars', barberId);
 }
 
-async function uploadBufferToSupabaseWithFolder(buffer, contentType, folder = 'uploads', namePrefix = '') {
-    const ext = (contentType && contentType.split('/')[1]) || 'png';
-    const safePrefix = namePrefix ? `${namePrefix}-` : '';
+async function uploadBufferImageWithFolder(buffer, contentType, folder = 'uploads', namePrefix = '') {
+    const ext = EXTENSION_BY_CONTENT_TYPE[String(contentType || '').toLowerCase()] || 'png';
+    const safeFolder = sanitizePathSegment(folder, 'uploads');
+    const safePrefix = namePrefix ? `${sanitizePathSegment(namePrefix, 'file')}-` : '';
     const fileName = `${safePrefix}${Date.now()}-${randomUUID()}.${ext}`;
-    const path = `${folder}/${fileName}`;
+    const storagePath = `${safeFolder}/${fileName}`;
+    const resolved = resolveUploadPath(storagePath);
 
-    const { data, error } = await supabase.storage.from('images').upload(path, buffer, {
-        contentType: contentType || 'image/png',
-        upsert: false,
-    });
-
-    if (error) {
-        return { error };
+    try {
+        await fs.mkdir(path.dirname(resolved.absolutePath), { recursive: true });
+        await fs.writeFile(resolved.absolutePath, buffer);
+    } catch (error) {
+        return { data: null, error };
     }
 
-    const { data: publicUrlData } = supabase.storage.from('images').getPublicUrl(path);
-
-    return { data: { path, publicUrl: publicUrlData?.publicUrl || null } };
+    return {
+        data: {
+            path: resolved.relativePath,
+            publicUrl: toPublicUrl(resolved.relativePath),
+        },
+        error: null,
+    };
 }
 
-module.exports = { uploadBase64ToSupabase, uploadBufferToSupabase, uploadBufferToSupabaseWithFolder };
+module.exports = {
+    removeUploadedFile,
+    uploadBase64Image,
+    uploadBufferImage,
+    uploadBufferImageWithFolder,
+};

@@ -1,4 +1,4 @@
-const { supabase } = require("../config/supabase");
+const { db } = require("../config/postgres");
 
 const isMissingColumnError = (error, column) => {
   const message = String(error?.message || error?.details || "").toLowerCase();
@@ -11,13 +11,13 @@ const isMissingColumnError = (error, column) => {
 
 class Certificate {
   async active(req, res) {
-    let { data, error } = await supabase
+    let { data, error } = await db
       .from("certificates")
       .select("id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id")
       .order("code", { ascending: true });
 
     if (isMissingColumnError(error, "marketplace_barbershop_id")) {
-      ({ data, error } = await supabase
+      ({ data, error } = await db
         .from("certificates")
         .select("id, code, service_ids, expires_at, is_used, metadata")
         .order("code", { ascending: true }));
@@ -70,7 +70,7 @@ class Certificate {
       expiresAtIso = d.toISOString();
     }
 
-    const { data: existing, error: existsError } = await supabase
+    const { data: existing, error: existsError } = await db
       .from("certificates")
       .select("id")
       .eq("code", code)
@@ -91,7 +91,7 @@ class Certificate {
       marketplace_barbershop_id: marketplace_barbershop_id || null,
     };
 
-    let { data: inserted, error: insertError } = await supabase
+    let { data: inserted, error: insertError } = await db
       .from("certificates")
       .insert(payload)
       .select("id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id")
@@ -99,7 +99,7 @@ class Certificate {
 
     if (isMissingColumnError(insertError, "marketplace_barbershop_id")) {
       delete payload.marketplace_barbershop_id;
-      ({ data: inserted, error: insertError } = await supabase
+      ({ data: inserted, error: insertError } = await db
         .from("certificates")
         .insert(payload)
         .select("id, code, service_ids, expires_at, is_used, metadata")

@@ -143,7 +143,7 @@ const parseTimeToHHMM = (value) => {
   if (!value) return null;
   const text = String(value).trim();
   if (!text) return null;
-  // Supabase time columns often come as "HH:MM:SS"
+  // Postgres time columns often come as "HH:MM:SS"
   const m = text.match(/^(\d{2}:\d{2})(:\d{2})?$/);
   return m ? m[1] : null;
 };

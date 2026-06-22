@@ -3,6 +3,7 @@ require('dotenv').config();
 const cors = require('cors');
 const express = require('express');
 const morgan = require('morgan');
+const { uploadRoot } = require('./config/uploads');
 
 const kiosk = require('./routers/kiosk');
 const certificate = require('./routers/certificate');
@@ -34,6 +35,7 @@ app.set('corsOrigin', corsOrigin);
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 app.use(morgan('dev'));
+app.use('/uploads', express.static(uploadRoot));
 
 
 app.get('/health', (_req, res) => {

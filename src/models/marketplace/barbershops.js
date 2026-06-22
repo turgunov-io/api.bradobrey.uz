@@ -1,4 +1,4 @@
-const { supabase } = require('../../config/supabase');
+const { db } = require('../../config/postgres');
 
 const normalizeText = (value) => {
   if (value === undefined) return undefined;
@@ -51,7 +51,7 @@ const parseBranchIds = (value) => {
 const syncBranches = async (barbershopId, branchIds) => {
   if (branchIds === undefined) return null;
 
-  const { error: clearError } = await supabase
+  const { error: clearError } = await db
     .from('branches')
     .update({ marketplace_barbershop_id: null })
     .eq('marketplace_barbershop_id', barbershopId);
@@ -60,7 +60,7 @@ const syncBranches = async (barbershopId, branchIds) => {
 
   if (!branchIds.length) return null;
 
-  const { error: assignError } = await supabase
+  const { error: assignError } = await db
     .from('branches')
     .update({ marketplace_barbershop_id: barbershopId })
     .in('id', branchIds);
@@ -79,7 +79,7 @@ class MarketplaceBarbershops {
     try {
       const { active } = req.query || {};
 
-      let query = supabase.from(tableName).select(selectFields);
+      let query = db.from(tableName).select(selectFields);
 
       if (active !== undefined) {
         const activeFlag = parseBoolean(active, null);
@@ -106,7 +106,7 @@ class MarketplaceBarbershops {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(tableName)
         .select(selectFields)
         .eq('id', id)
@@ -168,7 +168,7 @@ class MarketplaceBarbershops {
         metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {},
       };
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(tableName)
         .insert(payload)
         .select(selectFields)
@@ -264,7 +264,7 @@ class MarketplaceBarbershops {
 
       update.updated_at = new Date().toISOString();
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(tableName)
         .update(update)
         .eq('id', id)
@@ -292,7 +292,7 @@ class MarketplaceBarbershops {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(tableName)
         .update({ is_active: true })
         .eq('id', id)
@@ -314,7 +314,7 @@ class MarketplaceBarbershops {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(tableName)
         .update({ is_active: false })
         .eq('id', id)

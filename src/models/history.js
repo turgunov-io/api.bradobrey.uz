@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 
 const BARBER_HISTORY_ROLES = new Set(['barber', 'super-barber']);
@@ -60,7 +60,7 @@ const enrichQueueEntriesWithAmounts = async (entries) => {
     let priceByServiceId = new Map();
 
     if (serviceIds.length) {
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('services')
             .select('id, base_price')
             .in('id', serviceIds);
@@ -111,7 +111,7 @@ const enrichQueueEntriesWithPayments = async (entries) => {
 
     if (!entryIds.length) return items;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
         .from('payments')
         .select('queue_entry_id, amount, method, created_at')
         .in('queue_entry_id', entryIds);
@@ -231,7 +231,7 @@ class History {
                 client:clients ( id, name, phone )
             `;
 
-        let query = supabase
+        let query = db
             .from('queue_entries')
             .select(selectWithCertificate, { count: 'exact' })
             .eq('barber_id', barberId)
@@ -242,7 +242,7 @@ class History {
         let { data, error, count } = await query;
 
         if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
-            query = supabase
+            query = db
                 .from('queue_entries')
                 .select(selectWithoutCertificate, { count: 'exact' })
                 .eq('barber_id', barberId)
@@ -283,7 +283,7 @@ class History {
         // all?filter=loyal
         // all?filter=all
 
-        let query = supabase
+        let query = db
             .from('queue_entries')
             .select(`
             id,
@@ -354,7 +354,7 @@ class History {
         const id = req.query.id;
         if (!id) return res.status(400).json({ error: "Branch ID is required!" });
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('queue_entries')
             .select(`
                 id,

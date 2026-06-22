@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 const bcrypto = require('bcryptjs');
 const crypto = require('crypto');
 
-const { supabase } = require('../../config/supabase');
+const { db } = require('../../config/postgres');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const OTP_TTL_MS = 10 * 60 * 1000;
@@ -116,7 +116,7 @@ class MarketplaceAuth {
       const code = generateOtpCode();
       const expiresAt = new Date(Date.now() + OTP_TTL_MS);
 
-      const { error: invalidateError } = await supabase
+      const { error: invalidateError } = await db
         .from('otp_codes')
         .update({ used: true })
         .eq('email', email)
@@ -126,7 +126,7 @@ class MarketplaceAuth {
         return res.status(500).json({ error: invalidateError.message });
       }
 
-      const { data: insertedOtp, error: insertError } = await supabase
+      const { data: insertedOtp, error: insertError } = await db
         .from('otp_codes')
         .insert({
           email,
@@ -195,7 +195,7 @@ class MarketplaceAuth {
 
       const nowIso = new Date().toISOString();
 
-      const { data: otp, error: otpError } = await supabase
+      const { data: otp, error: otpError } = await db
         .from('otp_codes')
         .select('id')
         .eq('email', email)
@@ -214,7 +214,7 @@ class MarketplaceAuth {
         return res.status(400).json({ error: 'Invalid or expired OTP' });
       }
 
-      const { data: existingClient, error: existingError } = await supabase
+      const { data: existingClient, error: existingError } = await db
         .from('marketplace_clients')
         .select('id,is_active')
         .eq('email', email)
@@ -232,7 +232,7 @@ class MarketplaceAuth {
 
       let client;
       if (existingClient?.id) {
-        const { data: updated, error: updateError } = await supabase
+        const { data: updated, error: updateError } = await db
           .from('marketplace_clients')
           .update({ password_hash, last_login_at: nowIso })
           .eq('id', existingClient.id)
@@ -245,7 +245,7 @@ class MarketplaceAuth {
 
         client = updated;
       } else {
-        const { data: created, error: createError } = await supabase
+        const { data: created, error: createError } = await db
           .from('marketplace_clients')
           .insert({ email, password_hash, is_active: true, last_login_at: nowIso })
           .select('id,email,is_active')
@@ -263,7 +263,7 @@ class MarketplaceAuth {
       }
 
       const useNowIso = new Date().toISOString();
-      const { data: usedRows, error: useError } = await supabase
+      const { data: usedRows, error: useError } = await db
         .from('otp_codes')
         .update({ used: true })
         .eq('id', otp.id)
@@ -313,7 +313,7 @@ class MarketplaceAuth {
         return res.status(400).json({ error: 'Email and password are required' });
       }
 
-      const { data: client, error: clientError } = await supabase
+      const { data: client, error: clientError } = await db
         .from('marketplace_clients')
         .select('id, email, password_hash, is_active')
         .eq('email', email)
@@ -351,7 +351,7 @@ class MarketplaceAuth {
       }
 
       try {
-        await supabase
+        await db
           .from('marketplace_clients')
           .update({ last_login_at: new Date().toISOString() })
           .eq('id', client.id);

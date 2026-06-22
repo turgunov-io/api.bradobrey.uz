@@ -1,16 +1,17 @@
-# Express + Supabase Live Queue API
+# Express + PostgreSQL Live Queue API
 
-Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persistence, Socket.io updates).
+Backend for a barbershop live-queue system (JWT auth for barbers, PostgreSQL persistence, Socket.io updates).
 
-## Netlify deployment (serverless)
-- API lives at `/.netlify/functions/server/*` with redirect `/api/* -> /.netlify/functions/server/:splat` (see `netlify.toml`).
-- Netlify Functions do **not** support WebSockets; `broadcastQueueUpdate` becomes a no-op there. Use polling/SSE or host Socket.io elsewhere (Fly.io/Render) if realtime is required.
-- Environment variables: set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`, `CORS_ORIGIN`, etc. in Netlify UI.
-- Build: `npm run build` is a no-op; function entry is `netlify/functions/server.js` (wraps `src/app.js`).
+## Deployment
+
+- Run this API as a long-running Node process (`npm start` or PM2) so Socket.io and queue schedulers stay alive.
+- Set `DATABASE_URL` for your PostgreSQL server, or provide `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD`.
+- Set `PUBLIC_BASE_URL` to the public API origin (for example `https://api.bradobrey.uz`) so uploaded image URLs are absolute.
+- Build: `npm run build` is a no-op for this Express API.
 
 ## Setup
 
-- Copy `.env.example` to `.env` and fill `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`.
+- Copy `.env.example` to `.env` and fill `DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGIN`.
 - Install deps: `npm install`
 - Start dev server: `npm run dev` (defaults to `http://localhost:4000`)
 
@@ -21,7 +22,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - Marketplace orders can **spend cashback at booking time** via `POST /api/kiosk/book` with `source=site`, `use_cashback=true` and `Authorization: Bearer <marketplace token>`; kiosk/point orders (`source=point`) cannot use cashback.
 - По умолчанию cashback выключен. Чтобы включить — задайте `CASHBACK_PERCENT` в окружении (например `5` = 5%).
 - Для оплаты сертификатом cashback не начисляется.
-- Убедитесь, что SQL из `db/supabase/cashback.sql` применён в вашей базе.
+- Убедитесь, что SQL из `db/postgres/cashback.sql` применён в вашей базе.
 - One-time backfill for already completed orders (after deploy): `npm run backfill:cashback` (optional: `--since`, `--until`, `--batch`, `--max`, `--verbose`).
 
 ## Key Endpoints
@@ -46,7 +47,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
 - Note: if your DB is missing `service_ids` column in `queue_entries`, apply the SQL in `schema.sql` (or run `ALTER TABLE queue_entries ADD COLUMN service_ids uuid[];`). Code will gracefully fall back to single `service_id` but multi-service sums require the column.
 
 - Marketplace barbershops (admin-managed catalog):
-  - Apply `db/supabase/marketplace_catalog.sql` (creates `marketplace_barbershops` and adds `branches.marketplace_barbershop_id`).
+  - Apply `db/postgres/marketplace_catalog.sql` (creates `marketplace_barbershops` and adds `branches.marketplace_barbershop_id`).
   - `GET /api/marketplace/barbershops` (`?active=true` optional)
   - `GET /api/marketplace/barbershops/:id`
   - `POST /api/marketplace/barbershops` (optional `branch_ids: uuid[]` to attach branches)
@@ -54,7 +55,7 @@ Backend for a barbershop live-queue system (JWT auth for barbers, Supabase persi
   - `POST /api/marketplace/barbershops/:id/{activate|deactivate}`
 
 - Marketplace client app catalog + booking:
-  - Optional: apply `db/supabase/queue_entries_scheduling.sql` to enable same-day time-slot booking and double-booking protection.
+  - Optional: apply `db/postgres/queue_entries_scheduling.sql` to enable same-day time-slot booking and double-booking protection.
   - `GET /api/marketplace/catalog/barbershops` (`?city=...`, `?active=true` optional)
   - `GET /api/marketplace/catalog/barbershops/:id`
   - `GET /api/marketplace/catalog/barbershops/:id/branches`
@@ -95,7 +96,7 @@ Configuration:
 
 ## Verifix Activity And Lateness
 
-Apply `db/supabase/verifix.sql` before using Verifix.
+Apply `db/postgres/verifix.sql` before using Verifix.
 
 Schedules:
 
@@ -144,7 +145,7 @@ Response fields:
 - `payout` — amount to pay out: calculated commission minus advance and penalty.
 - `commission`, `profit_percent`, and `bonus_profit_percent` are included for transparency.
 
-Apply `db/supabase/finance_snapshots.sql` if the database does not have `finance_snapshots` yet.
+Apply `db/postgres/finance_snapshots.sql` if the database does not have `finance_snapshots` yet.
 
 ## Barber Reassignment API Workflow
 
@@ -215,7 +216,7 @@ Apply `db/supabase/finance_snapshots.sql` if the database does not have `finance
 
 ## Kiosk Ads (YouTube)
 
-- Apply SQL: `db/supabase/kiosk_ads.sql`
+- Apply SQL: `db/postgres/kiosk_ads.sql`
 - Kiosk config now includes playlists:
   - `GET /api/kiosk/config` → `{ ..., ads: { regular: string[], kids: string[], updated_at } }`
 - Admin endpoints (use `Authorization: Bearer <token>` from admin login):
@@ -225,7 +226,7 @@ Apply `db/supabase/finance_snapshots.sql` if the database does not have `finance
 ## AI prompt to recreate this project
 
 ```
-Build an Express + Supabase backend for a barbershop live-queue system with JWT auth and Socket.io updates.
+Build an Express + PostgreSQL backend for a barbershop live-queue system with JWT auth and Socket.io updates.
 - Entities: branches, barbers (id=users.id, phone, photo, specialization, is_authorized, is_on_shift), services (duration_minutes, base_price, is_active), clients (name, phone unique), queue_entries (client_id, branch_id, barber_id, service_id + service_ids[], status waiting|called|swapped|rejected|in_progress|completed|cancelled|no_show, source point|site|admin, payment_method cash|card|certificate, timestamps), payments (amount, method), media_assets (ads|music|kids|video, barber_id optional).
 - Auth: /api/auth/register, /api/auth/login (barber must supply branch_id), /api/auth/me. Token payload includes barberId and branchId.
 - Barber workspace: /api/barber/queue (today only, auto-reject stale via timeout_minutes, includes services, price, payment, eta), /api/barber/queue/:id/reject, /api/barber/queue/:id/swap, /api/barber/queue/:id (patch services/payment/client info), /api/barber/stats, /api/barber/history, /api/barber/profile (get/patch), /api/barber/shift/start, /api/barber/shift/stop, media CRUD /api/barber/media (list/create/update, scoped to barber or shared).
@@ -234,5 +235,5 @@ Build an Express + Supabase backend for a barbershop live-queue system with JWT 
 - Services and branches CRUD for admins.
 - Realtime: broadcast queue:update to room branch:{branch_id}.
 - CORS configurable via env, server port 4000 default.
-Provide schema.sql with all tables/indexes and safety ALTERs, and .env example for SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, JWT_SECRET, CORS_ORIGIN.
+Provide schema.sql with all tables/indexes and safety ALTERs, and .env example for DATABASE_URL, JWT_SECRET, CORS_ORIGIN, PUBLIC_BASE_URL.
 ```

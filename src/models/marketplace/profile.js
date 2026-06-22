@@ -1,11 +1,11 @@
 const jwt = require('jsonwebtoken');
 
-const { supabase } = require('../../config/supabase');
+const { db } = require('../../config/postgres');
 const { getWalletBalance } = require('../../composable/cashback');
 const { enrichQueueEntriesWithBenefits } = require('../../composable/enrichQueueBenefits');
 const {
-  uploadBase64ToSupabase,
-  uploadBufferToSupabase,
+  uploadBase64Image,
+  uploadBufferImage,
 } = require('../../composable/uploadImage');
 
 const MARKETPLACE_ROLE = 'marketplace';
@@ -67,7 +67,7 @@ const DEFAULT_RANK_SETTINGS = {
 
 async function fetchRankSettings() {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('client_rank_settings')
       .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
       .eq('id', 1)
@@ -122,7 +122,7 @@ class MarketplaceProfile {
       return null;
     }
 
-    const { data: client, error } = await supabase
+    const { data: client, error } = await db
       .from('marketplace_clients')
       .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
       .eq('id', clientId)
@@ -155,7 +155,7 @@ class MarketplaceProfile {
       let cashback_balance = null;
       let loyalty = null;
       if (auth.client.phone) {
-        const { data: linked, error: linkError } = await supabase
+        const { data: linked, error: linkError } = await db
           .from('clients')
           .select('id, rank, completed_visits')
           .eq('phone', auth.client.phone)
@@ -222,7 +222,7 @@ class MarketplaceProfile {
             return res.status(400).json({ error: 'Invalid phone number. Expected E.164 format, e.g. +998991234567' });
           }
 
-          const { data: existingPhoneOwner, error: phoneLookupError } = await supabase
+          const { data: existingPhoneOwner, error: phoneLookupError } = await db
             .from('marketplace_clients')
             .select('id')
             .eq('phone', nextPhone)
@@ -248,7 +248,7 @@ class MarketplaceProfile {
         // Precedence: uploaded file/base64 > explicit photo_url (including empty to clear)
         if (req.file) {
           const { buffer, mimetype } = req.file;
-          const { data: uploadRes, error: uploadErr } = await uploadBufferToSupabase(
+          const { data: uploadRes, error: uploadErr } = await uploadBufferImage(
             buffer,
             mimetype || 'image/png',
             auth.client.id
@@ -258,7 +258,7 @@ class MarketplaceProfile {
           }
           finalPhotoUrl = uploadRes?.publicUrl || null;
         } else if (image_base64) {
-          const { data: uploadRes, error: uploadErr } = await uploadBase64ToSupabase(
+          const { data: uploadRes, error: uploadErr } = await uploadBase64Image(
             image_base64,
             content_type,
             auth.client.id
@@ -281,7 +281,7 @@ class MarketplaceProfile {
         updatePayload.photo_url = finalPhotoUrl;
       }
 
-      const { data: updated, error: updateError } = await supabase
+      const { data: updated, error: updateError } = await db
         .from('marketplace_clients')
         .update(updatePayload)
         .eq('id', auth.client.id)
@@ -300,7 +300,7 @@ class MarketplaceProfile {
       let cashback_balance = null;
       let loyalty = null;
       if (updated?.phone) {
-        const { data: linked, error: linkError } = await supabase
+        const { data: linked, error: linkError } = await db
           .from('clients')
           .select('id, rank, completed_visits')
           .eq('phone', updated.phone)
@@ -365,7 +365,7 @@ class MarketplaceProfile {
       const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
       const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
 
-      const { data: clientRow, error: clientErr } = await supabase
+      const { data: clientRow, error: clientErr } = await db
         .from('clients')
         .select('id,name,phone')
         .eq('phone', phone)
@@ -386,7 +386,7 @@ class MarketplaceProfile {
         });
       }
 
-      const query = supabase
+      const query = db
         .from('queue_entries')
         .select(
           `
@@ -431,7 +431,7 @@ class MarketplaceProfile {
 
       const serviceMap = new Map();
       if (serviceIds.size > 0) {
-        const { data: services, error: servicesError } = await supabase
+        const { data: services, error: servicesError } = await db
           .from('services')
           .select('id,name,duration_minutes,base_price,category')
           .in('id', Array.from(serviceIds));
@@ -507,7 +507,7 @@ class MarketplaceProfile {
   async _ensureClientRecordForPhone(phone, email) {
     if (!phone) return;
 
-    const { data: existing, error } = await supabase
+    const { data: existing, error } = await db
       .from('clients')
       .select('id')
       .eq('phone', phone)
@@ -518,7 +518,7 @@ class MarketplaceProfile {
 
     const fallbackName = String(email || 'Marketplace Client').split('@')[0] || 'Marketplace Client';
 
-    const { error: insertError } = await supabase
+    const { error: insertError } = await db
       .from('clients')
       .insert({ name: fallbackName, phone });
 

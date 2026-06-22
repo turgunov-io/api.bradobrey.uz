@@ -1,4 +1,4 @@
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const OPEN_NO_SHOW_STATUSES = ['waiting', 'called', 'swapped'];
@@ -89,7 +89,7 @@ async function closePreviousDayOpenQueueEntries({ io = null, now = new Date(), t
     const cutoffIso = getLocalDayStartUtc(now, normalizedTimeZone).toISOString();
     const finishedAt = now.toISOString();
 
-    const { data, error } = await supabase
+    const { data, error } = await db
         .from('queue_entries')
         .update({
             finished_at: finishedAt,

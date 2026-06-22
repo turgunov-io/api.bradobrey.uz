@@ -2,7 +2,7 @@
 
 require('dotenv').config();
 
-const { supabase } = require('../src/config/supabase');
+const { db } = require('../src/config/postgres');
 const { awardCashbackForCompletedQueueEntry } = require('../src/composable/cashback');
 
 const getArgValue = (name) => {
@@ -30,7 +30,7 @@ async function main() {
   let totalEarned = 0;
 
   while (true) {
-    let query = supabase
+    let query = db
       .from('queue_entries')
       .select('id, client_id, service_id, service_ids, payment_method, certificate_id, finished_at')
       .eq('status', 'completed')

@@ -1,4 +1,4 @@
-const { supabase } = require('../../../config/supabase');
+const { db } = require('../../../config/postgres');
 const { OPERATIONAL_BARBER_ROLES, ACTIVE_QUEUE_STATUSES } = require('./constants');
 const {
   isMissingColumnError,
@@ -7,14 +7,14 @@ const {
 } = require('./helpers');
 
 const getBranch = async (branchId) => {
-  let { data, error } = await supabase
+  let { data, error } = await db
     .from('branches')
     .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id')
     .eq('id', branchId)
     .maybeSingle();
 
   if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-    ({ data, error } = await supabase
+    ({ data, error } = await db
       .from('branches')
       .select('id, name, address, city, work_hours, timezone, is_active')
       .eq('id', branchId)
@@ -27,7 +27,7 @@ const getBranch = async (branchId) => {
 };
 
 const getActiveServices = async () => {
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('services')
     .select('id, name, duration_minutes, base_price, category, is_active')
     .eq('is_active', true)
@@ -40,7 +40,7 @@ const getActiveServices = async () => {
 };
 
 const getBranchOperationalBarbers = async (branchId) => {
-  const { data: barbers, error: barbersError } = await supabase
+  const { data: barbers, error: barbersError } = await db
     .from('barbers')
     .select('id, name, branch_id, photo_url, specialization, is_on_shift, is_active')
     .eq('branch_id', branchId);
@@ -50,7 +50,7 @@ const getBranchOperationalBarbers = async (branchId) => {
   const barberIds = (barbers || []).map((barber) => barber?.id).filter(Boolean);
   if (!barberIds.length) return [];
 
-  const { data: users, error: usersError } = await supabase
+  const { data: users, error: usersError } = await db
     .from('users')
     .select('id, role')
     .in('id', barberIds)
@@ -63,7 +63,7 @@ const getBranchOperationalBarbers = async (branchId) => {
     allowedBarberIds.has(barber?.id) && barber?.is_active !== false
   ));
 
-  const { data: queues, error: queueError } = await supabase
+  const { data: queues, error: queueError } = await db
     .from('queue_entries')
     .select('id, barber_id, service_id, service_ids, status')
     .eq('branch_id', branchId)
@@ -83,7 +83,7 @@ const getBranchOperationalBarbers = async (branchId) => {
 
   let serviceDurationById = new Map();
   if (serviceIds.length) {
-    const { data: services, error: servicesError } = await supabase
+    const { data: services, error: servicesError } = await db
       .from('services')
       .select('id, duration_minutes')
       .in('id', serviceIds);
@@ -134,7 +134,7 @@ const getBranchOperationalBarbers = async (branchId) => {
 };
 
 const listMarketplaceBarbershops = async ({ active, city } = {}) => {
-  let query = supabase
+  let query = db
     .from('marketplace_barbershops')
     .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata');
 
@@ -153,14 +153,14 @@ const listMarketplaceBarbershops = async ({ active, city } = {}) => {
   return { data, error };
 };
 
-const getMarketplaceBarbershopById = async (id) => supabase
+const getMarketplaceBarbershopById = async (id) => db
   .from('marketplace_barbershops')
   .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata')
   .eq('id', id)
   .maybeSingle();
 
 const listBranchesForBarbershop = async (barbershopId, { active } = {}) => {
-  let query = supabase
+  let query = db
     .from('branches')
     .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id')
     .eq('marketplace_barbershop_id', barbershopId);
@@ -171,52 +171,52 @@ const listBranchesForBarbershop = async (barbershopId, { active } = {}) => {
   return { data, error };
 };
 
-const listAllBranchesMarketplaceLinks = async () => supabase
+const listAllBranchesMarketplaceLinks = async () => db
   .from('branches')
   .select('id, marketplace_barbershop_id, is_active');
 
-const listActiveCertificates = async () => supabase
+const listActiveCertificates = async () => db
   .from('certificates')
   .select('id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id')
   .eq('is_used', false)
   .order('code', { ascending: true });
 
-const listActiveCertificatesFallback = async () => supabase
+const listActiveCertificatesFallback = async () => db
   .from('certificates')
   .select('id, code, service_ids, expires_at, is_used, metadata')
   .eq('is_used', false)
   .order('code', { ascending: true });
 
-const fetchPromoCode = async (code) => supabase
+const fetchPromoCode = async (code) => db
   .from('promo_codes')
   .select('*')
   .eq('code', code)
   .maybeSingle();
 
-const fetchCertificateByCode = async (code) => supabase
+const fetchCertificateByCode = async (code) => db
   .from('certificates')
   .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
   .eq('code', code)
   .maybeSingle();
 
-const fetchCertificateByCodeFallback = async (code) => supabase
+const fetchCertificateByCodeFallback = async (code) => db
   .from('certificates')
   .select('id, code, expires_at, is_used, metadata, service_ids')
   .eq('code', code)
   .maybeSingle();
 
-const fetchServicesByIds = async (serviceIds) => supabase
+const fetchServicesByIds = async (serviceIds) => db
   .from('services')
   .select('id, name, duration_minutes, base_price, category, is_active')
   .in('id', serviceIds);
 
-const fetchBarberById = async (barberId) => supabase
+const fetchBarberById = async (barberId) => db
   .from('barbers')
   .select('id, name, branch_id, is_active, is_on_shift')
   .eq('id', barberId)
   .maybeSingle();
 
-const fetchBarberUserRole = async (barberId) => supabase
+const fetchBarberUserRole = async (barberId) => db
   .from('users')
   .select('id, role')
   .eq('id', barberId)
@@ -225,8 +225,8 @@ const fetchBarberUserRole = async (barberId) => supabase
 
 const fetchBranchScheduleForDay = async ({ branchId, dayOfWeek, barberId, localDate }) => {
   // Fetch both personal (barber_id) and branch default (barber_id is null),
-  // then pick the best match in JS to avoid complex PostgREST boolean logic.
-  const { data: rows, error } = await supabase
+  // then pick the best match in JS to keep the SQL filter simple.
+  const { data: rows, error } = await db
     .from('barber_work_schedules')
     .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to')
     .eq('branch_id', branchId)
@@ -261,7 +261,7 @@ const fetchBranchScheduleForDay = async ({ branchId, dayOfWeek, barberId, localD
 };
 
 const fetchScheduledQueueEntriesForBarberDay = async ({ barberId, dayStartIso, dayEndIso }) => {
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('queue_entries')
     .select('id, barber_id, status, scheduled_start_at, scheduled_end_at')
     .eq('barber_id', barberId)

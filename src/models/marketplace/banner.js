@@ -1,6 +1,7 @@
-const { supabase } = require("../../config/supabase");
+const { db } = require("../../config/postgres");
 const {
-    uploadBufferToSupabaseWithFolder,
+    removeUploadedFile,
+    uploadBufferImageWithFolder,
 } = require("../../composable/uploadImage");
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
@@ -38,7 +39,7 @@ const formatBanner = (item, index = 0) => ({
 
 class BannerMarketplace {
     async all(req, res) {
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('banners')
             .select('*');
 
@@ -53,7 +54,7 @@ class BannerMarketplace {
 
     async getById(req, res) {
         const { id } = req.params;
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('banners')
             .select('*')
             .eq('id', id)
@@ -84,7 +85,7 @@ class BannerMarketplace {
             return res.status(400).json({ error: 'Image file (field "file") is required' });
         }
 
-        const { data: uploadData, error: uploadErr } = await uploadBufferToSupabaseWithFolder(
+        const { data: uploadData, error: uploadErr } = await uploadBufferImageWithFolder(
             file.buffer,
             file.mimetype,
             'banners',
@@ -122,7 +123,7 @@ class BannerMarketplace {
         if (!title_uz && !title_ru && !title_en) return res.status(400).json({ error: "At least one title (title_uz, title_ru, title_en) is required" });
         if (!description_uz && !description_ru && !description_en) return res.status(400).json({ error: "At least one description (description_uz, description_ru, description_en) is required" });
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('banners')
             .insert(insertPayload)
             .select('*')
@@ -131,7 +132,8 @@ class BannerMarketplace {
         if (error) {
             if (uploadData?.path) {
                 try {
-                    await supabase.storage.from('images').remove([uploadData.path]);
+                    const { error: removeError } = await removeUploadedFile(uploadData.path);
+                    if (removeError) throw removeError;
                 } catch (_removeErr) {
                     return res.status(500).json({ error: `Failed to clean up uploaded image after database error: ${_removeErr.message}` });
                 }
@@ -159,7 +161,7 @@ class BannerMarketplace {
 
         const file = req.file;
 
-        const { data: current, error: fetchError } = await supabase
+        const { data: current, error: fetchError } = await db
             .from('banners')
             .select('*')
             .eq('id', id)
@@ -175,7 +177,7 @@ class BannerMarketplace {
             }
 
             const { data: uploadData, error: uploadErr } =
-                await uploadBufferToSupabaseWithFolder(
+                await uploadBufferImageWithFolder(
                     file.buffer,
                     file.mimetype,
                     'banners',
@@ -210,7 +212,7 @@ class BannerMarketplace {
         const nextSortOrder = parseSortOrder(sort_order, current.sort_order);
         if (nextSortOrder === null) {
             if (uploadedImage?.path) {
-                await supabase.storage.from('images').remove([uploadedImage.path]).catch(() => { });
+                await removeUploadedFile(uploadedImage.path).catch(() => { });
             }
             return res.status(400).json({ error: 'sort_order must be a number' });
         }
@@ -234,14 +236,14 @@ class BannerMarketplace {
 
         if (!hasTitle || !hasDescription) {
             if (uploadedImage?.path) {
-                await supabase.storage.from('images').remove([uploadedImage.path]).catch(() => { });
+                await removeUploadedFile(uploadedImage.path).catch(() => { });
             }
             return res.status(400).json({
                 error: 'At least one title and one description must be provided',
             });
         }
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('banners')
             .update(nextEntry)
             .eq('id', id)
@@ -250,7 +252,7 @@ class BannerMarketplace {
 
         if (error) {
             if (uploadedImage?.path) {
-                await supabase.storage.from('images').remove([uploadedImage.path]).catch(() => { });
+                await removeUploadedFile(uploadedImage.path).catch(() => { });
             }
             return res.status(500).json({ error: error.message });
         }
@@ -258,7 +260,7 @@ class BannerMarketplace {
         if (uploadedImage?.path) {
             const oldPath = extractStoragePath(current.image_url);
             if (oldPath) {
-                await supabase.storage.from('images').remove([oldPath]).catch(() => { });
+                await removeUploadedFile(oldPath).catch(() => { });
             }
         }
 
@@ -266,6 +268,15 @@ class BannerMarketplace {
 
         function extractStoragePath(publicUrl) {
             if (!publicUrl) return null;
+            if (publicUrl.startsWith('/uploads/')) return publicUrl.slice('/uploads/'.length);
+            try {
+                const parsed = new URL(publicUrl);
+                if (parsed.pathname.startsWith('/uploads/')) {
+                    return decodeURIComponent(parsed.pathname.slice('/uploads/'.length));
+                }
+            } catch (_error) {
+                // Not an absolute URL.
+            }
             const match = publicUrl.match(/\/storage\/v1\/object\/public\/images\/(.+)$/);
             return match ? match[1] : null;
         }
@@ -275,7 +286,7 @@ class BannerMarketplace {
         const { id } = req.params;
         const { is_active } = req.body;
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from('banners')
             .update({ is_active })
             .eq('id', id)

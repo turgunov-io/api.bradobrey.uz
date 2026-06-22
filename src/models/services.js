@@ -1,4 +1,4 @@
-const { supabase } = require("../config/supabase");
+const { db } = require("../config/postgres");
 
 const DEFAULT_CATEGORY_LABEL = "Uncategorized";
 
@@ -31,7 +31,7 @@ class Services {
     async list(req, res) {
         const { active, grouped } = req.query || {};
 
-        let query = supabase.from("services").select("*");
+        let query = db.from("services").select("*");
 
         if (active !== undefined) {
             const activeFlag = String(active).toLowerCase() === "true" || active === "1";
@@ -58,7 +58,7 @@ class Services {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: "Service id is required" });
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from("services")
             .select("*")
             .eq("id", id)
@@ -87,7 +87,7 @@ class Services {
 
         const normalizedCategory = normalizeCategory(category);
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from("services")
             .insert({
                 name: String(name).trim(),
@@ -145,7 +145,7 @@ class Services {
             return res.status(400).json({ error: "No fields to update" });
         }
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from("services")
             .update(update)
             .eq("id", id)
@@ -162,7 +162,7 @@ class Services {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: "Service id is required" });
 
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from("services")
             .delete()
             .eq("id", id)

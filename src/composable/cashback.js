@@ -1,4 +1,4 @@
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const roundMoney = (value) => {
   const n = Number(value);
@@ -24,7 +24,7 @@ async function getServicesTotal(serviceIds) {
   const ids = Array.isArray(serviceIds) ? serviceIds.filter(Boolean) : [];
   if (!ids.length) return 0;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('services')
     .select('id,base_price')
     .in('id', ids);
@@ -47,7 +47,7 @@ const getOverrideTotal = (entry) => {
 async function getPromoForOrder(orderId) {
   if (!orderId) return null;
 
-  const { data: usage, error: usageError } = await supabase
+  const { data: usage, error: usageError } = await db
     .from('promo_code_usage')
     .select('promo_code_id, used_at')
     .eq('order_id', String(orderId))
@@ -58,7 +58,7 @@ async function getPromoForOrder(orderId) {
   if (usageError) throw usageError;
   if (!usage?.promo_code_id) return null;
 
-  const { data: promo, error: promoError } = await supabase
+  const { data: promo, error: promoError } = await db
     .from('promo_codes')
     .select('id, code, discount_type, discount_value')
     .eq('id', usage.promo_code_id)
@@ -115,7 +115,7 @@ async function spendCashback({ clientId, queueEntryId, amount, meta }) {
   const { ok, balance: nextBalance } = await decrementWalletBalance(clientId, amt);
   if (!ok) {
     if (transaction?.id) {
-      await supabase
+      await db
         .from('cashback_transactions')
         .delete()
         .eq('id', transaction.id)
@@ -139,9 +139,9 @@ async function refundCashbackSpend({ clientId, queueEntryId, amount, transaction
 
   try {
     if (transactionId) {
-      await supabase.from('cashback_transactions').delete().eq('id', transactionId);
+      await db.from('cashback_transactions').delete().eq('id', transactionId);
     } else if (queueEntryId) {
-      await supabase
+      await db
         .from('cashback_transactions')
         .delete()
         .eq('queue_entry_id', String(queueEntryId))
@@ -158,7 +158,7 @@ async function refundCashbackSpend({ clientId, queueEntryId, amount, transaction
 async function getCashbackSpendForOrder(orderId) {
   if (!orderId) return 0;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('cashback_transactions')
     .select('amount')
     .eq('queue_entry_id', String(orderId))
@@ -181,7 +181,7 @@ async function getCashbackSpendForOrder(orderId) {
 async function getWalletBalance(clientId) {
   if (!clientId) return 0;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('cashback_wallets')
     .select('client_id,balance')
     .eq('client_id', clientId)
@@ -202,7 +202,7 @@ async function getWalletBalance(clientId) {
 async function ensureWallet(clientId) {
   if (!clientId) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('cashback_wallets')
     .upsert({ client_id: clientId, balance: 0, updated_at: new Date().toISOString() }, {
       onConflict: 'client_id',
@@ -230,7 +230,7 @@ async function incrementWalletBalance(clientId, delta) {
   await ensureWallet(clientId);
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const { data: wallet, error: walletError } = await supabase
+    const { data: wallet, error: walletError } = await db
       .from('cashback_wallets')
       .select('client_id,balance')
       .eq('client_id', clientId)
@@ -248,7 +248,7 @@ async function incrementWalletBalance(clientId, delta) {
     const currentNum = Number.isFinite(current) ? current : 0;
     const next = roundMoney(currentNum + d);
 
-    const { data: updated, error: updateError } = await supabase
+    const { data: updated, error: updateError } = await db
       .from('cashback_wallets')
       .update({ balance: next, updated_at: new Date().toISOString() })
       .eq('client_id', clientId)
@@ -280,7 +280,7 @@ async function decrementWalletBalance(clientId, amount) {
   await ensureWallet(clientId);
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    const { data: wallet, error: walletError } = await supabase
+    const { data: wallet, error: walletError } = await db
       .from('cashback_wallets')
       .select('client_id,balance')
       .eq('client_id', clientId)
@@ -304,7 +304,7 @@ async function decrementWalletBalance(clientId, amount) {
 
     const next = roundMoney(currentRounded - amt);
 
-    const { data: updated, error: updateError } = await supabase
+    const { data: updated, error: updateError } = await db
       .from('cashback_wallets')
       .update({ balance: next, updated_at: new Date().toISOString() })
       .eq('client_id', clientId)
@@ -343,7 +343,7 @@ async function insertCashbackTransaction({ clientId, queueEntryId, kind, amount,
     meta: meta || null,
   };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('cashback_transactions')
     .insert(payload)
     .select('id, client_id, queue_entry_id, kind, amount, created_at');

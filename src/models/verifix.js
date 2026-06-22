@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { supabase } = require('../config/supabase');
+const { db } = require('../config/postgres');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 const BARBER_ROLES = new Set(['barber', 'super-barber']);
@@ -197,7 +197,7 @@ const requireAdmin = (req, res) => {
 const getBranch = async (branchId) => {
   if (!branchId) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('branches')
     .select('id, name, timezone')
     .eq('id', branchId)
@@ -210,7 +210,7 @@ const getBranch = async (branchId) => {
 const getBarber = async (barberId) => {
   if (!barberId) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('barbers')
     .select('id, name, branch_id')
     .eq('id', barberId)
@@ -227,7 +227,7 @@ const findSchedule = async ({ barberId, branchId, occurredAt, timeZone }) => {
   const dayOfWeek = dayOfWeekFromLocalParts(localParts);
   const dateKey = localDateKey(localParts);
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('barber_work_schedules')
     .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to')
     .eq('branch_id', branchId)
@@ -340,7 +340,7 @@ async function recordActivityEvent({
     ? metadata
     : {};
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('barber_activity_events')
     .insert({
       actor_id: actorId,
@@ -401,7 +401,7 @@ class Verifix {
       const requestedEventType = normalizeText(event_type);
       const lateOnly = parseBoolean(late_only, false);
 
-      let query = supabase
+      let query = db
         .from('barber_activity_events')
         .select('id, branch_id, barber_id, actor_id, actor_role, event_type, source, occurred_at, schedule_id, scheduled_start_at, grace_minutes, is_late, late_by_minutes, penalty_amount, penalty_reason, metadata, created_at, barber:barbers ( id, name ), branch:branches ( id, name )', { count: 'exact' })
         .order('occurred_at', { ascending: false })
@@ -507,7 +507,7 @@ class Verifix {
       const { barber_id, branch_id, active } = req.query || {};
       const activeFilter = parseBoolean(active, undefined);
 
-      let query = supabase
+      let query = db
         .from('barber_work_schedules')
         .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to, created_at, updated_at, barber:barbers ( id, name ), branch:branches ( id, name )')
         .order('day_of_week', { ascending: true })
@@ -557,7 +557,7 @@ class Verifix {
         return res.status(400).json({ error: 'end_time must be HH:mm or HH:mm:ss' });
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('barber_work_schedules')
         .insert({
           barber_id: barberId,
@@ -628,7 +628,7 @@ class Verifix {
       if (body.valid_from !== undefined) update.valid_from = normalizeDate(body.valid_from);
       if (body.valid_to !== undefined) update.valid_to = normalizeDate(body.valid_to);
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('barber_work_schedules')
         .update(update)
         .eq('id', id)
@@ -652,7 +652,7 @@ class Verifix {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'schedule id is required' });
 
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('barber_work_schedules')
         .update({ is_active: false, updated_at: new Date().toISOString() })
         .eq('id', id)

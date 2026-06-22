@@ -1,4 +1,4 @@
-const { supabase } = require("../config/supabase");
+const { db } = require("../config/postgres");
 const jwt = require("jsonwebtoken");
 
 const {
@@ -74,14 +74,14 @@ const isMissingColumnError = (error, column) => {
 };
 
 const fetchBranchForBooking = async (branchId) => {
-    let { data, error } = await supabase
+    let { data, error } = await db
         .from('branches')
         .select('id, timezone, marketplace_barbershop_id')
         .eq('id', branchId)
         .maybeSingle();
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-        ({ data, error } = await supabase
+        ({ data, error } = await db
             .from('branches')
             .select('id, timezone')
             .eq('id', branchId)
@@ -94,14 +94,14 @@ const fetchBranchForBooking = async (branchId) => {
 };
 
 const fetchCertificateForBooking = async (code) => {
-    let { data, error } = await supabase
+    let { data, error } = await db
         .from('certificates')
         .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
         .eq('code', code)
         .maybeSingle();
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-        ({ data, error } = await supabase
+        ({ data, error } = await db
             .from('certificates')
             .select('id, code, expires_at, is_used, metadata, service_ids')
             .eq('code', code)
@@ -140,7 +140,7 @@ const groupServicesByCategory = (services = []) => {
 const cleanupStaleQueuesForBranch = async (branchId) => {
     if (!branchId) return null;
     const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
-    return supabase
+    return db
         .from('queue_entries')
         .update({ status: 'no_show', finished_at: new Date().toISOString() })
         .eq('branch_id', branchId)
@@ -155,7 +155,7 @@ class Kiosk {
     }
 
     async config(_req, res) {
-        const { data, error } = await supabase
+        const { data, error } = await db
             .from("branches")
             .select("id, name, address");
 
@@ -164,7 +164,7 @@ class Kiosk {
         }
 
         let adsRow = null;
-        const { data: adsData, error: adsError } = await supabase
+        const { data: adsData, error: adsError } = await db
             .from('kiosk_ad_settings')
             .select('regular_urls, kids_urls, updated_at')
             .eq('id', 1)
@@ -191,7 +191,7 @@ class Kiosk {
             return res.status(400).json({ error: "branch_id and device_name are required" });
         }
 
-        const { data: branch, error: branchError } = await supabase
+        const { data: branch, error: branchError } = await db
             .from("branches")
             .select("id")
             .eq("id", branch_id)
@@ -204,7 +204,7 @@ class Kiosk {
             return res.status(404).json({ error: "Branch not found" });
         }
 
-        const { error: deleteError } = await supabase
+        const { error: deleteError } = await db
             .from("kiosks")
             .delete()
             .eq("branch_id", branch_id);
@@ -213,7 +213,7 @@ class Kiosk {
             return res.status(500).json({ error: deleteError.message });
         }
 
-        const { data: inserted, error: insertError } = await supabase
+        const { data: inserted, error: insertError } = await db
             .from("kiosks")
             .insert({
                 branch_id,
@@ -244,7 +244,7 @@ class Kiosk {
             console.error('stale queue cleanup failed:', e.message);
         }
 
-        const { data: barbers, error: barbersError } = await supabase
+        const { data: barbers, error: barbersError } = await db
             .from("barbers")
             .select("id, name, branch_id, photo_url, is_on_shift, is_active")
             .eq("branch_id", branch_id);
@@ -257,7 +257,7 @@ class Kiosk {
         let allowedBarberIds = new Set(barberIds);
 
         if (barberIds.length) {
-            const { data: users, error: usersError } = await supabase
+            const { data: users, error: usersError } = await db
                 .from('users')
                 .select('id, role')
                 .in('id', barberIds)
@@ -272,7 +272,7 @@ class Kiosk {
 
         const visibleBarbers = (barbers || []).filter((barber) => allowedBarberIds.has(barber.id));
 
-        const { data: rawQueues, error: queuesError } = await supabase
+        const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
             .select("id, barber_id, client_id, status, created_at, service_ids") // 🔥 ADDED service_ids
             .eq("branch_id", branch_id);
@@ -302,7 +302,7 @@ class Kiosk {
 
         let servicesById = {};
         if (allServiceIds.length) {
-            const { data: services, error: servicesError } = await supabase
+            const { data: services, error: servicesError } = await db
                 .from("services")
                 .select("id, duration_minutes, name")
                 .in("id", allServiceIds);
@@ -323,7 +323,7 @@ class Kiosk {
 
         let clientsById = {};
         if (clientIds.length) {
-            const { data: clients, error: clientsError } = await supabase
+            const { data: clients, error: clientsError } = await db
                 .from("clients")
                 .select("id, name")
                 .in("id", clientIds);
@@ -391,7 +391,7 @@ class Kiosk {
     async services(req, res) {
         const { active, grouped } = req.query || {};
 
-        let query = supabase.from("services").select("*");
+        let query = db.from("services").select("*");
 
         if (active !== undefined) {
             const activeFlag = String(active).toLowerCase() === "true" || active === "1";
@@ -491,7 +491,7 @@ class Kiosk {
                 return res.status(401).json({ error: 'Invalid token payload' });
             }
 
-            const { data: mpClient, error: mpError } = await supabase
+            const { data: mpClient, error: mpError } = await db
                 .from('marketplace_clients')
                 .select('id, phone, is_active')
                 .eq('id', marketplaceClientId)
@@ -567,7 +567,7 @@ class Kiosk {
             scheduledEndAtIso = end.toISOString();
         }
 
-        const { data: barber, error: barberError } = await supabase
+        const { data: barber, error: barberError } = await db
             .from('barbers')
             .select('id, branch_id, is_on_shift, is_authorized')
             .eq('id', barber_id)
@@ -578,7 +578,7 @@ class Kiosk {
             return res.status(400).json({ error: 'Barber does not belong to this branch' });
         }
 
-        const { data: barberUser, error: barberUserError } = await supabase
+        const { data: barberUser, error: barberUserError } = await db
             .from('users')
             .select('id, role')
             .eq('id', barber_id)
@@ -589,7 +589,7 @@ class Kiosk {
             return res.status(400).json({ error: 'Selected employee is not available as a barber' });
         }
 
-        const { data: services, error: servicesError } = await supabase
+        const { data: services, error: servicesError } = await db
             .from('services')
             .select('id, is_active, base_price')
             .in('id', serviceIds);
@@ -616,7 +616,7 @@ class Kiosk {
 
         let promo = null;
         if (normalizedPromoCode) {
-            const { data: promoData, error: promoError } = await supabase
+            const { data: promoData, error: promoError } = await db
                 .from('promo_codes')
                 .select('*')
                 .eq('code', normalizedPromoCode)
@@ -688,7 +688,7 @@ class Kiosk {
         const discountedTotal = applyPromoDiscount(finalOrderTotal, promo);
 
         let clientId;
-        const { data: existingClient, error: clientLookupError } = await supabase
+        const { data: existingClient, error: clientLookupError } = await db
             .from('clients')
             .select('id, name')
             .eq('phone', normalizedPhone)
@@ -698,10 +698,10 @@ class Kiosk {
         if (existingClient) {
             clientId = existingClient.id;
             if (!existingClient.name) {
-                await supabase.from('clients').update({ name: customer_name }).eq('id', clientId);
+                await db.from('clients').update({ name: customer_name }).eq('id', clientId);
             }
         } else {
-            const { data: newClient, error: clientCreateError } = await supabase
+            const { data: newClient, error: clientCreateError } = await db
                 .from('clients')
                 .insert({ name: customer_name, phone: normalizedPhone })
                 .select('id')
@@ -728,7 +728,7 @@ class Kiosk {
 
         const queueEntrySelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, certificate_id';
 
-        const { data: entry, error: insertError } = await supabase
+        const { data: entry, error: insertError } = await db
             .from('queue_entries')
             .insert(insertPayload)
             .select(queueEntrySelect)
@@ -740,7 +740,7 @@ class Kiosk {
             }
 
             if (insertError.code === '23505' && normalizedIdempotencyKey) {
-                const { data: existingEntry, error: existingEntryError } = await supabase
+                const { data: existingEntry, error: existingEntryError } = await db
                     .from('queue_entries')
                     .select(queueEntrySelect)
                     .eq('idempotency_key', normalizedIdempotencyKey)
@@ -753,7 +753,7 @@ class Kiosk {
                     return res.status(409).json({ error: 'Idempotency key already used' });
                 }
 
-                const { data: existingClient, error: existingClientError } = await supabase
+                const { data: existingClient, error: existingClientError } = await db
                     .from('clients')
                     .select('id, phone')
                     .eq('id', existingEntry.client_id)
@@ -769,14 +769,14 @@ class Kiosk {
 
                 let existingCertificate = null;
                 if (existingEntry.certificate_id) {
-                    const { data: certRow, error: certError } = await supabase
+                    const { data: certRow, error: certError } = await db
                         .from('certificates')
                         .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
                         .eq('id', existingEntry.certificate_id)
                         .maybeSingle();
 
                     if (certError && isMissingColumnError(certError, 'marketplace_barbershop_id')) {
-                        const { data: certFallback, error: certFallbackError } = await supabase
+                        const { data: certFallback, error: certFallbackError } = await db
                             .from('certificates')
                             .select('id, code, expires_at, is_used, metadata, service_ids')
                             .eq('id', existingEntry.certificate_id)
@@ -799,7 +799,7 @@ class Kiosk {
                         ? [existingEntry.service_id]
                         : [];
 
-                const { data: existingServices, error: existingServicesError } = await supabase
+                const { data: existingServices, error: existingServicesError } = await db
                     .from('services')
                     .select('id, base_price')
                     .in('id', existingServiceIds);
@@ -812,7 +812,7 @@ class Kiosk {
                     sum + Number(s?.base_price || 0)
                 ), 0));
 
-                const { data: promoUsage, error: promoUsageError } = await supabase
+                const { data: promoUsage, error: promoUsageError } = await db
                     .from('promo_code_usage')
                     .select('id, promo_code_id, order_id, used_at')
                     .eq('order_id', String(existingEntry.id))
@@ -828,7 +828,7 @@ class Kiosk {
                 let promoForDiscount = null;
 
                 if (promoUsage?.promo_code_id) {
-                    const { data: promoRow, error: promoRowError } = await supabase
+                    const { data: promoRow, error: promoRowError } = await db
                         .from('promo_codes')
                         .select('code, discount_type, discount_value')
                         .eq('id', promoUsage.promo_code_id)
@@ -854,7 +854,7 @@ class Kiosk {
                 let payableTotal = existingEntry.certificate_id ? 0 : existingDiscountedTotal;
 
                 try {
-                    const { data: cashbackTx, error: cashbackError } = await supabase
+                    const { data: cashbackTx, error: cashbackError } = await db
                         .from('cashback_transactions')
                         .select('id, amount')
                         .eq('queue_entry_id', String(existingEntry.id))
@@ -902,14 +902,14 @@ class Kiosk {
             ) {
                 return res.status(501).json({
                     error: 'Scheduling is not configured (missing scheduled_start_at/scheduled_end_at columns)',
-                    hint: 'Apply db/supabase/queue_entries_scheduling.sql and refresh PostgREST schema cache',
+                    hint: 'Apply db/postgres/queue_entries_scheduling.sql',
                 });
             }
 
             if (insertPayload.idempotency_key && isMissingColumnError(insertError, 'idempotency_key')) {
                 return res.status(501).json({
                     error: 'Idempotency is not configured (missing idempotency_key column)',
-                    hint: 'Apply db/supabase/queue_entries_scheduling.sql and refresh PostgREST schema cache',
+                    hint: 'Apply db/postgres/queue_entries_scheduling.sql',
                 });
             }
 
@@ -917,7 +917,7 @@ class Kiosk {
         }
 
         if (certificate) {
-            const { data: usedCert, error: useError } = await supabase
+            const { data: usedCert, error: useError } = await db
                 .from('certificates')
                 .update({ is_used: true })
                 .eq('id', certificate.id)
@@ -929,7 +929,7 @@ class Kiosk {
                 return res.status(500).json({ error: useError.message });
             }
             if (!usedCert) {
-                await supabase.from('queue_entries').delete().eq('id', entry.id);
+                await db.from('queue_entries').delete().eq('id', entry.id);
                 return res.status(400).json({ error: 'Certificate already used' });
             }
         }
@@ -955,7 +955,7 @@ class Kiosk {
                 });
 
                 if (!spendRes?.spent) {
-                    await supabase.from('queue_entries').delete().eq('id', entry.id);
+                    await db.from('queue_entries').delete().eq('id', entry.id);
                     const status = spendRes?.reason === 'insufficient_balance' ? 409 : 500;
                     return res.status(status).json({
                         error:
@@ -985,7 +985,7 @@ class Kiosk {
 
         let promo_usage = null;
         if (promo) {
-            const { data: insertedUsage, error: usageError } = await supabase
+            const { data: insertedUsage, error: usageError } = await db
                 .from('promo_code_usage')
                 .insert({
                     promo_code_id: promo.id,
@@ -1006,7 +1006,7 @@ class Kiosk {
                         transactionId: cashback.transaction_id,
                     });
                 }
-                await supabase.from('queue_entries').delete().eq('id', entry.id);
+                await db.from('queue_entries').delete().eq('id', entry.id);
                 return res.status(500).json({ error: usageError?.message || 'Failed to record promo code usage' });
             }
 
@@ -1021,7 +1021,7 @@ class Kiosk {
                     const nextCount = currentCount + 1;
 
                     if (nextCount > limit) {
-                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await db.from('promo_code_usage').delete().eq('id', insertedUsage.id);
                         if (cashback?.spent_amount) {
                             await refundCashbackSpend({
                                 clientId,
@@ -1030,11 +1030,11 @@ class Kiosk {
                                 transactionId: cashback.transaction_id,
                             });
                         }
-                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        await db.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(409).json({ error: 'Promo code limit reached' });
                     }
 
-                    const { data: updatedPromo, error: updateError } = await supabase
+                    const { data: updatedPromo, error: updateError } = await db
                         .from('promo_codes')
                         .update({ used_count: nextCount })
                         .eq('id', promo.id)
@@ -1043,7 +1043,7 @@ class Kiosk {
                         .maybeSingle();
 
                     if (updateError) {
-                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await db.from('promo_code_usage').delete().eq('id', insertedUsage.id);
                         if (cashback?.spent_amount) {
                             await refundCashbackSpend({
                                 clientId,
@@ -1052,7 +1052,7 @@ class Kiosk {
                                 transactionId: cashback.transaction_id,
                             });
                         }
-                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        await db.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(500).json({ error: updateError.message });
                     }
 
@@ -1065,14 +1065,14 @@ class Kiosk {
                         break;
                     }
 
-                    const { data: freshPromo, error: freshError } = await supabase
+                    const { data: freshPromo, error: freshError } = await db
                         .from('promo_codes')
                         .select('used_count, usage_limit, status, is_unlimited')
                         .eq('id', promo.id)
                         .maybeSingle();
 
                     if (freshError || !freshPromo) {
-                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await db.from('promo_code_usage').delete().eq('id', insertedUsage.id);
                         if (cashback?.spent_amount) {
                             await refundCashbackSpend({
                                 clientId,
@@ -1081,12 +1081,12 @@ class Kiosk {
                                 transactionId: cashback.transaction_id,
                             });
                         }
-                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        await db.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(409).json({ error: freshError?.message || 'Promo code update conflict' });
                     }
 
                     if (freshPromo.status !== 'active') {
-                        await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                        await db.from('promo_code_usage').delete().eq('id', insertedUsage.id);
                         if (cashback?.spent_amount) {
                             await refundCashbackSpend({
                                 clientId,
@@ -1095,7 +1095,7 @@ class Kiosk {
                                 transactionId: cashback.transaction_id,
                             });
                         }
-                        await supabase.from('queue_entries').delete().eq('id', entry.id);
+                        await db.from('queue_entries').delete().eq('id', entry.id);
                         return res.status(409).json({ error: 'Promo code inactive' });
                     }
 
@@ -1106,7 +1106,7 @@ class Kiosk {
                 }
 
                 if (!updated) {
-                    await supabase.from('promo_code_usage').delete().eq('id', insertedUsage.id);
+                    await db.from('promo_code_usage').delete().eq('id', insertedUsage.id);
                     if (cashback?.spent_amount) {
                         await refundCashbackSpend({
                             clientId,
@@ -1115,7 +1115,7 @@ class Kiosk {
                             transactionId: cashback.transaction_id,
                         });
                     }
-                    await supabase.from('queue_entries').delete().eq('id', entry.id);
+                    await db.from('queue_entries').delete().eq('id', entry.id);
                     return res.status(409).json({ error: 'Promo code update conflict' });
                 }
             }
@@ -1149,7 +1149,7 @@ class Kiosk {
             return res.status(400).json({ error: 'certificate id is required' });
         }
 
-        const { data: cert, error } = await supabase
+        const { data: cert, error } = await db
             .from('certificates')
             .select('id, code, expires_at, is_used, metadata, service_ids')
             .eq('code', id)
