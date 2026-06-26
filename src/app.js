@@ -67,6 +67,18 @@ app.use('/api/kiosk-ads', kioskAds);
 app.use('/api/verifix', verifix);
 app.use('/api/merchant', merchant);
 
+app.get('/today/date/', (req, res) => {
+  const date = new Date()
+
+  const day = String(date.getDate()).padStart(2, '0')
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const year = String(date.getFullYear()).slice(-2)
+
+  res.json({
+    date: `${day}:${month}:${year}`
+  })
+})
+
 // Marketplace App
 app.use('/api/marketplace', marketplace);
 
