@@ -60,6 +60,89 @@ const isMissingColumnError = (error, column) => {
     ));
 };
 
+const isMissingRelationError = (error, relation) => {
+  const message = [error?.message, error?.details, error?.hint]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  return ['42p01', '42P01'].includes(String(error?.code || ''))
+    || (message.includes(relation.toLowerCase()) && (
+      message.includes('does not exist')
+      || message.includes('could not find')
+      || message.includes('schema cache')
+    ));
+};
+
+const resolveBarbershopIdFromBranch = async (branchId) => {
+  const normalizedBranchId = normalizeId(branchId);
+  if (!normalizedBranchId) return null;
+
+  try {
+    const result = await db.query(
+      `select marketplace_barbershop_id
+       from branches
+       where id = $1
+       limit 1`,
+      [normalizedBranchId]
+    );
+
+    return normalizeId(result.rows[0]?.marketplace_barbershop_id);
+  } catch (error) {
+    if (isMissingColumnError(error, 'marketplace_barbershop_id')) return null;
+    throw error;
+  }
+};
+
+const resolveSingleBarbershopId = async () => {
+  try {
+    const result = await db.query(
+      `select id
+       from marketplace_barbershops
+       where not (coalesce(metadata, '{}'::jsonb) ? 'legacy_branch_id')
+         and coalesce(metadata ->> 'fallback', 'false') <> 'true'
+       order by sort_order asc, name asc, id asc
+       limit 2`
+    );
+
+    return result.rows.length === 1 ? normalizeId(result.rows[0]?.id) : null;
+  } catch (error) {
+    if (isMissingRelationError(error, 'marketplace_barbershops')) return null;
+    throw error;
+  }
+};
+
+const persistUserBarbershopId = async (userId, barbershopId) => {
+  const normalizedUserId = normalizeId(userId);
+  const normalizedBarbershopId = normalizeId(barbershopId);
+  if (!normalizedUserId || !normalizedBarbershopId) return;
+
+  try {
+    await db.query(
+      `update users
+       set marketplace_barbershop_id = $1
+       where id = $2
+         and marketplace_barbershop_id is null`,
+      [normalizedBarbershopId, normalizedUserId]
+    );
+  } catch (error) {
+    if (!isMissingColumnError(error, 'marketplace_barbershop_id')) throw error;
+  }
+};
+
+const resolveMerchantBarbershopId = async (user) => {
+  const assignedBarbershopId = normalizeId(user?.marketplace_barbershop_id);
+  if (assignedBarbershopId) return assignedBarbershopId;
+
+  const branchBarbershopId = await resolveBarbershopIdFromBranch(user?.branch_id);
+  const resolvedBarbershopId = branchBarbershopId || await resolveSingleBarbershopId();
+  if (!resolvedBarbershopId) return null;
+
+  await persistUserBarbershopId(user.id, resolvedBarbershopId);
+  user.marketplace_barbershop_id = resolvedBarbershopId;
+  return resolvedBarbershopId;
+};
+
 const requireMerchantAccess = async (req, res) => {
   const token = getBearerToken(req);
   if (!token) {
@@ -117,7 +200,14 @@ const requireMerchantAccess = async (req, res) => {
     return null;
   }
 
-  const barbershopId = normalizeId(user.marketplace_barbershop_id);
+  let barbershopId;
+  try {
+    barbershopId = await resolveMerchantBarbershopId(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+    return null;
+  }
+
   if (!barbershopId) {
     res.status(403).json({ error: 'marketplace_barbershop_id is not assigned for this user' });
     return null;

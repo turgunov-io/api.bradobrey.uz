@@ -13,6 +13,9 @@ const STALE_QUEUE_HOURS = 9;
 const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber'];
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
+const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
+const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
+const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
 
 const normalizeText = (value) => {
     if (value === undefined || value === null) return null;
@@ -147,6 +150,34 @@ const cleanupStaleQueuesForBranch = async (branchId) => {
         .lte('created_at', cutoffIso)
         .in('status', ['waiting', 'called', 'swapped'])
         .select('id');
+};
+
+const serviceIdsForEntry = (entry = {}) => {
+    if (Array.isArray(entry.service_ids) && entry.service_ids.length) return entry.service_ids.filter(Boolean);
+    return entry.service_id ? [entry.service_id] : [];
+};
+
+const estimatedMinutesForQueue = async (entries = []) => {
+    const serviceIds = Array.from(new Set(entries.flatMap(serviceIdsForEntry)));
+    if (!serviceIds.length) return new Map(entries.map((entry) => [entry.id, 0]));
+
+    const { data: services, error } = await db
+        .from('services')
+        .select('id, duration_minutes')
+        .in('id', serviceIds);
+
+    if (error) throw error;
+
+    const durationByServiceId = new Map(
+        (services || []).map((service) => [String(service.id), Number(service.duration_minutes || 0)])
+    );
+
+    return new Map(entries.map((entry) => [
+        entry.id,
+        serviceIdsForEntry(entry).reduce((sum, serviceId) => (
+            sum + (durationByServiceId.get(String(serviceId)) || 0)
+        ), 0),
+    ]));
 };
 
 class Kiosk {
@@ -1141,6 +1172,101 @@ class Kiosk {
             },
             cashback,
         });
+    }
+
+    async queueStatus(req, res) {
+        const { id } = req.params || {};
+        if (!id) return res.status(400).json({ error: 'queue id is required' });
+
+        const queueSelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, started_at, finished_at';
+        const { data: entry, error } = await db
+            .from('queue_entries')
+            .select(queueSelect)
+            .eq('id', id)
+            .maybeSingle();
+
+        if (error) return res.status(500).json({ error: error.message });
+        if (!entry) return res.status(404).json({ error: 'Queue entry not found' });
+
+        if (TERMINAL_QUEUE_STATUSES.includes(entry.status)) {
+            return res.json({
+                entry,
+                estimated_time: 0,
+                estimated_waiting_time: 0,
+            });
+        }
+
+        const { data: activeEntries, error: activeError } = await db
+            .from('queue_entries')
+            .select(queueSelect)
+            .eq('branch_id', entry.branch_id)
+            .eq('barber_id', entry.barber_id)
+            .in('status', ACTIVE_QUEUE_STATUSES)
+            .order('created_at', { ascending: true });
+
+        if (activeError) return res.status(500).json({ error: activeError.message });
+
+        let durationByEntryId;
+        try {
+            durationByEntryId = await estimatedMinutesForQueue(activeEntries || []);
+        } catch (durationError) {
+            return res.status(500).json({ error: durationError.message });
+        }
+
+        let estimatedWaitingTime = 0;
+        for (const item of activeEntries || []) {
+            estimatedWaitingTime += durationByEntryId.get(item.id) || 0;
+            if (item.id === entry.id) break;
+        }
+
+        return res.json({
+            entry,
+            estimated_time: durationByEntryId.get(entry.id) || 0,
+            estimated_waiting_time: estimatedWaitingTime,
+        });
+    }
+
+    async cancelQueue(req, res) {
+        const { id } = req.params || {};
+        if (!id) return res.status(400).json({ error: 'queue id is required' });
+
+        const queueSelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, finished_at';
+        const finishedAt = new Date().toISOString();
+        const { data: cancelled, error } = await db
+            .from('queue_entries')
+            .update({ status: 'cancelled', finished_at: finishedAt })
+            .eq('id', id)
+            .in('status', CLIENT_CANCELLABLE_STATUSES)
+            .select(queueSelect)
+            .maybeSingle();
+
+        if (error) return res.status(500).json({ error: error.message });
+
+        if (!cancelled) {
+            const { data: existing, error: lookupError } = await db
+                .from('queue_entries')
+                .select(queueSelect)
+                .eq('id', id)
+                .maybeSingle();
+
+            if (lookupError) return res.status(500).json({ error: lookupError.message });
+            if (!existing) return res.status(404).json({ error: 'Queue entry not found' });
+
+            return res.status(409).json({
+                error: 'Queue entry cannot be cancelled in its current status',
+                entry: existing,
+            });
+        }
+
+        const io = req.app.get('io');
+        if (io && cancelled.branch_id) {
+            io.to(`branch:${cancelled.branch_id}`).emit('queue:update', {
+                type: 'queue_cancelled',
+                entry: cancelled,
+            });
+        }
+
+        return res.json({ cancelled: true, entry: cancelled });
     }
 
     async certificate(req, res) {
