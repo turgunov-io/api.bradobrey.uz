@@ -6,6 +6,7 @@ const morgan = require('morgan');
 const { uploadRoot } = require('./config/uploads');
 
 const kiosk = require('./routers/kiosk');
+const monitor = require('./routers/monitor');
 const certificate = require('./routers/certificate');
 const finance = require('./routers/finance');
 const services = require('./routers/services');
@@ -55,6 +56,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/barbers', barbers);
 app.use('/api/branches', branches);
 app.use('/api/kiosk', kiosk);
+app.use('/api/monitor', monitor);
 app.use('/api/certificate', certificate);
 app.use('/api/finance', finance);
 app.use('/api/services', services);
