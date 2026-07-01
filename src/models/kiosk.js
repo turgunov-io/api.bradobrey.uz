@@ -1,4 +1,5 @@
 const { db } = require("../config/postgres");
+const { toAbsolutePublicUrl } = require("../config/uploads");
 const jwt = require("jsonwebtoken");
 
 const {
@@ -21,6 +22,18 @@ const normalizeText = (value) => {
     if (value === undefined || value === null) return null;
     const text = String(value).trim();
     return text || null;
+};
+
+const parseBoolean = (value, fallback = undefined) => {
+    if (value === undefined) return fallback;
+    if (value === null) return null;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+
+    const normalized = String(value).trim().toLowerCase();
+    if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+    return fallback;
 };
 
 const getZonedDateString = (date, timeZone) => {
@@ -150,6 +163,14 @@ const cleanupStaleQueuesForBranch = async (branchId) => {
         .lte('created_at', cutoffIso)
         .in('status', ['waiting', 'called', 'swapped'])
         .select('id');
+};
+
+const serviceItem = (req, service) => {
+    if (!service) return service;
+    return {
+        ...service,
+        image: service.image ? toAbsolutePublicUrl(service.image, req) : null,
+    };
 };
 
 const serviceIdsForEntry = (entry = {}) => {
@@ -420,13 +441,15 @@ class Kiosk {
     }
 
     async services(req, res) {
-        const { active, grouped } = req.query || {};
+        const { active, grouped, include_inactive } = req.query || {};
 
         let query = db.from("services").select("*");
 
         if (active !== undefined) {
             const activeFlag = String(active).toLowerCase() === "true" || active === "1";
             query = query.eq("is_active", activeFlag);
+        } else if (!parseBoolean(include_inactive, false)) {
+            query = query.eq("is_active", true);
         }
 
         const { data, error } = await query
@@ -438,7 +461,7 @@ class Kiosk {
             return res.status(500).json({ error: error.message });
         }
 
-        const services = data || [];
+        const services = (data || []).map((service) => serviceItem(req, service));
         const categories = groupServicesByCategory(services);
 
         if (grouped === "true" || grouped === "1") {

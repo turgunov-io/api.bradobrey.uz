@@ -1,6 +1,7 @@
 const bcrypto = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
+const { toAbsolutePublicUrl } = require('../config/uploads');
 
 const ACTIVE_ORDER_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
@@ -11,6 +12,11 @@ const normalizeText = (value) => {
   if (value === null) return null;
   const text = String(value).trim();
   return text || null;
+};
+
+const normalizeImageUrl = (req, value) => {
+  const normalized = normalizeText(value);
+  return normalized ? toAbsolutePublicUrl(normalized, req) : normalized;
 };
 
 const normalizeId = (value) => {
@@ -239,12 +245,12 @@ const barberItem = (row) => ({
   updated_at: row?.updated_at || null,
 });
 
-const serviceItem = (row) => ({
+const serviceItem = (row, req = null) => ({
   category_name: row?.category || null,
   created_at: row?.created_at || null,
   duration_minutes: row?.duration_minutes ?? null,
   id: row?.id,
-  image: row?.image || null,
+  image: row?.image ? toAbsolutePublicUrl(row.image, req) : null,
   is_active: row?.is_active ?? null,
   name: row?.name || null,
   price: row?.base_price ?? null,
@@ -969,7 +975,7 @@ class Merchant {
     if (!access) return;
 
     try {
-      const includeInactive = parseBoolean(req.query?.include_inactive, true);
+      const includeInactive = parseBoolean(req.query?.include_inactive, false);
       const activeFilter = includeInactive === false ? 'and is_active = true' : '';
       const result = await db.query(
         `select id, name, duration_minutes, base_price, category, image, is_active, created_at, updated_at
@@ -978,7 +984,7 @@ class Merchant {
          order by category asc nulls last, name asc`,
         [access.barbershopId]
       );
-      const items = result.rows.map(serviceItem);
+      const items = result.rows.map((row) => serviceItem(row, req));
       return res.json({ items, total: items.length });
     } catch (error) {
       return res.status(500).json({ error: error.message });
@@ -1004,12 +1010,12 @@ class Merchant {
           payload.duration_minutes,
           payload.base_price,
           payload.category || null,
-          payload.image || null,
+          normalizeImageUrl(req, payload.image) || null,
           payload.is_active,
           access.barbershopId,
         ]
       );
-      return res.status(201).json({ item: serviceItem(result.rows[0]) });
+      return res.status(201).json({ item: serviceItem(result.rows[0], req) });
     } catch (error) {
       return res.status(500).json({ error: error.message });
     }
@@ -1031,6 +1037,7 @@ class Merchant {
 
     try {
       payload.updated_at = new Date().toISOString();
+      if (payload.image !== undefined) payload.image = normalizeImageUrl(req, payload.image);
       const keys = Object.keys(payload);
       const values = keys.map((key) => payload[key]);
       const setSql = keys.map((key, index) => `${key} = $${index + 1}`).join(', ');
@@ -1043,7 +1050,7 @@ class Merchant {
       );
 
       if (!result.rows[0]) return res.status(404).json({ error: 'Service not found' });
-      return res.json({ item: serviceItem(result.rows[0]) });
+      return res.json({ item: serviceItem(result.rows[0], req) });
     } catch (error) {
       return res.status(500).json({ error: error.message });
     }
@@ -1059,9 +1066,9 @@ class Merchant {
     try {
       const result = await db.query(
         `delete from services
-         where id = $1 and marketplace_barbershop_id = $2
+         where id = $1
          returning id`,
-        [id, access.barbershopId]
+        [id]
       );
       if (!result.rows[0]) return res.status(404).json({ error: 'Service not found' });
       return res.json({ deleted: true, id: result.rows[0].id });
@@ -1070,9 +1077,9 @@ class Merchant {
         const result = await db.query(
           `update services
            set is_active = false, updated_at = now()
-           where id = $1 and marketplace_barbershop_id = $2
+           where id = $1
            returning id`,
-          [id, access.barbershopId]
+          [id]
         );
         if (!result.rows[0]) return res.status(404).json({ error: 'Service not found' });
         return res.json({ deleted: true, id: result.rows[0].id, soft_deleted: true });

@@ -1,4 +1,5 @@
 const { db } = require("../config/postgres");
+const { toAbsolutePublicUrl } = require("../config/uploads");
 const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
 
 const DEFAULT_CATEGORY_LABEL = "Uncategorized";
@@ -15,6 +16,21 @@ const normalizeText = (value) => {
     const trimmed = String(value).trim();
     return trimmed.length ? trimmed : null;
 };
+
+const normalizeImageUrl = (req, value) => {
+    const normalized = normalizeText(value);
+    return normalized ? toAbsolutePublicUrl(normalized, req) : normalized;
+};
+
+const serviceItem = (req, service) => {
+    if (!service) return service;
+    return {
+        ...service,
+        image: service.image ? toAbsolutePublicUrl(service.image, req) : null,
+    };
+};
+
+const serviceItems = (req, services = []) => (services || []).map((service) => serviceItem(req, service));
 
 const parseBoolean = (value, fallback = undefined) => {
     if (value === undefined) return fallback;
@@ -63,13 +79,15 @@ const groupServicesByCategory = (services = []) => {
 
 class Services {
     async list(req, res) {
-        const { active, grouped } = req.query || {};
+        const { active, grouped, include_inactive } = req.query || {};
 
         let query = db.from("services").select("*");
 
         if (active !== undefined) {
             const activeFlag = String(active).toLowerCase() === "true" || active === "1";
             query = query.eq("is_active", activeFlag);
+        } else if (!parseBoolean(include_inactive, false)) {
+            query = query.eq("is_active", true);
         }
 
         const { data, error } = await query
@@ -79,13 +97,14 @@ class Services {
 
         if (error) return res.status(500).json({ error: error.message });
 
-        const categories = groupServicesByCategory(data || []);
+        const items = serviceItems(req, data || []);
+        const categories = groupServicesByCategory(items);
 
         if (grouped === "true" || grouped === "1") {
             return res.json({ categories });
         }
 
-        return res.json({ categories });
+        return res.json({ data: items, services: items, categories });
     }
 
     async getById(req, res) {
@@ -101,7 +120,7 @@ class Services {
         if (error) return res.status(500).json({ error: error.message });
         if (!data) return res.status(404).json({ error: "Service not found" });
 
-        return res.json({ entry: data });
+        return res.json({ entry: serviceItem(req, data) });
     }
 
     async create(req, res) {
@@ -150,7 +169,9 @@ class Services {
                 branch_id: normalizeText(branch_id),
                 category: normalizedCategory,
                 duration_minutes: durationValue,
-                image: uploadedImageUrl !== undefined ? uploadedImageUrl : normalizeText(image),
+                image: uploadedImageUrl !== undefined
+                    ? normalizeImageUrl(req, uploadedImageUrl)
+                    : normalizeImageUrl(req, image),
                 is_active: parseBoolean(is_active, true),
                 marketplace_barbershop_id: normalizeText(marketplace_barbershop_id),
                 name: String(name).trim(),
@@ -159,7 +180,7 @@ class Services {
             .maybeSingle();
 
         if (error) return res.status(500).json({ error: error.message });
-        return res.status(201).json(data);
+        return res.status(201).json(serviceItem(req, data));
     }
 
     async update(req, res) {
@@ -215,9 +236,9 @@ class Services {
         }
 
         if (uploadedImageUrl !== undefined) {
-            update.image = uploadedImageUrl;
+            update.image = normalizeImageUrl(req, uploadedImageUrl);
         } else if (image !== undefined) {
-            update.image = normalizeText(image);
+            update.image = normalizeImageUrl(req, image);
         }
 
         if (category !== undefined || category_name !== undefined) {
@@ -248,11 +269,13 @@ class Services {
         if (error) return res.status(500).json({ error: error.message });
         if (!data) return res.status(404).json({ error: "Service not found" });
 
-        return res.json(data);
+        return res.json(serviceItem(req, data));
     }
 
     async remove(req, res) {
-        const { id } = req.params || {};
+        const id = normalizeText(
+            req.params?.id ?? req.body?.id ?? req.body?.service_id ?? req.query?.id ?? req.query?.service_id
+        );
         if (!id) return res.status(400).json({ error: "Service id is required" });
 
         const { data, error } = await db
@@ -262,7 +285,23 @@ class Services {
             .select("id")
             .maybeSingle();
 
-        if (error) return res.status(500).json({ error: error.message });
+        if (error) {
+            if (String(error.code) === "23503") {
+                const { data: softDeleted, error: softDeleteError } = await db
+                    .from("services")
+                    .update({ is_active: false, updated_at: new Date().toISOString() })
+                    .eq("id", id)
+                    .select("id")
+                    .maybeSingle();
+
+                if (softDeleteError) return res.status(500).json({ error: softDeleteError.message });
+                if (!softDeleted) return res.status(404).json({ error: "Service not found" });
+
+                return res.json({ deleted: true, id: softDeleted.id, soft_deleted: true });
+            }
+
+            return res.status(500).json({ error: error.message });
+        }
         if (!data) return res.status(404).json({ error: "Service not found" });
 
         return res.json({ deleted: true, id: data.id });
