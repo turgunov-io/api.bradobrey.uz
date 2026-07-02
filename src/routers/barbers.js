@@ -3,6 +3,7 @@ const multer = require("multer");
 const router = express.Router();
 
 const barbers = require('../models/barbers')
+const verifix = require('../models/verifix')
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -31,6 +32,8 @@ router.patch("/queue/:id/not-in-time", (req, res) => barbers.markNotInTime(req, 
 
 router.post("/break", (req, res) => barbers.takeBreak(req, res));
 router.post("/return", (req, res) => barbers.returnFromBreak(req, res));
+router.post("/shift/start", (req, res) => verifix.startShift(req, res));
+router.post("/shift/end", (req, res) => verifix.endShift(req, res));
 router.patch("/:id", upload.single('file'), (req, res) => barbers.updateEmployee(req, res));
 router.delete("/:id", (req, res) => barbers.removeEmployee(req, res));
 

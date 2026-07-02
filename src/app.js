@@ -21,6 +21,7 @@ const promoCode = require('./routers/promocode');
 const loyalty = require('./routers/loyalty');
 const kioskAds = require('./routers/kioskAds');
 const verifix = require('./routers/verifix');
+const warehouse = require('./routers/warehouse');
 
 const app = express();
 
@@ -67,6 +68,7 @@ app.use('/api/promo-code', promoCode);
 app.use('/api/loyalty', loyalty);
 app.use('/api/kiosk-ads', kioskAds);
 app.use('/api/verifix', verifix);
+app.use('/api/warehouse', warehouse);
 app.use('/api/merchant', merchant);
 
 app.get('/today/date/', (req, res) => {

@@ -499,6 +499,85 @@ class Verifix {
     }
   }
 
+  async startShift(req, res) {
+    return this.setShiftState(req, res, {
+      eventType: 'shift_start',
+      isOnShift: true,
+      metadataFlag: 'manual_shift_start',
+    });
+  }
+
+  async endShift(req, res) {
+    return this.setShiftState(req, res, {
+      eventType: 'shift_end',
+      isOnShift: false,
+      metadataFlag: 'manual_shift_end',
+    });
+  }
+
+  async setShiftState(req, res, { eventType, isOnShift, metadataFlag }) {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+
+    try {
+      const isAdmin = ADMIN_ROLES.has(auth.role);
+      const isBarber = BARBER_ROLES.has(auth.role);
+      if (!isAdmin && !isBarber) {
+        return res.status(403).json({ error: 'Only admins or barbers can change shift state' });
+      }
+
+      const body = req.body || {};
+      const barberId = isAdmin ? normalizeId(body.barber_id) : auth.id;
+      if (!barberId) return res.status(400).json({ error: 'barber_id is required' });
+
+      const currentBarber = await getBarber(barberId);
+      if (!currentBarber) return res.status(404).json({ error: 'Barber not found' });
+
+      const branchId = normalizeId(body.branch_id) || currentBarber.branch_id || auth.branchId;
+      if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
+
+      const branch = await getBranch(branchId);
+      if (!branch) return res.status(404).json({ error: 'Branch not found' });
+
+      const barberUpdate = { is_on_shift: isOnShift };
+      if (branchId !== currentBarber.branch_id) barberUpdate.branch_id = branchId;
+
+      const { data: updatedBarber, error: updateError } = await db
+        .from('barbers')
+        .update(barberUpdate)
+        .eq('id', barberId)
+        .select('id, name, branch_id, is_on_shift')
+        .maybeSingle();
+
+      if (updateError) return res.status(500).json({ error: updateError.message });
+      if (!updatedBarber) return res.status(404).json({ error: 'Barber not found' });
+
+      if (branchId !== currentBarber.branch_id) {
+        await db.from('users').update({ branch_id: branchId }).eq('id', barberId);
+      }
+
+      const event = await recordActivityEvent({
+        actorId: auth.id,
+        actorRole: auth.role,
+        barberId,
+        branchId,
+        eventType,
+        io: req.app.get('io'),
+        metadata: {
+          ...(body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? body.metadata : {}),
+          [metadataFlag]: true,
+        },
+        occurredAt: normalizeDateTime(body.occurred_at, new Date()),
+        source: normalizeSource(body.source, isAdmin ? 'dashboard' : 'barber_kiosk'),
+      });
+
+      return res.json({ barber: updatedBarber, event });
+    } catch (error) {
+      const status = /not found/i.test(error.message) ? 404 : 400;
+      return res.status(status).json({ error: error.message });
+    }
+  }
+
   async listSchedules(req, res) {
     const auth = requireAuth(req, res);
     if (!auth) return;
