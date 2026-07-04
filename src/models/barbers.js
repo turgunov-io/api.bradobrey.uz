@@ -1873,12 +1873,21 @@ class Barbers {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const { data: entry, error: entryError } = await db
+        const branchId = normalizeId(auth.payload?.branchId);
+
+        // Branch-scoped (matches reassignQueue): any barber in the same branch
+        // may view reassign options, not just the entry's current owner.
+        const entryQuery = db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, created_at')
-            .eq('id', id)
-            .eq('barber_id', auth.barberId)
-            .maybeSingle();
+            .eq('id', id);
+        if (branchId) {
+            entryQuery.eq('branch_id', branchId);
+        } else {
+            entryQuery.eq('barber_id', auth.barberId);
+        }
+
+        const { data: entry, error: entryError } = await entryQuery.maybeSingle();
 
         if (entryError) {
             return res.status(500).json({ error: entryError.message });
@@ -1901,7 +1910,7 @@ class Barbers {
 
             const candidates = await getBranchBarberAvailability({
                 branchId: entry.branch_id,
-                excludeBarberId: auth.barberId,
+                excludeBarberId: entry.barber_id,
                 excludeEntryId: id,
                 requireOnShift: true,
             });
@@ -1925,12 +1934,22 @@ class Barbers {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const { data: entry, error: entryError } = await db
+        const branchId = normalizeId(auth.payload?.branchId);
+
+        // Branch-scoped: any barber in the same branch may reassign an entry,
+        // not just its current owner. Fall back to owner-only for legacy tokens
+        // that carry no branch claim.
+        const entryQuery = db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, created_at')
-            .eq('id', id)
-            .eq('barber_id', auth.barberId)
-            .maybeSingle();
+            .eq('id', id);
+        if (branchId) {
+            entryQuery.eq('branch_id', branchId);
+        } else {
+            entryQuery.eq('barber_id', auth.barberId);
+        }
+
+        const { data: entry, error: entryError } = await entryQuery.maybeSingle();
 
         if (entryError) {
             return res.status(500).json({ error: entryError.message });
@@ -1941,7 +1960,7 @@ class Barbers {
         if (!REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) {
             return res.status(400).json({ error: 'Only waiting or called queue entries can be reassigned' });
         }
-        if (targetBarberId && targetBarberId === auth.barberId) {
+        if (targetBarberId && targetBarberId === entry.barber_id) {
             return res.status(400).json({ error: 'Queue entry already belongs to this barber' });
         }
 
@@ -1956,7 +1975,7 @@ class Barbers {
 
             const candidates = await getBranchBarberAvailability({
                 branchId: entry.branch_id,
-                excludeBarberId: auth.barberId,
+                excludeBarberId: entry.barber_id,
                 excludeEntryId: id,
                 requireOnShift: true,
             });
@@ -1979,7 +1998,7 @@ class Barbers {
                 barberId: selectedBarber.id,
             });
 
-            const { data: updated, error: updateError } = await db
+            const updateQuery = db
                 .from('queue_entries')
                 .update({
                     barber_id: selectedBarber.id,
@@ -1989,8 +2008,14 @@ class Barbers {
                     swapped_flag: true,
                 })
                 .eq('id', id)
-                .eq('barber_id', auth.barberId)
-                .in('status', REASSIGNABLE_QUEUE_STATUSES)
+                .in('status', REASSIGNABLE_QUEUE_STATUSES);
+            if (branchId) {
+                updateQuery.eq('branch_id', branchId);
+            } else {
+                updateQuery.eq('barber_id', auth.barberId);
+            }
+
+            const { data: updated, error: updateError } = await updateQuery
                 .select('id, status, swapped_flag, created_at, started_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
                 .maybeSingle();
 
@@ -2009,7 +2034,7 @@ class Barbers {
                     type: 'queue_reassigned',
                     entryId: updated.id,
                     branchId: entry.branch_id,
-                    fromBarberId: auth.barberId,
+                    fromBarberId: entry.barber_id,
                     barberId: selectedBarber.id,
                 });
             }
