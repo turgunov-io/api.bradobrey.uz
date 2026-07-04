@@ -43,8 +43,20 @@ const buildSmtpFrom = ({ user, fromRaw }) => {
   const userValue = String(user || '').trim();
 
   if (fromValue) {
-    // Already contains an email address (`name@host` or `"Name" <name@host>`)
-    if (/[^\s<>]+@[^\s<>]+/.test(fromValue)) return fromValue;
+    // Already a well-formed address: bare `name@host` or `"Name" <name@host>`.
+    if (/^[^\s<>]+@[^\s<>]+$/.test(fromValue) || /<[^\s<>]+@[^\s<>]+>/.test(fromValue)) {
+      return fromValue;
+    }
+
+    // Display name + bare email with no angle brackets (e.g. `Bradobrey API name@host`).
+    // Split the address out and treat the leading text as the display name so we
+    // never hand nodemailer a malformed `From` header.
+    const emailMatch = fromValue.match(/[^\s<>]+@[^\s<>]+/);
+    if (emailMatch) {
+      const address = emailMatch[0];
+      const name = fromValue.replace(address, '').replace(/["<>]/g, '').trim();
+      return name ? { name, address } : address;
+    }
 
     // Display name only; best-effort fallback to authenticated SMTP user when it's an email.
     if (userValue && /@/.test(userValue)) {

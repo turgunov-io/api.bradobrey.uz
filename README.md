@@ -54,6 +54,12 @@ Backend for a barbershop live-queue system (JWT auth for barbers, PostgreSQL per
   - `PATCH /api/marketplace/barbershops/:id` (optional `branch_ids: uuid[]`)
   - `POST /api/marketplace/barbershops/:id/{activate|deactivate}`
 
+- Marketplace home banners:
+  - Apply `db/postgres/banners.sql` (creates `banners`). Without it, `GET /api/marketplace/banners` returns 500 `relation "banners" does not exist`.
+  - `GET /api/marketplace/banners`, `GET /api/marketplace/banners/:id`
+  - `POST /api/marketplace/banners` (multipart `file` + locale titles/descriptions)
+  - `PUT|PATCH /api/marketplace/banners/:id`, `DELETE /api/marketplace/banners/:id`
+
 - Marketplace client app catalog + booking:
   - Optional: apply `db/postgres/queue_entries_scheduling.sql` to enable same-day time-slot booking and double-booking protection.
   - `GET /api/marketplace/catalog/barbershops` (`?city=...`, `?active=true` optional)
