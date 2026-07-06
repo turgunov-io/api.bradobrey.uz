@@ -1,6 +1,11 @@
 node_modules
-*/node_modules 
+*/node_modules
 node_modules/*
+
+# Environment / secrets (never commit)
+.env
+.env.*
+!.env.example
 .git 
 netlify
 netlif/*
