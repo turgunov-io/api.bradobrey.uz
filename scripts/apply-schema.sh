@@ -49,6 +49,7 @@ FILES=(
   promo_codes.sql
   cashback.sql
   media_assets.sql
+  kiosks.sql
   kiosk_ads.sql
   verifix.sql
   warehouse.sql
