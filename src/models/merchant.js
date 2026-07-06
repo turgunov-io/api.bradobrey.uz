@@ -1,6 +1,6 @@
 const bcrypto = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { db } = require('../config/postgres');
+const { db, pool } = require('../config/postgres');
 const { toAbsolutePublicUrl } = require('../config/uploads');
 
 const ACTIVE_ORDER_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
@@ -710,28 +710,74 @@ class Merchant {
     const id = normalizeId(req.params?.id);
     if (!id) return res.status(400).json({ error: 'Branch id is required' });
 
+    // hard = true  -> full purge: barbers of the branch (+ their logins), visits and payments
+    // hard = false -> keep statistics: detach visits/staff/barbers, remove only the branch
+    const purge = parseBoolean(req.query?.hard ?? req.body?.hard, false) === true;
+
+    const client = await pool.connect();
+    const tableExists = async (name) => {
+      const r = await client.query('select to_regclass($1) as reg', [name]);
+      return Boolean(r.rows[0]?.reg);
+    };
+
     try {
-      const result = await db.query(
-        `delete from branches
-         where id = $1 and marketplace_barbershop_id = $2
-         returning id`,
+      await client.query('BEGIN');
+
+      // Ownership: branch must belong to this merchant's barbershop
+      const owned = await client.query(
+        `select id from branches where id = $1 and marketplace_barbershop_id = $2`,
         [id, access.barbershopId]
       );
-      if (!result.rows[0]) return res.status(404).json({ error: 'Branch not found' });
-      return res.json({ deleted: true, id: result.rows[0].id });
-    } catch (error) {
-      if (String(error.code) === '23503') {
-        const result = await db.query(
-          `update branches
-           set is_active = false
-           where id = $1 and marketplace_barbershop_id = $2
-           returning id`,
-          [id, access.barbershopId]
-        );
-        if (!result.rows[0]) return res.status(404).json({ error: 'Branch not found' });
-        return res.json({ deleted: true, id: result.rows[0].id, soft_deleted: true });
+      if (!owned.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Branch not found' });
       }
+
+      const hasQueue = await tableExists('queue_entries');
+      const hasMedia = await tableExists('media_assets');
+
+      if (purge) {
+        if (hasQueue && (await tableExists('payments'))) {
+          await client.query(
+            `delete from payments where queue_entry_id in (select id from queue_entries where branch_id = $1)`,
+            [id]
+          );
+        }
+        if (hasQueue) {
+          await client.query(`delete from queue_entries where branch_id = $1`, [id]);
+        }
+        if (hasMedia) {
+          await client.query(
+            `delete from media_assets where barber_id in (select id from barbers where branch_id = $1)`,
+            [id]
+          );
+        }
+        // Remove logins of the branch's barbers, then the barbers (verifix cascades)
+        await client.query(`delete from users where id in (select id from barbers where branch_id = $1)`, [id]);
+        await client.query(`delete from barbers where branch_id = $1`, [id]);
+        // Detach any remaining staff (managers/admins) so we don't nuke their accounts
+        await client.query(`update users set branch_id = null where branch_id = $1`, [id]);
+      } else {
+        // Keep everything, just detach it from the branch being removed
+        if (hasQueue) {
+          await client.query(`update queue_entries set branch_id = null where branch_id = $1`, [id]);
+        }
+        await client.query(`update users set branch_id = null where branch_id = $1`, [id]);
+        await client.query(`update barbers set branch_id = null where branch_id = $1`, [id]);
+      }
+
+      await client.query(
+        `delete from branches where id = $1 and marketplace_barbershop_id = $2`,
+        [id, access.barbershopId]
+      );
+
+      await client.query('COMMIT');
+      return res.json({ deleted: true, id, purged: purge });
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
       return res.status(500).json({ error: error.message });
+    } finally {
+      client.release();
     }
   }
 
@@ -841,34 +887,64 @@ class Merchant {
     const id = normalizeId(req.params?.id);
     if (!id) return res.status(400).json({ error: 'Barber id is required' });
 
+    // hard = true  -> full purge: also removes the barber's queue visits and their payments
+    // hard = false -> keep statistics: detach visits, remove only the barber + login/access
+    const purge = parseBoolean(req.query?.hard ?? req.body?.hard, false) === true;
+
+    const client = await pool.connect();
+    const tableExists = async (name) => {
+      const r = await client.query('select to_regclass($1) as reg', [name]);
+      return Boolean(r.rows[0]?.reg);
+    };
+
     try {
-      const result = await db.query(
-        `delete from barbers b
-         using branches br
-         where b.id = $1
-           and br.id = b.branch_id
-           and br.marketplace_barbershop_id = $2
-         returning b.id`,
+      await client.query('BEGIN');
+
+      // Ownership: barber must belong to a branch of this merchant's barbershop
+      const owned = await client.query(
+        `select b.id
+         from barbers b
+         join branches br on br.id = b.branch_id and br.marketplace_barbershop_id = $2
+         where b.id = $1`,
         [id, access.barbershopId]
       );
-      if (!result.rows[0]) return res.status(404).json({ error: 'Barber not found' });
-      return res.json({ deleted: true, id: result.rows[0].id });
-    } catch (error) {
-      if (String(error.code) === '23503') {
-        const result = await db.query(
-          `update barbers b
-           set is_active = false, updated_at = now()
-           from branches br
-           where b.id = $1
-             and br.id = b.branch_id
-             and br.marketplace_barbershop_id = $2
-           returning b.id`,
-          [id, access.barbershopId]
-        );
-        if (!result.rows[0]) return res.status(404).json({ error: 'Barber not found' });
-        return res.json({ deleted: true, id: result.rows[0].id, soft_deleted: true });
+      if (!owned.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Barber not found' });
       }
+
+      const hasQueue = await tableExists('queue_entries');
+      if (hasQueue) {
+        if (purge) {
+          if (await tableExists('payments')) {
+            await client.query(
+              `delete from payments where queue_entry_id in (select id from queue_entries where barber_id = $1)`,
+              [id]
+            );
+          }
+          await client.query(`delete from queue_entries where barber_id = $1`, [id]);
+        } else {
+          await client.query(`update queue_entries set barber_id = null where barber_id = $1`, [id]);
+        }
+      }
+
+      // Barber-owned artifacts (blocks the delete via FK); safe to drop in both modes
+      if (await tableExists('media_assets')) {
+        await client.query(`delete from media_assets where barber_id = $1`, [id]);
+      }
+
+      // Remove the barber profile (verifix rows cascade / set null via their FK rules)
+      await client.query(`delete from barbers where id = $1`, [id]);
+      // Remove the login/access — the users row shares the barber id; user_permissions cascade
+      await client.query(`delete from users where id = $1`, [id]);
+
+      await client.query('COMMIT');
+      return res.json({ deleted: true, id, purged: purge });
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
       return res.status(500).json({ error: error.message });
+    } finally {
+      client.release();
     }
   }
 
