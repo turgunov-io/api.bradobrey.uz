@@ -36,6 +36,19 @@ const parseBoolean = (value, fallback = undefined) => {
     return fallback;
 };
 
+const parseOptionalMoney = (value) => {
+    if (value === undefined || value === null || value === '') {
+        return { provided: false, amount: null };
+    }
+
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) {
+        return { provided: true, amount: null };
+    }
+
+    return { provided: true, amount: roundMoney(amount) };
+};
+
 const getZonedDateString = (date, timeZone) => {
     const tz = timeZone || DEFAULT_TIMEZONE;
     const formatter = new Intl.DateTimeFormat('en-US', {
@@ -484,6 +497,7 @@ class Kiosk {
             certificate_code = null,
             promo_code = null,
             use_cashback = false,
+            cashback_amount = null,
             scheduled_start_at = null,
             scheduled_end_at = null,
             idempotency_key = null,
@@ -513,6 +527,11 @@ class Kiosk {
             use_cashback === 1 ||
             use_cashback === '1' ||
             String(use_cashback || '').toLowerCase() === 'true';
+
+        const requestedCashback = parseOptionalMoney(cashback_amount);
+        if (useCashback && requestedCashback.provided && (!requestedCashback.amount || requestedCashback.amount <= 0)) {
+            return res.status(400).json({ error: 'cashback_amount must be a positive number' });
+        }
 
         let marketplaceClient = null;
         if (useCashback) {
@@ -764,6 +783,33 @@ class Kiosk {
             clientId = newClient.id;
         }
 
+        let cashbackWalletBalance = null;
+        let cashbackSpendAmount = 0;
+        if (useCashback) {
+            cashbackWalletBalance = await getWalletBalance(clientId);
+            const explicitSpendAmount = requestedCashback.provided ? requestedCashback.amount : null;
+
+            if (explicitSpendAmount !== null && explicitSpendAmount > discountedTotal) {
+                return res.status(400).json({
+                    error: 'cashback_amount cannot exceed order total',
+                    max: discountedTotal,
+                });
+            }
+
+            cashbackSpendAmount = explicitSpendAmount !== null
+                ? explicitSpendAmount
+                : roundMoney(Math.min(cashbackWalletBalance, discountedTotal));
+
+            if (cashbackSpendAmount > cashbackWalletBalance) {
+                return res.status(409).json({
+                    error: 'Insufficient cashback balance',
+                    reason: 'insufficient_balance',
+                    balance: cashbackWalletBalance,
+                    requested_amount: cashbackSpendAmount,
+                });
+            }
+        }
+
         const insertPayload = {
             client_id: clientId,
             branch_id,
@@ -991,20 +1037,20 @@ class Kiosk {
         let cashback = null;
         let payableTotal = certificate ? 0 : discountedTotal;
         if (useCashback) {
-            const walletBalance = await getWalletBalance(clientId);
-            const maxSpend = roundMoney(Math.min(walletBalance, discountedTotal));
-            payableTotal = roundMoney(Math.max(0, discountedTotal - maxSpend));
+            const spendAmount = cashbackSpendAmount;
+            payableTotal = roundMoney(Math.max(0, discountedTotal - spendAmount));
 
-            if (maxSpend > 0) {
+            if (spendAmount > 0) {
                 const spendRes = await spendCashback({
                     clientId,
                     queueEntryId: entry.id,
-                    amount: maxSpend,
+                    amount: spendAmount,
                     meta: {
                         total: finalOrderTotal,
                         discounted_total: discountedTotal,
                         promo_code: promo?.code || null,
                         marketplace_client_id: marketplaceClient?.id || null,
+                        requested_amount: requestedCashback.provided ? requestedCashback.amount : null,
                     },
                 });
 
@@ -1017,7 +1063,8 @@ class Kiosk {
                                 ? 'Insufficient cashback balance'
                                 : 'Failed to spend cashback',
                         reason: spendRes?.reason || null,
-                        balance: spendRes?.balance ?? walletBalance,
+                        balance: spendRes?.balance ?? cashbackWalletBalance,
+                        requested_amount: spendAmount,
                     });
                 }
 
@@ -1031,7 +1078,7 @@ class Kiosk {
                 cashback = {
                     used: false,
                     spent_amount: 0,
-                    balance: walletBalance,
+                    balance: cashbackWalletBalance,
                     transaction_id: null,
                 };
             }
