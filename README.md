@@ -19,11 +19,12 @@ Backend for a barbershop live-queue system (JWT auth for barbers, PostgreSQL per
 
 - Cashback is stored in `cashback_wallets` and is attached to `clients` (phone-based identity).
 - Cashback начисляется **с каждого завершенного заказа** (status=`completed`) в процентах от суммы услуг (`services.base_price`), с учётом промокода (если он был применён).
-- Marketplace orders can **spend cashback at booking time** via `POST /api/kiosk/book` with `source=site`, `use_cashback=true` and `Authorization: Bearer <marketplace token>`; kiosk/point orders (`source=point`) cannot use cashback.
+- Marketplace orders can **spend cashback at booking time** via `POST /api/kiosk/book` with `source=site`, `use_cashback=true` and `Authorization: Bearer <marketplace token>`. Point/admin orders can spend from the same wallet with `source=point` or `source=admin`, `use_cashback=true`, and `Authorization: Bearer <staff/admin/barber token>`.
 - По умолчанию cashback выключен. Чтобы включить — задайте `CASHBACK_PERCENT` в окружении (например `5` = 5%).
 - Для оплаты сертификатом cashback не начисляется.
 - Убедитесь, что SQL из `db/postgres/cashback.sql` применён в вашей базе.
-- One-time backfill for already completed orders (after deploy): `npm run backfill:cashback` (optional: `--since`, `--until`, `--batch`, `--max`, `--verbose`).
+- One-time backfill for already completed orders (after deploy): `npm run backfill:cashback` (optional: `--since`, `--until`, `--batch`, `--max`, `--verbose`). It also syncs wallet balances from the cashback transaction ledger after processing.
+- Rebuild wallet balances from the transaction ledger when needed: `npm run sync:cashback-wallets` (preview drift first with `-- --dry-run`).
 
 ## Key Endpoints
 

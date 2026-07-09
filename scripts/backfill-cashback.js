@@ -3,7 +3,10 @@
 require('dotenv').config();
 
 const { db } = require('../src/config/postgres');
-const { awardCashbackForCompletedQueueEntry } = require('../src/composable/cashback');
+const {
+  awardCashbackForCompletedQueueEntry,
+  syncCashbackWalletsFromTransactions,
+} = require('../src/composable/cashback');
 
 const getArgValue = (name) => {
   const idx = process.argv.indexOf(name);
@@ -18,6 +21,7 @@ const until = getArgValue('--until'); // ISO string
 const batchSize = Math.max(1, Number(getArgValue('--batch') || 100));
 const maxRows = Math.max(0, Number(getArgValue('--max') || 0));
 const verbose = hasFlag('--verbose');
+const skipWalletSync = hasFlag('--no-wallet-sync');
 
 async function main() {
   if (!process.env.CASHBACK_PERCENT) {
@@ -76,6 +80,10 @@ async function main() {
     offset += batchSize;
   }
 
+  const walletSync = skipWalletSync
+    ? null
+    : await syncCashbackWalletsFromTransactions();
+
   console.log(
     JSON.stringify(
       {
@@ -84,6 +92,11 @@ async function main() {
         total_earned: Number(totalEarned.toFixed(2)),
         since: since || null,
         until: until || null,
+        wallet_sync: walletSync
+          ? {
+            updated: walletSync.updated,
+          }
+          : null,
       },
       null,
       2

@@ -81,6 +81,14 @@ const normalizePhone = (phoneInput) => {
 const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');
 
 const MARKETPLACE_ROLE = 'marketplace';
+const CASHBACK_STAFF_ROLES = new Set([
+    'admin_network',
+    'admin_branch',
+    'admin',
+    'merchant',
+    'barber',
+    'super-barber',
+]);
 
 const getBearerToken = (req) => {
     const authHeader = req.headers.authorization || '';
@@ -534,11 +542,8 @@ class Kiosk {
         }
 
         let marketplaceClient = null;
+        let cashbackActor = null;
         if (useCashback) {
-            if (normalizedSource !== 'site') {
-                return res.status(400).json({ error: 'Cashback can only be used for marketplace orders (source=site)' });
-            }
-
             if (effectivePaymentMethod === 'certificate' || certificate_code) {
                 return res.status(400).json({ error: 'Cashback cannot be used with certificate payment' });
             }
@@ -555,45 +560,56 @@ class Kiosk {
                 return res.status(401).json({ error: 'Invalid or expired token' });
             }
 
-            if (payload?.role !== MARKETPLACE_ROLE) {
-                return res.status(403).json({ error: 'Only marketplace users can use cashback' });
-            }
-
-            const marketplaceClientId = payload.sub || payload.id;
-            if (!marketplaceClientId) {
+            const actorId = payload.sub || payload.id;
+            if (!actorId) {
                 return res.status(401).json({ error: 'Invalid token payload' });
             }
 
-            const { data: mpClient, error: mpError } = await db
-                .from('marketplace_clients')
-                .select('id, phone, is_active')
-                .eq('id', marketplaceClientId)
-                .maybeSingle();
+            if (payload?.role === MARKETPLACE_ROLE) {
+                if (normalizedSource !== 'site') {
+                    return res.status(403).json({ error: 'Marketplace users can use cashback only for source=site' });
+                }
 
-            if (mpError) {
-                return res.status(500).json({ error: mpError.message });
+                const { data: mpClient, error: mpError } = await db
+                    .from('marketplace_clients')
+                    .select('id, phone, is_active')
+                    .eq('id', actorId)
+                    .maybeSingle();
+
+                if (mpError) {
+                    return res.status(500).json({ error: mpError.message });
+                }
+
+                if (!mpClient) {
+                    return res.status(404).json({ error: 'Marketplace client not found' });
+                }
+
+                if (mpClient.is_active === false) {
+                    return res.status(403).json({ error: 'Account is disabled' });
+                }
+
+                if (!mpClient.phone) {
+                    return res.status(428).json({
+                        error: 'Phone number is required to use cashback',
+                        code: 'PHONE_REQUIRED',
+                    });
+                }
+
+                if (String(mpClient.phone) !== String(normalizedPhone)) {
+                    return res.status(403).json({ error: 'Phone mismatch: cashback can only be used for your own phone number' });
+                }
+
+                marketplaceClient = mpClient;
+                cashbackActor = { type: 'marketplace', id: mpClient.id, role: payload.role };
+            } else if (CASHBACK_STAFF_ROLES.has(payload?.role)) {
+                if (normalizedSource === 'site') {
+                    return res.status(403).json({ error: 'Marketplace cashback orders require a marketplace user token' });
+                }
+
+                cashbackActor = { type: 'staff', id: actorId, role: payload.role };
+            } else {
+                return res.status(403).json({ error: 'Only marketplace users or staff can use cashback' });
             }
-
-            if (!mpClient) {
-                return res.status(404).json({ error: 'Marketplace client not found' });
-            }
-
-            if (mpClient.is_active === false) {
-                return res.status(403).json({ error: 'Account is disabled' });
-            }
-
-            if (!mpClient.phone) {
-                return res.status(428).json({
-                    error: 'Phone number is required to use cashback',
-                    code: 'PHONE_REQUIRED',
-                });
-            }
-
-            if (String(mpClient.phone) !== String(normalizedPhone)) {
-                return res.status(403).json({ error: 'Phone mismatch: cashback can only be used for your own phone number' });
-            }
-
-            marketplaceClient = mpClient;
         }
 
         const { data: branch, error: branchError } = await fetchBranchForBooking(branch_id);
@@ -1050,6 +1066,9 @@ class Kiosk {
                         discounted_total: discountedTotal,
                         promo_code: promo?.code || null,
                         marketplace_client_id: marketplaceClient?.id || null,
+                        actor_type: cashbackActor?.type || null,
+                        actor_id: cashbackActor?.id || null,
+                        actor_role: cashbackActor?.role || null,
                         requested_amount: requestedCashback.provided ? requestedCashback.amount : null,
                     },
                 });

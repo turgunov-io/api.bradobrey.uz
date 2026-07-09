@@ -227,49 +227,29 @@ async function incrementWalletBalance(clientId, delta) {
   const d = roundMoney(delta);
   if (!d) return getWalletBalance(clientId);
 
-  await ensureWallet(clientId);
+  try {
+    const { rows } = await db.query(
+      `
+        insert into cashback_wallets (client_id, balance, updated_at)
+        values ($1, $2::numeric, now())
+        on conflict (client_id)
+        do update set
+          balance = round((cashback_wallets.balance + excluded.balance)::numeric, 2),
+          updated_at = now()
+        returning balance
+      `,
+      [clientId, d]
+    );
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { data: wallet, error: walletError } = await db
-      .from('cashback_wallets')
-      .select('client_id,balance')
-      .eq('client_id', clientId)
-      .maybeSingle();
-
-    if (walletError) {
-      const msg = String(walletError.message || '');
-      if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
-        return 0;
-      }
-      throw walletError;
+    const balance = Number(rows?.[0]?.balance);
+    return Number.isFinite(balance) ? roundMoney(balance) : getWalletBalance(clientId);
+  } catch (error) {
+    const msg = String(error?.message || '');
+    if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
+      return 0;
     }
-
-    const current = Number(wallet?.balance);
-    const currentNum = Number.isFinite(current) ? current : 0;
-    const next = roundMoney(currentNum + d);
-
-    const { data: updated, error: updateError } = await db
-      .from('cashback_wallets')
-      .update({ balance: next, updated_at: new Date().toISOString() })
-      .eq('client_id', clientId)
-      .select('balance')
-      .maybeSingle();
-
-    if (updateError) {
-      const msg = String(updateError.message || '');
-      if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
-        return 0;
-      }
-      throw updateError;
-    }
-
-    if (updated) {
-      const updatedNum = Number(updated.balance);
-      return Number.isFinite(updatedNum) ? roundMoney(updatedNum) : next;
-    }
+    throw error;
   }
-
-  return getWalletBalance(clientId);
 }
 
 async function decrementWalletBalance(clientId, amount) {
@@ -279,53 +259,114 @@ async function decrementWalletBalance(clientId, amount) {
 
   await ensureWallet(clientId);
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { data: wallet, error: walletError } = await db
-      .from('cashback_wallets')
-      .select('client_id,balance')
-      .eq('client_id', clientId)
-      .maybeSingle();
+  try {
+    const { rows } = await db.query(
+      `
+        update cashback_wallets
+        set
+          balance = round((balance - $2::numeric)::numeric, 2),
+          updated_at = now()
+        where client_id = $1
+          and balance >= $2::numeric
+        returning balance
+      `,
+      [clientId, amt]
+    );
 
-    if (walletError) {
-      const msg = String(walletError.message || '');
-      if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
-        return { ok: false, balance: 0 };
-      }
-      throw walletError;
+    if (rows?.[0]) {
+      const balance = Number(rows[0].balance);
+      return { ok: true, balance: Number.isFinite(balance) ? roundMoney(balance) : 0 };
     }
-
-    const current = Number(wallet?.balance);
-    const currentNum = Number.isFinite(current) ? current : 0;
-    const currentRounded = roundMoney(currentNum);
-
-    if (currentRounded < amt) {
-      return { ok: false, balance: currentRounded };
+  } catch (error) {
+    const msg = String(error?.message || '');
+    if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
+      return { ok: false, balance: 0 };
     }
-
-    const next = roundMoney(currentRounded - amt);
-
-    const { data: updated, error: updateError } = await db
-      .from('cashback_wallets')
-      .update({ balance: next, updated_at: new Date().toISOString() })
-      .eq('client_id', clientId)
-      .select('balance')
-      .maybeSingle();
-
-    if (updateError) {
-      const msg = String(updateError.message || '');
-      if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
-        return { ok: false, balance: 0 };
-      }
-      throw updateError;
-    }
-
-    if (updated) {
-      const updatedNum = Number(updated.balance);
-      return { ok: true, balance: Number.isFinite(updatedNum) ? roundMoney(updatedNum) : next };
-    }
+    throw error;
   }
 
   return { ok: false, balance: await getWalletBalance(clientId) };
+}
+
+async function syncCashbackWalletsFromTransactions({ clientId = null, dryRun = false } = {}) {
+  const params = [];
+  const clientFilter = clientId ? 'where client_id = $1' : '';
+  const clientJoinFilter = clientId ? 'where c.id = $1' : '';
+  if (clientId) params.push(clientId);
+
+  const driftSql = `
+    with transaction_balances as (
+      select
+        client_id,
+        round(
+          coalesce(sum(
+            case
+              when kind = 'earn' then amount
+              when kind = 'spend' then -amount
+              else amount
+            end
+          ), 0)::numeric,
+          2
+        ) as balance
+      from cashback_transactions
+      ${clientFilter}
+      group by client_id
+    )
+    select
+      c.id as client_id,
+      c.phone,
+      coalesce(w.balance, 0)::numeric as wallet_balance,
+      coalesce(tb.balance, 0)::numeric as transaction_balance,
+      round((coalesce(tb.balance, 0) - coalesce(w.balance, 0))::numeric, 2) as delta
+    from clients c
+    left join cashback_wallets w on w.client_id = c.id
+    left join transaction_balances tb on tb.client_id = c.id
+    ${clientJoinFilter}
+    where coalesce(w.balance, 0) <> coalesce(tb.balance, 0)
+    order by abs(coalesce(tb.balance, 0) - coalesce(w.balance, 0)) desc
+  `;
+
+  if (dryRun) {
+    const { rows } = await db.query(driftSql, params);
+    return { dry_run: true, updated: 0, rows };
+  }
+
+  const syncSql = `
+    with transaction_balances as (
+      select
+        client_id,
+        round(
+          coalesce(sum(
+            case
+              when kind = 'earn' then amount
+              when kind = 'spend' then -amount
+              else amount
+            end
+          ), 0)::numeric,
+          2
+        ) as balance
+      from cashback_transactions
+      ${clientFilter}
+      group by client_id
+    ),
+    target_clients as (
+      select c.id as client_id, coalesce(tb.balance, 0)::numeric as balance
+      from clients c
+      left join transaction_balances tb on tb.client_id = c.id
+      ${clientJoinFilter}
+    )
+    insert into cashback_wallets (client_id, balance, updated_at)
+    select client_id, balance, now()
+    from target_clients
+    on conflict (client_id)
+    do update set
+      balance = excluded.balance,
+      updated_at = now()
+    returning client_id, balance
+  `;
+
+  const { rows } = await db.query(syncSql, params);
+  return { dry_run: false, updated: rows.length, rows };
 }
 
 async function insertCashbackTransaction({ clientId, queueEntryId, kind, amount, meta }) {
@@ -490,6 +531,7 @@ module.exports = {
   computeCashbackTotalsForQueueEntry,
   spendCashback,
   refundCashbackSpend,
+  syncCashbackWalletsFromTransactions,
   spendCashbackForQueueEntry,
   awardCashbackForCompletedQueueEntry,
 };
