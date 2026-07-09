@@ -537,6 +537,9 @@ class Kiosk {
             String(use_cashback || '').toLowerCase() === 'true';
 
         const requestedCashback = parseOptionalMoney(cashback_amount);
+        if (useCashback && !requestedCashback.provided) {
+            return res.status(400).json({ error: 'cashback_amount is required when use_cashback is true' });
+        }
         if (useCashback && requestedCashback.provided && (!requestedCashback.amount || requestedCashback.amount <= 0)) {
             return res.status(400).json({ error: 'cashback_amount must be a positive number' });
         }
@@ -812,9 +815,7 @@ class Kiosk {
                 });
             }
 
-            cashbackSpendAmount = explicitSpendAmount !== null
-                ? explicitSpendAmount
-                : roundMoney(Math.min(cashbackWalletBalance, discountedTotal));
+            cashbackSpendAmount = explicitSpendAmount;
 
             if (cashbackSpendAmount > cashbackWalletBalance) {
                 return res.status(409).json({
