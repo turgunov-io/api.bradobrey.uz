@@ -147,3 +147,28 @@ alter table warehouse_purchase_items
 
 create index if not exists idx_warehouse_purchase_items_purchase
   on warehouse_purchase_items (purchase_id);
+
+create table if not exists warehouse_categories (
+  id uuid default gen_random_uuid() primary key,
+  name text not null,
+  description text,
+  sort_order integer not null default 0,
+  is_active boolean not null default true,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table warehouse_categories
+  add column if not exists description text,
+  add column if not exists sort_order integer not null default 0,
+  add column if not exists is_active boolean not null default true,
+  add column if not exists metadata jsonb not null default '{}'::jsonb,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz not null default now();
+
+create unique index if not exists idx_warehouse_categories_name
+  on warehouse_categories (lower(name));
+
+create index if not exists idx_warehouse_categories_active
+  on warehouse_categories (is_active, sort_order, name);

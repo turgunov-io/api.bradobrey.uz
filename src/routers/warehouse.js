@@ -5,6 +5,12 @@ const router = express.Router();
 
 router.get('/summary', (req, res) => warehouse.summary(req, res));
 
+router.get('/categories', (req, res) => warehouse.listCategories(req, res));
+router.post('/categories', (req, res) => warehouse.createCategory(req, res));
+router.patch('/categories/:id', (req, res) => warehouse.updateCategory(req, res));
+router.delete('/categories', (req, res) => warehouse.deleteCategory(req, res));
+router.delete('/categories/:id', (req, res) => warehouse.deleteCategory(req, res));
+
 router.get('/positions', (req, res) => warehouse.listPositions(req, res));
 router.post('/positions', (req, res) => warehouse.createPosition(req, res));
 router.patch('/positions/:id', (req, res) => warehouse.updatePosition(req, res));

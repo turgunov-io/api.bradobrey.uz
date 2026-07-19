@@ -36,6 +36,12 @@ const parseNonNegativeNumber = (value, fallback = 0) => {
   return number !== null && number >= 0 ? number : null;
 };
 
+const parseInteger = (value, fallback = 0) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const number = Number.parseInt(value, 10);
+  return Number.isFinite(number) ? number : null;
+};
+
 const parseDateTime = (value, fallback = new Date()) => {
   if (!value) return fallback;
   const date = new Date(value);
@@ -50,7 +56,7 @@ const isMissingWarehouseTable = (error) => {
     .toLowerCase();
 
   return code === '42P01'
-    || ['warehouse_positions', 'warehouse_templates', 'warehouse_stocks', 'warehouse_purchases']
+    || ['warehouse_positions', 'warehouse_templates', 'warehouse_stocks', 'warehouse_purchases', 'warehouse_categories']
       .some((table) => message.includes(table) && (
         message.includes('does not exist')
         || message.includes('not found')
@@ -86,6 +92,17 @@ const positionItem = (row) => ({
   name: row?.name || null,
   sku: row?.sku || null,
   unit: row?.unit || null,
+  updated_at: row?.updated_at || null,
+});
+
+const categoryItem = (row) => ({
+  created_at: row?.created_at || null,
+  description: row?.description || null,
+  id: row?.id,
+  is_active: row?.is_active ?? null,
+  metadata: row?.metadata || {},
+  name: row?.name || null,
+  sort_order: Number(row?.sort_order || 0),
   updated_at: row?.updated_at || null,
 });
 
@@ -175,6 +192,75 @@ const normalizePositionPayload = (body = {}, { partial = false } = {}) => {
   }
 
   if (!partial && !payload.unit) payload.unit = 'pcs';
+  return { payload };
+};
+
+// warehouse_categories is not part of the original warehouse.sql migration, so
+// ensure it exists lazily on first use. The statement is idempotent and only
+// runs its DDL once per process.
+let categoriesTableReady = null;
+const ensureCategoriesTable = () => {
+  if (!categoriesTableReady) {
+    categoriesTableReady = db.query(
+      `create table if not exists warehouse_categories (
+        id uuid default gen_random_uuid() primary key,
+        name text not null,
+        description text,
+        sort_order integer not null default 0,
+        is_active boolean not null default true,
+        metadata jsonb not null default '{}'::jsonb,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      )`
+    )
+      .then(() => db.query(
+        'create unique index if not exists idx_warehouse_categories_name on warehouse_categories (lower(name))'
+      ))
+      .then(() => db.query(
+        'create index if not exists idx_warehouse_categories_active on warehouse_categories (is_active, sort_order, name)'
+      ))
+      .catch((error) => {
+        categoriesTableReady = null;
+        throw error;
+      });
+  }
+
+  return categoriesTableReady;
+};
+
+const normalizeCategoryPayload = (body = {}, { partial = false } = {}) => {
+  const payload = {};
+
+  if (body.name !== undefined) {
+    const name = normalizeText(body.name);
+    if (!name) return { error: 'name is required' };
+    payload.name = name;
+  } else if (!partial) {
+    return { error: 'name is required' };
+  }
+
+  if (body.description !== undefined) payload.description = normalizeText(body.description);
+
+  if (body.sort_order !== undefined) {
+    const sortOrder = parseInteger(body.sort_order, null);
+    if (sortOrder === null) return { error: 'sort_order must be an integer' };
+    payload.sort_order = sortOrder;
+  }
+
+  if (body.is_active !== undefined) {
+    const isActive = parseBoolean(body.is_active, null);
+    if (isActive === null) return { error: 'is_active must be a boolean' };
+    payload.is_active = isActive;
+  } else if (!partial) {
+    payload.is_active = true;
+  }
+
+  if (body.metadata !== undefined) {
+    payload.metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+      ? body.metadata
+      : {};
+  }
+
   return { payload };
 };
 
@@ -541,6 +627,114 @@ class Warehouse {
         if (!result.rows[0]) return res.status(404).json({ error: 'Position not found' });
         return res.json({ deleted: true, id: result.rows[0].id, soft_deleted: true });
       }
+      return sendError(res, error);
+    }
+  }
+
+  async listCategories(req, res) {
+    try {
+      await ensureCategoriesTable();
+      const { limit, offset } = pagination(req.query);
+      const includeInactive = parseBoolean(req.query?.include_inactive, true);
+      const search = normalizeText(req.query?.search);
+      const where = [];
+      const params = [];
+
+      if (!includeInactive) where.push('is_active = true');
+      if (search) {
+        params.push(`%${search}%`);
+        where.push(`name ilike $${params.length}`);
+      }
+
+      const whereSql = where.length ? `where ${where.join(' and ')}` : '';
+      const count = await db.query(`select count(*)::int as count from warehouse_categories ${whereSql}`, params);
+      params.push(limit, offset);
+      const result = await db.query(
+        `select *
+         from warehouse_categories
+         ${whereSql}
+         order by sort_order asc, name asc
+         limit $${params.length - 1} offset $${params.length}`,
+        params
+      );
+
+      return res.json({ items: result.rows.map(categoryItem), total: rowCount(count) });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  }
+
+  async createCategory(req, res) {
+    const { payload, error: payloadError } = normalizeCategoryPayload(req.body || {});
+    if (payloadError) return res.status(400).json({ error: payloadError });
+
+    try {
+      await ensureCategoriesTable();
+
+      let sortOrder = payload.sort_order;
+      if (sortOrder === undefined) {
+        const max = await db.query('select coalesce(max(sort_order), 0)::int as max from warehouse_categories');
+        sortOrder = Number(max.rows[0]?.max || 0) + 1;
+      }
+
+      const result = await db.query(
+        `insert into warehouse_categories (name, description, sort_order, is_active, metadata)
+         values ($1, $2, $3, $4, $5)
+         returning *`,
+        [payload.name, payload.description || null, sortOrder, payload.is_active, payload.metadata || {}]
+      );
+
+      return res.status(201).json({ item: categoryItem(result.rows[0]) });
+    } catch (error) {
+      if (String(error.code) === '23505') {
+        return res.status(409).json({ error: 'Категория с таким названием уже существует' });
+      }
+      return sendError(res, error);
+    }
+  }
+
+  async updateCategory(req, res) {
+    const id = normalizeId(req.params?.id);
+    if (!id) return res.status(400).json({ error: 'Category id is required' });
+
+    const { payload, error: payloadError } = normalizeCategoryPayload(req.body || {}, { partial: true });
+    if (payloadError) return res.status(400).json({ error: payloadError });
+    if (!Object.keys(payload).length) return res.status(400).json({ error: 'No fields to update' });
+
+    try {
+      await ensureCategoriesTable();
+      payload.updated_at = new Date().toISOString();
+      const keys = Object.keys(payload);
+      const values = keys.map((key) => payload[key]);
+      const setSql = keys.map((key, index) => `${key} = $${index + 1}`).join(', ');
+      const result = await db.query(
+        `update warehouse_categories
+         set ${setSql}
+         where id = $${keys.length + 1}
+         returning *`,
+        [...values, id]
+      );
+
+      if (!result.rows[0]) return res.status(404).json({ error: 'Category not found' });
+      return res.json({ item: categoryItem(result.rows[0]) });
+    } catch (error) {
+      if (String(error.code) === '23505') {
+        return res.status(409).json({ error: 'Категория с таким названием уже существует' });
+      }
+      return sendError(res, error);
+    }
+  }
+
+  async deleteCategory(req, res) {
+    const id = normalizeId(req.params?.id || req.query?.id || req.body?.id);
+    if (!id) return res.status(400).json({ error: 'Category id is required' });
+
+    try {
+      await ensureCategoriesTable();
+      const result = await db.query('delete from warehouse_categories where id = $1 returning id', [id]);
+      if (!result.rows[0]) return res.status(404).json({ error: 'Category not found' });
+      return res.json({ deleted: true, id: result.rows[0].id });
+    } catch (error) {
       return sendError(res, error);
     }
   }
