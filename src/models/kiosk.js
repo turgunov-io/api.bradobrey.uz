@@ -484,6 +484,7 @@ class Kiosk {
             certificate_code = null,
             promo_code = null,
             use_cashback = false,
+            cashback_amount = null,
             scheduled_start_at = null,
             scheduled_end_at = null,
             idempotency_key = null,
@@ -992,7 +993,21 @@ class Kiosk {
         let payableTotal = certificate ? 0 : discountedTotal;
         if (useCashback) {
             const walletBalance = await getWalletBalance(clientId);
-            const maxSpend = roundMoney(Math.min(walletBalance, discountedTotal));
+
+            let requestedAmount;
+            if (cashback_amount !== null && cashback_amount !== undefined) {
+                requestedAmount = roundMoney(Number(cashback_amount));
+                if (requestedAmount > discountedTotal) {
+                    requestedAmount = discountedTotal;
+                }
+                if (requestedAmount > walletBalance) {
+                    requestedAmount = walletBalance;
+                }
+            } else {
+                requestedAmount = roundMoney(Math.min(walletBalance, discountedTotal));
+            }
+
+            const maxSpend = requestedAmount;
             payableTotal = roundMoney(Math.max(0, discountedTotal - maxSpend));
 
             if (maxSpend > 0) {

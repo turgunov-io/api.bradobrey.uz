@@ -22,15 +22,19 @@ const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
 
 async function endBreak(barberId, branchId, io) {
+    // A break toggles `is_active` (see takeBreak/returnFromBreak), so ending a
+    // break must restore `is_active`, not `is_on_shift`. Restoring the wrong
+    // flag left barbers stuck at is_active=false, which silently excluded them
+    // from reassignment candidates even while they looked active on shift.
     await db
         .from('barbers')
-        .update({ is_on_shift: true })
+        .update({ is_active: true })
         .eq('id', barberId);
     if (io) {
         io.to(`branch:${branchId}`).emit('queue:update', {
             type: 'barber_status',
             barberId,
-            is_on_shift: true,
+            is_active: true,
         });
     }
 }
@@ -1540,7 +1544,7 @@ class Barbers {
         if (isBarberWorkspaceRole(user.role)) {
             const { data: barberData, error: barberError } = await db
                 .from('barbers')
-                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
+                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, is_active, specialization')
                 .eq('id', user.id)
                 .maybeSingle();
 
@@ -1559,7 +1563,7 @@ class Barbers {
                 breakTimers.delete(user.id);
                 try {
                     await endBreak(user.id, barberData.branch_id, io);
-                    barberData.is_on_shift = true;
+                    barberData.is_active = true;
                 } catch (e) {
                     // ignore, return current state
                 }
