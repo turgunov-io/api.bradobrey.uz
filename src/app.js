@@ -4,6 +4,7 @@ const cors = require('cors');
 const express = require('express');
 const morgan = require('morgan');
 const { uploadRoot } = require('./config/uploads');
+const requestLogger = require('./middleware/requestLogger');
 
 const kiosk = require('./routers/kiosk');
 const monitor = require('./routers/monitor');
@@ -44,6 +45,7 @@ app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(morgan('dev'));
+app.use(requestLogger);
 app.use('/uploads', express.static(uploadRoot));
 
 

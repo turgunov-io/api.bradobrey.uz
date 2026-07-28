@@ -740,36 +740,9 @@ const isStaleActiveEntry = (entry, cutoffIso) => {
 };
 
 const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, excludeEntryId = null, requireOnShift = true }) => {
-    const { data: barbers, error: barbersError } = await db
-        .from('barbers')
-        .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active')
-        .eq('branch_id', branchId);
-
-    if (barbersError) throw new Error(barbersError.message);
-
-    const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
-    let allowedBarberIds = new Set();
-
-    if (barberIds.length) {
-        const { data: users, error: usersError } = await db
-            .from('users')
-            .select('id, role')
-            .in('id', barberIds)
-            .in('role', Array.from(BARBER_WORKSPACE_ROLES));
-
-        if (usersError) throw new Error(usersError.message);
-        allowedBarberIds = new Set((users || []).map((user) => user.id));
-    }
-
-    const candidates = (barbers || [])
-        .filter((barber) => allowedBarberIds.has(barber.id))
-        .filter((barber) => !excludeBarberId || barber.id !== excludeBarberId)
-        .filter((barber) => barber.is_active !== false && barber.is_authorized !== false)
-        .filter((barber) => !requireOnShift || barber.is_on_shift === true);
-
-    const candidateIds = new Set(candidates.map((barber) => barber.id));
-    const statsByBarber = new Map();
-
+    // The barbers list and the active queue only share the branch id, so fetch
+    // them concurrently instead of chaining awaits. Cuts a round-trip against a
+    // remote database, which dominates latency when the API runs far from it.
     let queueQuery = db
         .from('queue_entries')
         .select('id, barber_id, status, service_id, service_ids')
@@ -780,29 +753,66 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
         queueQuery = queueQuery.neq('id', excludeEntryId);
     }
 
-    const { data: queues, error: queuesError } = await queueQuery;
+    const [
+        { data: barbers, error: barbersError },
+        { data: queues, error: queuesError },
+    ] = await Promise.all([
+        db
+            .from('barbers')
+            .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active')
+            .eq('branch_id', branchId),
+        queueQuery,
+    ]);
+
+    if (barbersError) throw new Error(barbersError.message);
     if (queuesError) throw new Error(queuesError.message);
 
+    const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
     const allServiceIds = Array.from(
         new Set((queues || []).flatMap(serviceIdsForEntry).filter(Boolean))
     );
 
-    let durationByServiceId = new Map();
-    if (allServiceIds.length) {
-        const { data: services, error: servicesError } = await db
-            .from('services')
-            .select('id, duration_minutes')
-            .in('id', allServiceIds);
+    // users (role gate) depends on barberIds; services (durations) depends on
+    // the queue's service ids — independent of each other, so run in parallel.
+    const [usersResult, servicesResult] = await Promise.all([
+        barberIds.length
+            ? db
+                .from('users')
+                .select('id, role')
+                .in('id', barberIds)
+                .in('role', Array.from(BARBER_WORKSPACE_ROLES))
+            : Promise.resolve({ data: [], error: null }),
+        allServiceIds.length
+            ? db
+                .from('services')
+                .select('id, duration_minutes')
+                .in('id', allServiceIds)
+            : Promise.resolve({ data: [], error: null }),
+    ]);
 
-        if (servicesError) throw new Error(servicesError.message);
+    if (usersResult.error) throw new Error(usersResult.error.message);
+    if (servicesResult.error) throw new Error(servicesResult.error.message);
 
-        durationByServiceId = new Map(
-            (services || []).map((service) => [
-                String(service.id),
-                Number(service.duration_minutes || 0),
-            ])
-        );
-    }
+    const allowedBarberIds = new Set((usersResult.data || []).map((user) => user.id));
+    const durationByServiceId = new Map(
+        (servicesResult.data || []).map((service) => [
+            String(service.id),
+            Number(service.duration_minutes || 0),
+        ])
+    );
+
+    const candidates = (barbers || [])
+        .filter((barber) => allowedBarberIds.has(barber.id))
+        .filter((barber) => !excludeBarberId || barber.id !== excludeBarberId)
+        // Operational availability must match how the kiosk lists/books barbers
+        // (role + is_active + is_on_shift). is_authorized is a merchant-approval
+        // flag the kiosk ignores, so requiring it here silently rejected barbers
+        // that the app shows as valid reassignment targets.
+        .filter((barber) => barber.is_active !== false)
+        .filter((barber) => !requireOnShift || barber.is_on_shift === true);
+
+    const candidateIds = new Set(candidates.map((barber) => barber.id));
+    const statsByBarber = new Map();
 
     for (const entry of queues || []) {
         const barberId = entry?.barber_id;

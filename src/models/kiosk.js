@@ -296,42 +296,31 @@ class Kiosk {
             console.error('stale queue cleanup failed:', e.message);
         }
 
-        const { data: barbers, error: barbersError } = await db
-            .from("barbers")
-            .select("id, name, branch_id, photo_url, is_on_shift, is_active")
-            .eq("branch_id", branch_id);
+        // barbers and the raw queue only share branch_id, so fetch them
+        // concurrently. Against a remote DB the per-query round-trip dominates,
+        // so collapsing these levels is what actually speeds the screen up.
+        const [
+            { data: barbers, error: barbersError },
+            { data: rawQueues, error: queuesError },
+        ] = await Promise.all([
+            db
+                .from("barbers")
+                .select("id, name, branch_id, photo_url, is_on_shift, is_active")
+                .eq("branch_id", branch_id),
+            db
+                .from("queue_entries")
+                .select("id, barber_id, client_id, status, created_at, service_ids")
+                .eq("branch_id", branch_id),
+        ]);
 
         if (barbersError) {
             return res.status(500).json({ error: barbersError.message });
         }
-
-        const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
-        let allowedBarberIds = new Set(barberIds);
-
-        if (barberIds.length) {
-            const { data: users, error: usersError } = await db
-                .from('users')
-                .select('id, role')
-                .in('id', barberIds)
-                .in('role', OPERATIONAL_BARBER_ROLES);
-
-            if (usersError) {
-                return res.status(500).json({ error: usersError.message });
-            }
-
-            allowedBarberIds = new Set((users || []).map((user) => user.id));
-        }
-
-        const visibleBarbers = (barbers || []).filter((barber) => allowedBarberIds.has(barber.id));
-
-        const { data: rawQueues, error: queuesError } = await db
-            .from("queue_entries")
-            .select("id, barber_id, client_id, status, created_at, service_ids") // 🔥 ADDED service_ids
-            .eq("branch_id", branch_id);
-
         if (queuesError) {
             return res.status(500).json({ error: queuesError.message });
         }
+
+        const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
 
         const queues = (rawQueues || []).filter((entry) => {
             if (['completed', 'no_show', 'not_in_time'].includes(entry.status)) {
@@ -352,43 +341,61 @@ class Kiosk {
             )
         );
 
-        let servicesById = {};
-        if (allServiceIds.length) {
-            const { data: services, error: servicesError } = await db
-                .from("services")
-                .select("id, duration_minutes, name")
-                .in("id", allServiceIds);
-
-            if (servicesError) {
-                return res.status(500).json({ error: servicesError.message });
-            }
-
-            servicesById = (services || []).reduce((acc, service) => {
-                acc[service.id] = service.duration_minutes || 0;
-                return acc;
-            }, {});
-        }
-
         const clientIds = Array.from(
             new Set((queues || []).map((q) => q.client_id).filter(Boolean))
         );
 
-        let clientsById = {};
-        if (clientIds.length) {
-            const { data: clients, error: clientsError } = await db
-                .from("clients")
-                .select("id, name")
-                .in("id", clientIds);
+        // users (role gate), services (durations) and clients (names) each
+        // depend only on ids already resolved above — run them in parallel.
+        const [usersResult, servicesResult, clientsResult] = await Promise.all([
+            barberIds.length
+                ? db
+                    .from('users')
+                    .select('id, role')
+                    .in('id', barberIds)
+                    .in('role', OPERATIONAL_BARBER_ROLES)
+                : Promise.resolve({ data: null, error: null }),
+            allServiceIds.length
+                ? db
+                    .from("services")
+                    .select("id, duration_minutes, name")
+                    .in("id", allServiceIds)
+                : Promise.resolve({ data: [], error: null }),
+            clientIds.length
+                ? db
+                    .from("clients")
+                    .select("id, name")
+                    .in("id", clientIds)
+                : Promise.resolve({ data: [], error: null }),
+        ]);
 
-            if (clientsError) {
-                return res.status(500).json({ error: clientsError.message });
-            }
-
-            clientsById = (clients || []).reduce((acc, client) => {
-                acc[client.id] = client.name;
-                return acc;
-            }, {});
+        if (usersResult.error) {
+            return res.status(500).json({ error: usersResult.error.message });
         }
+        if (servicesResult.error) {
+            return res.status(500).json({ error: servicesResult.error.message });
+        }
+        if (clientsResult.error) {
+            return res.status(500).json({ error: clientsResult.error.message });
+        }
+
+        // When there are no barbers the users query is skipped; fall back to the
+        // original "all ids allowed" set to preserve prior behaviour.
+        const allowedBarberIds = barberIds.length
+            ? new Set((usersResult.data || []).map((user) => user.id))
+            : new Set(barberIds);
+
+        const visibleBarbers = (barbers || []).filter((barber) => allowedBarberIds.has(barber.id));
+
+        const servicesById = (servicesResult.data || []).reduce((acc, service) => {
+            acc[service.id] = service.duration_minutes || 0;
+            return acc;
+        }, {});
+
+        const clientsById = (clientsResult.data || []).reduce((acc, client) => {
+            acc[client.id] = client.name;
+            return acc;
+        }, {});
 
         const queuesByBarber = {};
         const waitingTimeByBarber = {};

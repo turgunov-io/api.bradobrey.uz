@@ -36,11 +36,20 @@ const createPoolConfig = () => {
     ? { rejectUnauthorized: String(process.env.POSTGRES_SSL_REJECT_UNAUTHORIZED || 'true') !== 'false' }
     : undefined;
 
+  // Keep pooled connections warm. Against a remote DB, letting sockets idle out
+  // forces a fresh TCP + TLS handshake (several round-trips) on the next query,
+  // which is the main source of latency when the API runs far from its database.
+  const keepWarm = {
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
+    idleTimeoutMillis: Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 300000),
+    max: Number(process.env.POSTGRES_POOL_MAX || 10),
+  };
+
   if (connectionString && isValidConnectionString(connectionString)) {
     return {
       connectionString,
-      max: Number(process.env.POSTGRES_POOL_MAX || 10),
-      idleTimeoutMillis: Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 30000),
+      ...keepWarm,
       ...(ssl ? { ssl } : {}),
     };
   }
@@ -60,8 +69,7 @@ const createPoolConfig = () => {
   return {
     database: process.env.PGDATABASE || process.env.POSTGRES_DB,
     host: process.env.PGHOST || process.env.POSTGRES_HOST || 'localhost',
-    idleTimeoutMillis: Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 30000),
-    max: Number(process.env.POSTGRES_POOL_MAX || 10),
+    ...keepWarm,
     password: process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD,
     port: Number(process.env.PGPORT || process.env.POSTGRES_PORT || 5432),
     user: process.env.PGUSER || process.env.POSTGRES_USER,
