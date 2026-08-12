@@ -34,6 +34,8 @@ router.post("/break", (req, res) => barbers.takeBreak(req, res));
 router.post("/return", (req, res) => barbers.returnFromBreak(req, res));
 router.post("/shift/start", (req, res) => verifix.startShift(req, res));
 router.post("/shift/end", (req, res) => verifix.endShift(req, res));
+router.patch("/:id/archive", (req, res) => barbers.archiveEmployee(req, res));
+router.patch("/:id/restore", (req, res) => barbers.restoreEmployee(req, res));
 router.patch("/:id", upload.single('file'), (req, res) => barbers.updateEmployee(req, res));
 router.delete("/:id", (req, res) => barbers.removeEmployee(req, res));
 

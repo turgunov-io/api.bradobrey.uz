@@ -5,6 +5,7 @@ const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadIm
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
 const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback");
 const { recordActivityEvent } = require("./verifix");
+const { isArchivedEmployee } = require('../middleware/employeeAccess');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -17,6 +18,7 @@ const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
 const PAYMENT_PART_METHODS = new Set(['cash', 'card', 'certificate']);
 const QUEUE_PAYMENT_METHODS = new Set(['cash', 'card', 'certificate', 'mixed']);
+const EMPLOYEE_ARCHIVE_FILTERS = new Set(['active', 'only', 'all']);
 
 const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
@@ -100,6 +102,11 @@ const isBarberWorkspaceRole = (role) => BARBER_WORKSPACE_ROLES.has(role);
 const normalizeId = (value) => {
     const text = String(value || '').trim();
     return text || null;
+};
+
+const normalizeArchiveFilter = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return EMPLOYEE_ARCHIVE_FILTERS.has(normalized) ? normalized : 'active';
 };
 
 const roundFinanceAmount = (value) => {
@@ -348,6 +355,7 @@ const uploadEmployeePhoto = async (req, userId) => {
 const employeeItem = ({ user, barber, permissions = [] }) => ({
     branch_id: barber?.branch_id || user.branch_id || null,
     id: user.id,
+    is_active: barber?.is_active ?? null,
     is_authorized: barber?.is_authorized ?? null,
     is_on_shift: barber?.is_on_shift ?? null,
     login: user.login || null,
@@ -359,7 +367,7 @@ const employeeItem = ({ user, barber, permissions = [] }) => ({
     specialization: barber?.specialization || null,
 });
 
-const loadEmployeeDirectory = async ({ branchId, role } = {}) => {
+const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {}) => {
     let query = db
         .from('users')
         .select('id, login, role, branch_id', { count: 'exact' })
@@ -378,7 +386,7 @@ const loadEmployeeDirectory = async ({ branchId, role } = {}) => {
         userIds.length
             ? db
                 .from('barbers')
-                .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, specialization, phone')
+                .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, specialization, phone')
                 .in('id', userIds)
             : Promise.resolve({ data: [], error: null }),
         fetchPermissionsByUserIds(userIds),
@@ -391,10 +399,48 @@ const loadEmployeeDirectory = async ({ branchId, role } = {}) => {
         barber: barbersById.get(String(user.id)) || null,
         permissions: permissionsByUser.get(String(user.id)) || [],
         user,
-    }));
+    })).filter((item) => {
+        const archivedItem = item.is_active === false || item.is_authorized === false;
 
-    return { items, total: count ?? items.length };
+        if (archived === 'only') return archivedItem;
+        if (archived === 'all') return true;
+        return !archivedItem;
+    });
+
+    return { items, total: items.length ?? count ?? 0 };
 };
+
+const loadEmployeeRecord = async (id) => {
+    const [{ data: user, error: userError }, { data: barber, error: barberError }] = await Promise.all([
+        db
+            .from('users')
+            .select('id, login, role, branch_id')
+            .eq('id', id)
+            .maybeSingle(),
+        db
+            .from('barbers')
+            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
+            .eq('id', id)
+            .maybeSingle(),
+    ]);
+
+    if (userError) throw new Error(userError.message);
+    if (barberError) throw new Error(barberError.message);
+
+    return { barber: barber || null, user: user || null };
+};
+
+const buildArchivedEmployeePayload = ({ active, barber, user }) => ({
+    branch_id: barber?.branch_id || user?.branch_id || null,
+    id: user.id,
+    is_active: active,
+    is_authorized: active,
+    is_on_shift: false,
+    name: barber?.name || user?.login || 'Сотрудник',
+    phone: barber?.phone ?? null,
+    photo_url: barber?.photo_url ?? null,
+    specialization: barber?.specialization ?? null,
+});
 
 const clearCallTimer = (entryId) => {
     const timer = callTimers.get(entryId);
@@ -940,10 +986,11 @@ class Barbers {
                 return res.status(400).json({ error: 'Unsupported barbers list mode' });
             }
 
+            const archived = normalizeArchiveFilter(req.query?.archived);
             const branchId = normalizeText(req.query?.branch_id);
             const role = normalizeText(req.query?.role);
 
-            const result = await loadEmployeeDirectory({ branchId, role });
+            const result = await loadEmployeeDirectory({ archived, branchId, role });
             return res.json(result);
         } catch (error) {
             return res.status(500).json({ error: error.message || 'Failed to load employees' });
@@ -1022,7 +1069,7 @@ class Barbers {
             const { data: barber, error: barberError } = await db
                 .from('barbers')
                 .upsert(barberPayload, { onConflict: 'id' })
-                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, photo_url')
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
                 .maybeSingle();
 
             if (barberError) return res.status(500).json({ error: barberError.message });
@@ -1042,44 +1089,102 @@ class Barbers {
     }
 
     async removeEmployee(req, res) {
+        return this.archiveEmployee(req, res);
+    }
+
+    async archiveEmployee(req, res) {
         try {
             const { id } = req.params || {};
             if (!id) return res.status(400).json({ error: 'Employee id is required' });
 
-            const { data: existing, error: existingError } = await db
-                .from('users')
-                .select('id')
-                .eq('id', id)
+            const { barber: currentBarber, user } = await loadEmployeeRecord(id);
+            if (!user) return res.status(404).json({ error: 'Employee not found' });
+
+            const payload = buildArchivedEmployeePayload({
+                active: false,
+                barber: currentBarber,
+                user,
+            });
+
+            const { data: barber, error: archiveError } = await db
+                .from('barbers')
+                .upsert(payload, { onConflict: 'id' })
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
                 .maybeSingle();
 
-            if (existingError) return res.status(500).json({ error: existingError.message });
-            if (!existing) return res.status(404).json({ error: 'Employee not found' });
+            if (archiveError) return res.status(500).json({ error: archiveError.message });
 
-            const permissionDelete = await db
-                .from('user_permissions')
-                .delete()
-                .eq('user_id', id);
+            if (breakTimers.has(id)) {
+                clearTimeout(breakTimers.get(id).timer);
+                breakTimers.delete(id);
+            }
+            clearShiftTimer(id);
 
-            if (permissionDelete.error && !isMissingRelationError(permissionDelete.error, 'user_permissions')) {
-                return res.status(500).json({ error: permissionDelete.error.message });
+            const permissionMap = await fetchPermissionsByUserIds([id]);
+            const item = employeeItem({
+                barber,
+                permissions: permissionMap.get(String(id)) || [],
+                user,
+            });
+
+            const io = req.app.get('io');
+            if (io && barber?.branch_id) {
+                io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+                    type: 'barber_status',
+                    barberId: id,
+                    is_active: false,
+                    is_on_shift: false,
+                });
             }
 
-            await db
-                .from('barbers')
-                .update({ is_authorized: false, is_on_shift: false })
-                .eq('id', id);
+            return res.json({ archived: true, item, barber, user });
+        } catch (error) {
+            return res.status(500).json({ error: error.message || 'Failed to archive employee' });
+        }
+    }
 
-            const { data, error } = await db
-                .from('users')
-                .delete()
-                .eq('id', id)
-                .select('id')
+    async restoreEmployee(req, res) {
+        try {
+            const { id } = req.params || {};
+            if (!id) return res.status(400).json({ error: 'Employee id is required' });
+
+            const { barber: currentBarber, user } = await loadEmployeeRecord(id);
+            if (!user) return res.status(404).json({ error: 'Employee not found' });
+
+            const payload = buildArchivedEmployeePayload({
+                active: true,
+                barber: currentBarber,
+                user,
+            });
+
+            const { data: barber, error: restoreError } = await db
+                .from('barbers')
+                .upsert(payload, { onConflict: 'id' })
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
                 .maybeSingle();
 
-            if (error) return res.status(500).json({ error: error.message });
-            return res.json({ deleted: true, id: data?.id || id });
+            if (restoreError) return res.status(500).json({ error: restoreError.message });
+
+            const permissionMap = await fetchPermissionsByUserIds([id]);
+            const item = employeeItem({
+                barber,
+                permissions: permissionMap.get(String(id)) || [],
+                user,
+            });
+
+            const io = req.app.get('io');
+            if (io && barber?.branch_id) {
+                io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+                    type: 'barber_status',
+                    barberId: id,
+                    is_active: true,
+                    is_on_shift: false,
+                });
+            }
+
+            return res.json({ restored: true, item, barber, user });
         } catch (error) {
-            return res.status(500).json({ error: error.message || 'Failed to delete employee' });
+            return res.status(500).json({ error: error.message || 'Failed to restore employee' });
         }
     }
 
@@ -1299,6 +1404,20 @@ class Barbers {
             return res.status(400).json({ error: 'Invalid credentials' });
         }
 
+        const { data: employeeBarber, error: barberError } = await db
+            .from('barbers')
+            .select('id, is_active, is_authorized')
+            .eq('id', userData.id)
+            .maybeSingle();
+
+        if (barberError) {
+            return res.status(500).json({ error: barberError.message });
+        }
+
+        if (isArchivedEmployee(employeeBarber)) {
+            return res.status(403).json({ error: 'Employee access has been revoked' });
+        }
+
         if (ADMIN_ROLES.has(userData.role)) {
             const effectiveBranchId = userData.branch_id || null;
             const token = signUserToken({
@@ -1386,6 +1505,20 @@ class Barbers {
             return res.status(400).json({ error: 'Invalid credentials' });
         }
 
+        const { data: employeeBarber, error: barberError } = await db
+            .from('barbers')
+            .select('id, is_active, is_authorized')
+            .eq('id', adminUser.id)
+            .maybeSingle();
+
+        if (barberError) {
+            return res.status(500).json({ error: barberError.message });
+        }
+
+        if (isArchivedEmployee(employeeBarber)) {
+            return res.status(403).json({ error: 'Employee access has been revoked' });
+        }
+
         const token = signUserToken({
             branch_id: adminUser.branch_id || null,
             id: adminUser.id,
@@ -1465,6 +1598,8 @@ class Barbers {
         const barberPayload = {
             branch_id,
             id: userRow.id,
+            is_active: true,
+            is_authorized: true,
             is_on_shift: false,
             name,
             phone: normalizeText(phone) ?? null,
@@ -1475,7 +1610,7 @@ class Barbers {
         const { data: barberRow, error: barberError } = await db
             .from('barbers')
             .insert(barberPayload)
-            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, photo_url')
+            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
             .maybeSingle();
 
         if (barberError || !barberRow) {
@@ -1540,7 +1675,7 @@ class Barbers {
         if (isBarberWorkspaceRole(user.role)) {
             const { data: barberData, error: barberError } = await db
                 .from('barbers')
-                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
+                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, is_active, specialization')
                 .eq('id', user.id)
                 .maybeSingle();
 

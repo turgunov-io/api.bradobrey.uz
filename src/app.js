@@ -22,6 +22,7 @@ const loyalty = require('./routers/loyalty');
 const kioskAds = require('./routers/kioskAds');
 const verifix = require('./routers/verifix');
 const warehouse = require('./routers/warehouse');
+const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
 
 const app = express();
 
@@ -45,6 +46,7 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(morgan('dev'));
 app.use('/uploads', express.static(uploadRoot));
+app.use(enforceEmployeeAccess);
 
 
 app.get('/health', (_req, res) => {
