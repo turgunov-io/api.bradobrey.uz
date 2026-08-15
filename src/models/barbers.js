@@ -356,6 +356,7 @@ const employeeItem = ({ user, barber, permissions = [] }) => ({
     branch_id: barber?.branch_id || user.branch_id || null,
     id: user.id,
     is_active: barber?.is_active ?? null,
+    is_archived: barber?.is_archived ?? false,
     is_authorized: barber?.is_authorized ?? null,
     is_on_shift: barber?.is_on_shift ?? null,
     login: user.login || null,
@@ -386,7 +387,7 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
         userIds.length
             ? db
                 .from('barbers')
-                .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, specialization, phone')
+                .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, is_archived, specialization, phone')
                 .in('id', userIds)
             : Promise.resolve({ data: [], error: null }),
         fetchPermissionsByUserIds(userIds),
@@ -400,7 +401,7 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
         permissions: permissionsByUser.get(String(user.id)) || [],
         user,
     })).filter((item) => {
-        const archivedItem = item.is_active === false || item.is_authorized === false;
+        const archivedItem = item.is_archived === true;
 
         if (archived === 'only') return archivedItem;
         if (archived === 'all') return true;
@@ -419,7 +420,7 @@ const loadEmployeeRecord = async (id) => {
             .maybeSingle(),
         db
             .from('barbers')
-            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
+            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, is_archived, photo_url')
             .eq('id', id)
             .maybeSingle(),
     ]);
@@ -430,11 +431,12 @@ const loadEmployeeRecord = async (id) => {
     return { barber: barber || null, user: user || null };
 };
 
-const buildArchivedEmployeePayload = ({ active, barber, user }) => ({
+const buildArchivedEmployeePayload = ({ archived, barber, user }) => ({
     branch_id: barber?.branch_id || user?.branch_id || null,
     id: user.id,
-    is_active: active,
-    is_authorized: active,
+    is_archived: archived,
+    // Archiving ends a shift, but must not overwrite the availability or
+    // authorization flags: those have independent, pre-existing meanings.
     is_on_shift: false,
     name: barber?.name || user?.login || 'Сотрудник',
     phone: barber?.phone ?? null,
@@ -784,7 +786,7 @@ const isStaleActiveEntry = (entry, cutoffIso) => {
 const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, excludeEntryId = null, requireOnShift = true }) => {
     const { data: barbers, error: barbersError } = await db
         .from('barbers')
-        .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active')
+        .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, is_archived')
         .eq('branch_id', branchId);
 
     if (barbersError) throw new Error(barbersError.message);
@@ -806,7 +808,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
     const candidates = (barbers || [])
         .filter((barber) => allowedBarberIds.has(barber.id))
         .filter((barber) => !excludeBarberId || barber.id !== excludeBarberId)
-        .filter((barber) => barber.is_active !== false && barber.is_authorized !== false)
+        .filter((barber) => barber.is_active !== false && barber.is_archived !== true)
         .filter((barber) => !requireOnShift || barber.is_on_shift === true);
 
     const candidateIds = new Set(candidates.map((barber) => barber.id));
@@ -1069,7 +1071,7 @@ class Barbers {
             const { data: barber, error: barberError } = await db
                 .from('barbers')
                 .upsert(barberPayload, { onConflict: 'id' })
-                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, is_archived, photo_url')
                 .maybeSingle();
 
             if (barberError) return res.status(500).json({ error: barberError.message });
@@ -1101,7 +1103,7 @@ class Barbers {
             if (!user) return res.status(404).json({ error: 'Employee not found' });
 
             const payload = buildArchivedEmployeePayload({
-                active: false,
+                archived: true,
                 barber: currentBarber,
                 user,
             });
@@ -1109,7 +1111,7 @@ class Barbers {
             const { data: barber, error: archiveError } = await db
                 .from('barbers')
                 .upsert(payload, { onConflict: 'id' })
-                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, is_archived, photo_url')
                 .maybeSingle();
 
             if (archiveError) return res.status(500).json({ error: archiveError.message });
@@ -1152,7 +1154,7 @@ class Barbers {
             if (!user) return res.status(404).json({ error: 'Employee not found' });
 
             const payload = buildArchivedEmployeePayload({
-                active: true,
+                archived: false,
                 barber: currentBarber,
                 user,
             });
@@ -1160,7 +1162,7 @@ class Barbers {
             const { data: barber, error: restoreError } = await db
                 .from('barbers')
                 .upsert(payload, { onConflict: 'id' })
-                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
+                .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, is_archived, photo_url')
                 .maybeSingle();
 
             if (restoreError) return res.status(500).json({ error: restoreError.message });
@@ -1406,7 +1408,7 @@ class Barbers {
 
         const { data: employeeBarber, error: barberError } = await db
             .from('barbers')
-            .select('id, is_active, is_authorized')
+            .select('id, is_archived')
             .eq('id', userData.id)
             .maybeSingle();
 
@@ -1507,7 +1509,7 @@ class Barbers {
 
         const { data: employeeBarber, error: barberError } = await db
             .from('barbers')
-            .select('id, is_active, is_authorized')
+            .select('id, is_archived')
             .eq('id', adminUser.id)
             .maybeSingle();
 
@@ -1599,6 +1601,7 @@ class Barbers {
             branch_id,
             id: userRow.id,
             is_active: true,
+            is_archived: false,
             is_authorized: true,
             is_on_shift: false,
             name,
@@ -1610,7 +1613,7 @@ class Barbers {
         const { data: barberRow, error: barberError } = await db
             .from('barbers')
             .insert(barberPayload)
-            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, photo_url')
+            .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, is_archived, photo_url')
             .maybeSingle();
 
         if (barberError || !barberRow) {

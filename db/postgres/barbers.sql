@@ -6,6 +6,7 @@ create table if not exists barbers (
   is_authorized boolean default false,
   is_on_shift boolean default false,
   is_active boolean default true,
+  is_archived boolean not null default false,
   specialization text,
   phone text,
   created_at timestamptz not null default now(),
@@ -28,6 +29,14 @@ begin
     where table_name = 'barbers' and column_name = 'is_active'
   ) then
     alter table barbers add column is_active boolean default true;
+  end if;
+
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_name = 'barbers' and column_name = 'is_archived'
+  ) then
+    alter table barbers add column is_archived boolean not null default false;
   end if;
 
   if not exists (

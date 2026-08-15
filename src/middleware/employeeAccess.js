@@ -28,7 +28,7 @@ async function loadEmployeeAccessState(userId) {
       .maybeSingle(),
     db
       .from('barbers')
-      .select('id, branch_id, is_active, is_authorized, is_on_shift')
+      .select('id, branch_id, is_active, is_authorized, is_archived, is_on_shift')
       .eq('id', userId)
       .maybeSingle(),
   ]);
@@ -40,10 +40,10 @@ async function loadEmployeeAccessState(userId) {
 }
 
 function isArchivedEmployee(barber) {
-  return Boolean(
-    barber
-    && (barber.is_active === false || barber.is_authorized === false)
-  );
+  // `is_active` is the operational availability flag (for example, a break
+  // sets it to false). `is_authorized` predates employee archiving and is
+  // still used by existing integrations. Neither one must revoke a login.
+  return barber?.is_archived === true;
 }
 
 async function enforceEmployeeAccess(req, res, next) {
