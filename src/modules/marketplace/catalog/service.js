@@ -331,7 +331,7 @@ const quoteBooking = async (payload) => {
 
   const { data: barber, error: barberError } = await repo.fetchBarberById(barberId);
   if (barberError) throw barberError;
-  if (!barber || barber.branch_id !== branchId || barber.is_active === false) {
+  if (!barber || barber.branch_id !== branchId || barber.is_active === false || barber.is_archived === true) {
     const err = new Error('Selected barber is not available for this branch');
     err.statusCode = 400;
     throw err;

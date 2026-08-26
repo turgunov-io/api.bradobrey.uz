@@ -319,7 +319,7 @@ class Kiosk {
 
         const { data: barbers, error: barbersError } = await db
             .from("barbers")
-            .select("id, name, branch_id, photo_url, is_on_shift, is_active")
+            .select("id, name, branch_id, photo_url, is_on_shift, is_active, is_archived")
             .eq("branch_id", branch_id);
 
         if (barbersError) {
@@ -343,7 +343,9 @@ class Kiosk {
             allowedBarberIds = new Set((users || []).map((user) => user.id));
         }
 
-        const visibleBarbers = (barbers || []).filter((barber) => allowedBarberIds.has(barber.id));
+        const visibleBarbers = (barbers || []).filter((barber) => (
+            allowedBarberIds.has(barber.id) && barber.is_archived !== true
+        ));
 
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
@@ -661,13 +663,16 @@ class Kiosk {
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
-            .select('id, branch_id, is_on_shift, is_authorized')
+            .select('id, branch_id, is_on_shift, is_archived')
             .eq('id', barber_id)
             .maybeSingle();
         if (barberError) return res.status(500).json({ error: barberError.message });
         if (!barber) return res.status(404).json({ error: 'Barber not found' });
         if (barber.branch_id !== branch_id) {
             return res.status(400).json({ error: 'Barber does not belong to this branch' });
+        }
+        if (barber.is_archived === true) {
+            return res.status(400).json({ error: 'Selected employee is archived' });
         }
 
         const { data: barberUser, error: barberUserError } = await db

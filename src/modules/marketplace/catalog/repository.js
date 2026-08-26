@@ -42,7 +42,7 @@ const getActiveServices = async () => {
 const getBranchOperationalBarbers = async (branchId) => {
   const { data: barbers, error: barbersError } = await db
     .from('barbers')
-    .select('id, name, branch_id, photo_url, specialization, is_on_shift, is_active')
+    .select('id, name, branch_id, photo_url, specialization, is_on_shift, is_active, is_archived')
     .eq('branch_id', branchId);
 
   if (barbersError) throw barbersError;
@@ -60,7 +60,7 @@ const getBranchOperationalBarbers = async (branchId) => {
 
   const allowedBarberIds = new Set((users || []).map((user) => user?.id));
   const visibleBarbers = (barbers || []).filter((barber) => (
-    allowedBarberIds.has(barber?.id) && barber?.is_active !== false
+    allowedBarberIds.has(barber?.id) && barber?.is_active !== false && barber?.is_archived !== true
   ));
 
   const { data: queues, error: queueError } = await db
@@ -212,7 +212,7 @@ const fetchServicesByIds = async (serviceIds) => db
 
 const fetchBarberById = async (barberId) => db
   .from('barbers')
-  .select('id, name, branch_id, is_active, is_on_shift')
+  .select('id, name, branch_id, is_active, is_archived, is_on_shift')
   .eq('id', barberId)
   .maybeSingle();
 
