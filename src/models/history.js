@@ -278,6 +278,15 @@ class History {
     async all(req, res) {
         const { filter } = req.query;
         const branchId = req.query.branch_id || req.query.branchId || req.query.id;
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
+        const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+        const statusesParam = req.query.status;
+        const requestedStatuses = Array.isArray(statusesParam)
+            ? statusesParam
+            : statusesParam
+                ? String(statusesParam).split(',').map((status) => status.trim()).filter(Boolean)
+                : HISTORY_STATUSES;
+        const statuses = requestedStatuses.filter((status) => HISTORY_STATUSES.includes(status));
 
         // all?filter=retention
         // all?filter=loyal
@@ -300,9 +309,9 @@ class History {
             client:clients ( id, name, phone, rank, completed_visits ),
             barber:barbers ( id, name )
         `, { count: 'exact' })
-            .in('status', HISTORY_STATUSES)
+            .in('status', statuses.length ? statuses : HISTORY_STATUSES)
             .order('finished_at', { ascending: false })
-            .limit(100);
+            .range(offset, offset + limit - 1);
 
         if (branchId) {
             query = query.eq('branch_id', branchId);
@@ -346,7 +355,9 @@ class History {
 
         return res.json({
             items: filtered,
-            count: filtered.length
+            count: filter ? filtered.length : (typeof count === 'number' ? count : filtered.length),
+            limit,
+            offset,
         });
     }
 

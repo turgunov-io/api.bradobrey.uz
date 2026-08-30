@@ -2,6 +2,14 @@ const { db } = require('../config/postgres');
 
 const PURCHASE_STATUSES = new Set(['draft', 'ordered', 'received', 'cancelled']);
 
+const normalizePurchaseStatus = (value, fallback = undefined) => {
+  const status = normalizeText(value);
+  // The dashboard historically used "pending". Keep old clients working while
+  // storing the status that is enforced by the database constraint.
+  if (status === 'pending') return 'ordered';
+  return status || fallback;
+};
+
 const normalizeText = (value) => {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -451,6 +459,37 @@ const normalizePurchaseItems = (items) => {
   return { items: normalized };
 };
 
+const purchaseItemsFromBody = (body = {}) => {
+  if (body.items !== undefined) return body.items;
+
+  // Compatibility for the original dashboard form, which submits one item at
+  // the top level instead of the API's items array.
+  if (body.position_id !== undefined || body.name !== undefined || body.sku !== undefined) {
+    return [{
+      name: body.name,
+      position_id: body.position_id,
+      quantity: body.quantity,
+      sku: body.sku,
+      total_amount: body.item_total_amount,
+      unit: body.unit,
+      unit_cost: body.unit_cost ?? body.unit_price,
+    }];
+  }
+
+  return body.items;
+};
+
+const parsePeriod = (value) => {
+  const period = normalizeText(value);
+  if (!period) return null;
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) return undefined;
+
+  const [year, month] = period.split('-').map(Number);
+  const start = new Date(Date.UTC(year, month - 1, 1));
+  const end = new Date(Date.UTC(year, month, 1));
+  return { end: end.toISOString(), start: start.toISOString() };
+};
+
 const loadPurchaseItems = async (purchaseId) => {
   const result = await db.query(
     `select pi.id, pi.purchase_id, pi.position_id, pi.name, pi.sku, pi.unit, pi.quantity, pi.unit_cost,
@@ -486,9 +525,10 @@ class Warehouse {
       const lowOnlyParams = branchId ? [branchId] : [];
       const stockWhere = branchId ? 'where s.branch_id = $1' : '';
 
-      const [positions, templates, lowStocks, purchases] = await Promise.all([
+      const [positions, templates, stocks, lowStocks, purchases] = await Promise.all([
         db.query('select count(*)::int as count from warehouse_positions where is_active = true'),
         db.query('select count(*)::int as count from warehouse_templates where is_active = true'),
+        db.query(`select count(*)::int as count from warehouse_stocks s ${stockWhere}`, lowOnlyParams),
         db.query(
           `select count(*)::int as count
            from warehouse_stocks s
@@ -507,6 +547,7 @@ class Warehouse {
 
       return res.json({
         positions: rowCount(positions),
+        stocks: rowCount(stocks),
         templates: rowCount(templates),
         low_stock_positions: rowCount(lowStocks),
         purchases_month_total: Number(purchases.rows[0]?.total || 0),
@@ -958,26 +999,43 @@ class Warehouse {
       const { limit, offset } = pagination(req.query);
       const branchId = normalizeId(req.query?.branch_id);
       const status = normalizeText(req.query?.status);
+      const period = parsePeriod(req.query?.period);
       const where = [];
       const params = [];
+
+      if (period === undefined) return res.status(400).json({ error: 'period must be in YYYY-MM format' });
 
       if (branchId) {
         params.push(branchId);
         where.push(`p.branch_id = $${params.length}`);
       }
       if (status) {
-        params.push(status);
+        const normalizedStatus = normalizePurchaseStatus(status);
+        if (!PURCHASE_STATUSES.has(normalizedStatus)) return res.status(400).json({ error: 'Invalid purchase status' });
+        params.push(normalizedStatus);
         where.push(`p.status = $${params.length}`);
+      }
+      if (period) {
+        params.push(period.start);
+        where.push(`p.purchased_at >= $${params.length}`);
+        params.push(period.end);
+        where.push(`p.purchased_at < $${params.length}`);
       }
 
       const whereSql = where.length ? `where ${where.join(' and ')}` : '';
       const count = await db.query(`select count(*)::int as count from warehouse_purchases p ${whereSql}`, params);
       params.push(limit, offset);
       const result = await db.query(
-        `select p.*, b.name as branch_name, count(pi.id)::int as items_count
+        `select p.*, b.name as branch_name, count(pi.id)::int as items_count,
+                (array_agg(pi.position_id order by pi.created_at) filter (where pi.id is not null))[1] as position_id,
+                (array_agg(coalesce(pi.name, wp.name) order by pi.created_at) filter (where pi.id is not null))[1] as position_name,
+                (array_agg(pi.quantity order by pi.created_at) filter (where pi.id is not null))[1] as quantity,
+                (array_agg(pi.unit order by pi.created_at) filter (where pi.id is not null))[1] as unit,
+                (array_agg(pi.unit_cost order by pi.created_at) filter (where pi.id is not null))[1] as unit_price
          from warehouse_purchases p
          left join branches b on b.id = p.branch_id
          left join warehouse_purchase_items pi on pi.purchase_id = p.id
+         left join warehouse_positions wp on wp.id = pi.position_id
          ${whereSql}
          group by p.id, b.name
          order by p.purchased_at desc
@@ -1014,9 +1072,9 @@ class Warehouse {
 
   async createPurchase(req, res) {
     const branchId = normalizeId(req.body?.branch_id);
-    const status = normalizeText(req.body?.status) || 'received';
+    const status = normalizePurchaseStatus(req.body?.status, 'received');
     const purchasedAt = parseDateTime(req.body?.purchased_at, new Date());
-    const { items, error: itemsError } = normalizePurchaseItems(req.body?.items);
+    const { items, error: itemsError } = normalizePurchaseItems(purchaseItemsFromBody(req.body));
 
     if (!PURCHASE_STATUSES.has(status)) return res.status(400).json({ error: 'Invalid purchase status' });
     if (!purchasedAt) return res.status(400).json({ error: 'purchased_at must be a valid date/time' });
@@ -1044,7 +1102,7 @@ class Warehouse {
          returning *`,
         [
           branchId,
-          normalizeText(req.body?.supplier_name),
+          normalizeText(req.body?.supplier_name ?? req.body?.supplier),
           purchasedAt.toISOString(),
           status,
           explicitTotal === undefined ? Number(calculatedTotal.toFixed(2)) : explicitTotal,
@@ -1095,15 +1153,20 @@ class Warehouse {
     if (!id) return res.status(400).json({ error: 'Purchase id is required' });
 
     const update = {};
+    const hasItemsUpdate = req.body?.items !== undefined;
+    const normalizedItems = hasItemsUpdate ? normalizePurchaseItems(req.body.items) : null;
+    if (normalizedItems?.error) return res.status(400).json({ error: normalizedItems.error });
     if (req.body?.branch_id !== undefined) update.branch_id = normalizeId(req.body.branch_id);
-    if (req.body?.supplier_name !== undefined) update.supplier_name = normalizeText(req.body.supplier_name);
+    if (req.body?.supplier_name !== undefined || req.body?.supplier !== undefined) {
+      update.supplier_name = normalizeText(req.body?.supplier_name ?? req.body?.supplier);
+    }
     if (req.body?.purchased_at !== undefined) {
       const purchasedAt = parseDateTime(req.body.purchased_at, null);
       if (!purchasedAt) return res.status(400).json({ error: 'purchased_at must be a valid date/time' });
       update.purchased_at = purchasedAt.toISOString();
     }
     if (req.body?.status !== undefined) {
-      const status = normalizeText(req.body.status);
+      const status = normalizePurchaseStatus(req.body.status);
       if (!PURCHASE_STATUSES.has(status)) return res.status(400).json({ error: 'Invalid purchase status' });
       update.status = status;
     }
@@ -1117,9 +1180,25 @@ class Warehouse {
         ? req.body.metadata
         : {};
     }
-    if (!Object.keys(update).length) return res.status(400).json({ error: 'No fields to update' });
+    if (!Object.keys(update).length && !hasItemsUpdate) return res.status(400).json({ error: 'No fields to update' });
 
     try {
+      const existingPurchaseResult = await db.query('select * from warehouse_purchases where id = $1', [id]);
+      const existingPurchase = existingPurchaseResult.rows[0];
+      if (!existingPurchase) return res.status(404).json({ error: 'Purchase not found' });
+
+      const shouldReconcileStock = hasItemsUpdate || update.status !== undefined || update.branch_id !== undefined;
+      const existingItems = shouldReconcileStock ? await loadPurchaseItems(id) : [];
+      const preparedItems = [];
+      if (hasItemsUpdate) {
+        for (const item of normalizedItems.items) {
+          preparedItems.push({ ...item, position_id: await ensurePositionForPurchaseItem(item) });
+        }
+        if (req.body?.total_amount === undefined) {
+          update.total_amount = Number(preparedItems.reduce((sum, item) => sum + item.total_amount, 0).toFixed(2));
+        }
+      }
+
       update.updated_at = new Date().toISOString();
       const keys = Object.keys(update);
       const values = keys.map((key) => update[key]);
@@ -1132,6 +1211,38 @@ class Warehouse {
         [...values, id]
       );
       if (!result.rows[0]) return res.status(404).json({ error: 'Purchase not found' });
+
+      if (shouldReconcileStock) {
+        const nextBranchId = update.branch_id === undefined ? existingPurchase.branch_id : update.branch_id;
+        const nextStatus = update.status === undefined ? existingPurchase.status : update.status;
+
+        if (existingPurchase.status === 'received') {
+          for (const item of existingItems) {
+            if (item.position_id) {
+              await updateStockQuantity({ branchId: existingPurchase.branch_id, positionId: item.position_id, quantityDelta: -item.quantity });
+            }
+          }
+        }
+
+        if (hasItemsUpdate) {
+          await db.query('delete from warehouse_purchase_items where purchase_id = $1', [id]);
+          for (const item of preparedItems) {
+            await db.query(
+              `insert into warehouse_purchase_items
+               (purchase_id, position_id, name, sku, unit, quantity, unit_cost, total_amount, metadata)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+              [id, item.position_id, item.name, item.sku, item.unit, item.quantity, item.unit_cost, item.total_amount, item.metadata]
+            );
+          }
+        }
+        const stockItems = hasItemsUpdate ? preparedItems : existingItems;
+        for (const item of stockItems) {
+          if (nextStatus === 'received' && item.position_id) {
+            await updateStockQuantity({ branchId: nextBranchId, positionId: item.position_id, quantityDelta: item.quantity });
+          }
+        }
+      }
+
       return res.json({ item: { ...purchaseItem(result.rows[0]), items: await loadPurchaseItems(id) } });
     } catch (error) {
       return sendError(res, error);
