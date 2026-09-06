@@ -477,6 +477,7 @@ class Kiosk {
 
         const { data, error } = await query
             .order("category", { ascending: true, nullsFirst: false })
+            .order("sort_order", { ascending: true, nullsFirst: false })
             .order("base_price", { ascending: true })
             .order("name", { ascending: true });
 

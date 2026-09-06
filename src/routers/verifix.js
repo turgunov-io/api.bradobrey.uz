@@ -11,6 +11,10 @@ router.post('/end', (req, res) => verifix.endShift(req, res));
 router.post('/shift/start', (req, res) => verifix.startShift(req, res));
 router.post('/shift/end', (req, res) => verifix.endShift(req, res));
 
+router.get('/settings', (req, res) => verifix.penaltySettings(req, res));
+router.patch('/settings', (req, res) => verifix.penaltySettings(req, res));
+router.post('/schedules/bulk', (req, res) => verifix.bulkSchedules(req, res));
+
 router.get('/schedules', (req, res) => verifix.listSchedules(req, res));
 router.post('/schedules', (req, res) => verifix.createSchedule(req, res));
 router.patch('/schedules/:id', (req, res) => verifix.updateSchedule(req, res));

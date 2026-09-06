@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { db } = require('../config/postgres');
+const { db, pool } = require('../config/postgres');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 const BARBER_ROLES = new Set(['barber', 'super-barber']);
@@ -575,6 +575,68 @@ class Verifix {
     } catch (error) {
       const status = /not found/i.test(error.message) ? 404 : 400;
       return res.status(status).json({ error: error.message });
+    }
+  }
+
+  async penaltySettings(req, res) {
+    const auth = requireAdmin(req, res);
+    if (!auth) return;
+    try {
+      if (req.method === 'PATCH') {
+        if (!['admin_network', 'admin'].includes(auth.role)) {
+          return res.status(403).json({ error: 'Only network admins can change the shared penalty rate' });
+        }
+        const rate = req.body?.penalty_per_minute;
+        if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0 || rate > 9999999999.99 || Math.abs(rate * 100 - Math.round(rate * 100)) > 0.0001) {
+          return res.status(400).json({ error: 'penalty_per_minute must be a non-negative amount with at most two decimal places' });
+        }
+        await db.query(`INSERT INTO verifix_settings (id, penalty_per_minute) VALUES (1, $1)
+          ON CONFLICT (id) DO UPDATE SET penalty_per_minute = EXCLUDED.penalty_per_minute, updated_at = now()`, [rate]);
+      }
+      const result = await db.query('SELECT penalty_per_minute FROM verifix_settings WHERE id = 1');
+      return res.json({ penalty_per_minute: Number(result.rows[0]?.penalty_per_minute || 0) });
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
+  async bulkSchedules(req, res) {
+    const auth = requireAdmin(req, res);
+    if (!auth) return;
+    const body = req.body || {};
+    const ids = body.branch_ids;
+    const start = normalizeTime(body.start_time);
+    const end = normalizeTime(body.end_time);
+    const grace = body.grace_minutes ?? 0;
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !uuid.test(id)) || new Set(ids).size !== ids.length || !start || !end || start === end || !Number.isInteger(grace) || grace < 0 || grace > 2147483647) {
+      return res.status(400).json({ error: 'Provide unique branch_ids, different start/end times and non-negative integer grace_minutes' });
+    }
+    if (!['admin_network', 'admin'].includes(auth.role) && ids.some(id => id !== auth.branchId)) {
+      return res.status(403).json({ error: 'Cannot change schedules for other branches' });
+    }
+    let client;
+    try {
+      client = await pool.connect();
+      await client.query('BEGIN');
+      const branches = await client.query('SELECT id FROM branches WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE', [ids]);
+      if (branches.rowCount !== ids.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Branch list changed. Refresh and try again.' });
+      }
+      await client.query(`UPDATE barber_work_schedules SET is_active = false, updated_at = now()
+        WHERE branch_id = ANY($1::uuid[]) AND barber_id IS NULL AND is_active = true`, [ids]);
+      const result = await client.query(`INSERT INTO barber_work_schedules
+        (branch_id, day_of_week, start_time, end_time, grace_minutes)
+        SELECT branch_id, day, $2::time, $3::time, $4::integer
+        FROM unnest($1::uuid[]) AS branch_id CROSS JOIN generate_series(0, 6) AS day RETURNING id`, [ids, start, end, grace]);
+      await client.query('COMMIT');
+      return res.json({ updated: result.rowCount });
+    } catch (error) {
+      if (client) await client.query('ROLLBACK');
+      return res.status(500).json({ error: error.message });
+    } finally {
+      client?.release();
     }
   }
 

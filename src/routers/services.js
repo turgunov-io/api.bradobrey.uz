@@ -8,6 +8,7 @@ const upload = multer({
 });
 
 router.get('/', (req, res) => services.list(req, res));
+router.patch('/reorder', (req, res) => services.reorder(req, res));
 router.get('/:id', (req, res) => services.getById(req, res));
 router.post('/', upload.single('file'), (req, res) => services.create(req, res));
 router.patch('/:id', upload.single('file'), (req, res) => services.update(req, res));

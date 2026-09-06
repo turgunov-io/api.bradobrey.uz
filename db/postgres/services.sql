@@ -4,6 +4,7 @@ create table if not exists services (
   duration_minutes integer not null,
   base_price decimal(10,2),
   category text,
+  sort_order integer,
   image text,
   branch_id uuid,
   marketplace_barbershop_id uuid,
@@ -14,6 +15,7 @@ create table if not exists services (
 
 alter table if exists services
   add column if not exists category text,
+  add column if not exists sort_order integer,
   add column if not exists image text,
   add column if not exists branch_id uuid,
   add column if not exists marketplace_barbershop_id uuid,

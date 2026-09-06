@@ -1,4 +1,4 @@
-const { db } = require("../config/postgres");
+const { db, pool } = require("../config/postgres");
 const { toAbsolutePublicUrl } = require("../config/uploads");
 const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
 
@@ -78,6 +78,44 @@ const groupServicesByCategory = (services = []) => {
 };
 
 class Services {
+    async reorder(req, res) {
+        const items = req.body?.items;
+        const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!Array.isArray(items) || !items.length || items.some(item =>
+            !item || typeof item.id !== 'string' || !uuid.test(item.id) ||
+            !Number.isInteger(item.sort_order) || item.sort_order < 0 || item.sort_order > 2147483647 ||
+            (item.category !== undefined && item.category !== null && typeof item.category !== 'string')
+        ) || new Set(items.map(item => item.id.toLowerCase())).size !== items.length) {
+            return res.status(400).json({ error: 'items must contain unique service ids, categories and non-negative integer sort_order values' });
+        }
+        const normalizedItems = items.map(item => ({
+            id: item.id,
+            category: normalizeCategory(item.category),
+            sort_order: item.sort_order,
+        }));
+        let client;
+        try {
+            client = await pool.connect();
+            await client.query('BEGIN');
+            const result = await client.query(`
+                UPDATE services AS s SET sort_order = i.sort_order, category = i.category, updated_at = now()
+                FROM jsonb_to_recordset($1::jsonb) AS i(id uuid, category text, sort_order integer)
+                WHERE s.id = i.id RETURNING s.id
+            `, [JSON.stringify(normalizedItems)]);
+            if (result.rowCount !== normalizedItems.length) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ error: 'Service list changed. Refresh and try again.' });
+            }
+            await client.query('COMMIT');
+            return res.json({ updated: result.rowCount });
+        } catch (error) {
+            if (client) await client.query('ROLLBACK');
+            return res.status(500).json({ error: error.message });
+        } finally {
+            client?.release();
+        }
+    }
+
     async list(req, res) {
         const { active, grouped, include_inactive } = req.query || {};
 
@@ -92,6 +130,7 @@ class Services {
 
         const { data, error } = await query
             .order("category", { ascending: true, nullsFirst: false })
+            .order("sort_order", { ascending: true, nullsFirst: false })
             .order("base_price", { ascending: true })
             .order("name", { ascending: true });
 

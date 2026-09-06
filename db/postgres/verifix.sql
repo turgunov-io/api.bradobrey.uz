@@ -167,3 +167,11 @@ create index if not exists idx_barber_activity_events_late
 
 create index if not exists idx_barber_activity_events_type
   on barber_activity_events (event_type, occurred_at desc);
+
+-- Shared fixed lateness rate, in currency units per minute.
+create table if not exists verifix_settings (
+  id integer primary key check (id = 1),
+  penalty_per_minute numeric(12,2) not null default 0 check (penalty_per_minute >= 0),
+  updated_at timestamptz not null default now()
+);
+insert into verifix_settings (id) values (1) on conflict (id) do nothing;
