@@ -12,3 +12,10 @@ create table if not exists user_permissions (
 );
 
 create index if not exists idx_user_permissions_user_id on user_permissions (user_id);
+
+insert into user_permissions (user_id, permission)
+select id, permission
+from users
+cross join (values ('expenses.read'), ('expenses.create')) as defaults(permission)
+where users.role = 'manager'
+on conflict (user_id, permission) do nothing;

@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
 
 const EMPLOYEE_ACCESS_ROLES = new Set([
+  'admin_network',
+  'admin_branch',
   'admin',
   'manager',
   'barber',

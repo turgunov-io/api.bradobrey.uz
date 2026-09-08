@@ -11,7 +11,8 @@ const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
 const callTimers = new Map(); // queueEntryId -> timer
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'merchant']);
-const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber']);
+// Managers use the same queue workspace when they also accept orders.
+const BARBER_WORKSPACE_ROLES = new Set(['barber', 'super-barber', 'manager', 'super-manager']);
 const LEGACY_LOGIN_ROLES = new Set([...ADMIN_ROLES, ...BARBER_WORKSPACE_ROLES]);
 const EMPLOYEE_ROLES = new Set(['admin', 'manager', 'barber', 'super-barber', 'super-manager']);
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];

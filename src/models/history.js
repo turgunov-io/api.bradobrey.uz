@@ -2,7 +2,13 @@ const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 
-const BARBER_HISTORY_ROLES = new Set(['barber', 'super-barber']);
+// Managers can also accept orders, so their barber workspace history is valid.
+const BARBER_HISTORY_ROLES = new Set([
+    'barber',
+    'super-barber',
+    'manager',
+    'super-manager',
+]);
 const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
 const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
 
@@ -172,7 +178,7 @@ const requireBarberHistoryAccess = (req, res) => {
     }
 
     if (!BARBER_HISTORY_ROLES.has(payload?.role)) {
-        res.status(403).json({ error: "Only barbers can view history" });
+        res.status(403).json({ error: "Only barbers and managers can view history" });
         return null;
     }
 
