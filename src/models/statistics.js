@@ -38,7 +38,10 @@ class Statistics {
   async manager(req, res) {
     const access = req.employeeAccess;
     const role = String(access?.payload?.role || access?.user?.role || '').trim().toLowerCase();
-    const branchId = access?.payload?.branch_id || access?.user?.branch_id || null;
+    const branchId = access?.payload?.branchId
+      || access?.payload?.branch_id
+      || access?.user?.branch_id
+      || null;
 
     if (!MANAGER_ROLES.has(role)) {
       return res.status(403).json({ error: 'Only managers can view branch management statistics' });
