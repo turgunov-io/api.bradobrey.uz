@@ -103,13 +103,17 @@ class Statistics {
           )
           : { rows: [] },
         serviceIds.length
-          ? db.query('select id, base_price from services where id = any($1::uuid[])', [serviceIds])
+          ? db.query('select id, base_price, duration_minutes from services where id = any($1::uuid[])', [serviceIds])
           : { rows: [] },
       ]);
 
       const servicePrices = new Map((servicesResult.rows || []).map((service) => [
         String(service.id),
         toAmount(service.base_price),
+      ]));
+      const serviceDurations = new Map((servicesResult.rows || []).map((service) => [
+        String(service.id),
+        Number(service.duration_minutes || service.duration || 0),
       ]));
       const paymentsByOrder = new Map();
 
@@ -184,6 +188,13 @@ class Statistics {
 
         const startedAt = order.started_at ? new Date(order.started_at).getTime() : NaN;
         const finishedAt = order.finished_at ? new Date(order.finished_at).getTime() : NaN;
+        const durationMinutes = Number.isFinite(startedAt) && Number.isFinite(finishedAt)
+          ? Math.max(0, Math.round((finishedAt - startedAt) / 60000))
+          : null;
+        const expectedDurationMinutes = serviceIdsForEntry(order).reduce(
+          (sum, serviceId) => sum + (serviceDurations.get(String(serviceId)) || 0),
+          0
+        );
 
         return {
           id: order.id,
@@ -203,9 +214,12 @@ class Statistics {
           created_at: order.created_at || null,
           started_at: order.started_at || null,
           finished_at: order.finished_at || null,
-          duration_minutes: Number.isFinite(startedAt) && Number.isFinite(finishedAt)
-            ? Math.max(0, Math.round((finishedAt - startedAt) / 60000))
-            : null,
+          duration_minutes: durationMinutes,
+          expected_duration_minutes: expectedDurationMinutes || null,
+          suspicious: isCompleted
+            && expectedDurationMinutes > 0
+            && durationMinutes !== null
+            && durationMinutes < expectedDurationMinutes * 0.5,
         };
       });
 

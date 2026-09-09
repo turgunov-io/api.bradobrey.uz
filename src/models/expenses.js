@@ -9,6 +9,12 @@ const PERMISSIONS = {
   update: 'expenses.update',
   delete: 'expenses.delete',
 };
+const tashkentDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  day: '2-digit',
+  month: '2-digit',
+  timeZone: 'Asia/Tashkent',
+  year: 'numeric',
+});
 
 const text = (value) => {
   if (value === undefined) return undefined;
@@ -32,6 +38,17 @@ const isMissingWarehouseTable = (error) => {
 const sendDbError = (res, error) => isMissingWarehouseTable(error)
   ? res.status(501).json({ error: 'Warehouse tables are missing', hint: 'Apply db/postgres/warehouse.sql on the backend database.' })
   : res.status(500).json({ error: error.message || 'Internal server error' });
+
+const tashkentDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : tashkentDateFormatter.format(date);
+};
+
+const canEditExpense = (row, access) => (
+  PRIVILEGED_ROLES.has(access?.role)
+  || tashkentDate(row?.created_at) === tashkentDate(new Date())
+);
 
 async function auth(req, res) {
   const header = req.headers.authorization || '';
@@ -119,7 +136,7 @@ const selectFields = `
   u.login as creator_login, creator_barber.name as creator_name
 `;
 
-const toItem = (row) => {
+const toItem = (row, access = null) => {
   const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
   return {
     id: row.id,
@@ -139,6 +156,7 @@ const toItem = (row) => {
     } : null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    can_edit: access ? canEditExpense(row, access) : undefined,
   };
 };
 
@@ -176,7 +194,7 @@ module.exports = {
          left join users u on u.id::text = p.metadata->>'created_by'
          left join barbers creator_barber on creator_barber.id::text = p.metadata->>'created_by'
          where ${where.join(' and ')} order by p.purchased_at desc, p.created_at desc`, values);
-      return res.json({ items: (result.rows || []).map(toItem), count: result.rows?.length || 0 });
+      return res.json({ items: (result.rows || []).map((row) => toItem(row, access)), count: result.rows?.length || 0 });
     } catch (error) { return sendDbError(res, error); }
   },
 
@@ -201,7 +219,7 @@ module.exports = {
          values ($1, $2, $3, 'received', $4, $5::jsonb) returning id`,
         [access.branchId, draft.payload.name, draft.payload.spent_at, draft.payload.amount, JSON.stringify(metadata)]);
       const result = await byId(created.rows[0].id);
-      return res.status(201).json({ expense: toItem(result.rows[0]) });
+      return res.status(201).json({ expense: toItem(result.rows[0], access) });
     } catch (error) { return sendDbError(res, error); }
   },
 
@@ -209,6 +227,19 @@ module.exports = {
     let access;
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.update, res)) return;
+    let existing;
+    try {
+      existing = await byId(req.params.id);
+    } catch (error) {
+      return sendDbError(res, error);
+    }
+    if (!existing.rows.length) return res.status(404).json({ error: 'Expense not found' });
+    if (access.role === 'manager' && !canEditExpense(existing.rows[0], access)) {
+      return res.status(403).json({
+        error: 'Expense editing is available only on the day it was created',
+        code: 'EXPENSE_EDIT_WINDOW_CLOSED',
+      });
+    }
     const draft = validate(req.body || {}, true);
     if (draft.error) return res.status(422).json({ error: draft.error });
     const metadata = Object.fromEntries(Object.entries(draft.payload).filter(([key]) => key !== 'amount' && key !== 'spent_at'));
@@ -226,7 +257,7 @@ module.exports = {
          where id = $4 and metadata->>'type' = $5${scope} returning id`, values);
       if (!result.rows.length) return res.status(404).json({ error: 'Expense not found' });
       const updated = await byId(result.rows[0].id);
-      return res.json({ expense: toItem(updated.rows[0]) });
+      return res.json({ expense: toItem(updated.rows[0], access) });
     } catch (error) { return sendDbError(res, error); }
   },
 
