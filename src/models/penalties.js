@@ -93,7 +93,7 @@ const selectFields = `
 const verifixSelectFields = `
   e.id, e.branch_id, e.occurred_at, e.penalty_amount, e.penalty_reason,
   e.late_by_minutes, e.grace_minutes, e.scheduled_start_at, e.is_late,
-  e.created_at, b.name as branch_name,
+  e.created_at, e.metadata, b.name as branch_name,
   barber.id as recipient_id, barber.name as recipient_name
 `;
 
@@ -149,6 +149,14 @@ module.exports = {
       where.push(`p.purchased_at >= ${add(`${req.query.period}-01`)}`);
       where.push(`p.purchased_at < ${add(new Date(Date.UTC(year, month, 1)).toISOString())}`);
     }
+    const source = text(req.query.source);
+    const status = text(req.query.status);
+    const recipientId = text(req.query.recipient_id || req.query.recipientId);
+    if (source === 'late_minutes') where.push('false');
+    if (source === 'manual') { /* manual penalties are already selected by type */ }
+    if (status === 'cancelled') where.push(`p.status = 'cancelled'`);
+    if (status === 'active') where.push(`coalesce(p.status, '') <> 'cancelled'`);
+    if (recipientId) where.push(`p.metadata->>'recipient_id' = ${add(recipientId)}`);
     try {
       const result = await db.query(
         `select ${selectFields}
@@ -163,6 +171,10 @@ module.exports = {
       const lateValues = [];
       const lateWhere = ['(e.is_late = true OR e.penalty_amount > 0)'];
       const lateAdd = (value) => { lateValues.push(value); return `$${lateValues.length}`; };
+      if (source === 'manual') lateWhere.push('false');
+      if (status === 'cancelled') lateWhere.push(`e.metadata->>'canceled' = 'true'`);
+      if (status === 'active') lateWhere.push(`coalesce(e.metadata->>'canceled', 'false') <> 'true'`);
+      if (recipientId) lateWhere.push(`e.barber_id = ${lateAdd(recipientId)}`);
       if (!PRIVILEGED_ROLES.has(access.role)) lateWhere.push(`e.branch_id = ${lateAdd(access.branchId)}`);
       else if (req.query.branch_id) lateWhere.push(`e.branch_id = ${lateAdd(req.query.branch_id)}`);
       if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
@@ -180,7 +192,7 @@ module.exports = {
            order by e.occurred_at desc`, lateValues);
         lateItems = (lateResult.rows || []).map((row) => toItem({
           ...row,
-          metadata: {},
+          metadata: row.metadata || {},
           penalty_source: 'late_minutes',
           purchased_at: row.occurred_at,
           total_amount: row.penalty_amount,
@@ -257,7 +269,37 @@ module.exports = {
          from warehouse_purchases
          where id = $1 and metadata->>'type' = $2`, [req.params.id, PENALTY_TYPE]
       );
-      if (!existing.rows.length) return res.status(404).json({ error: 'Penalty not found' });
+      if (!existing.rows.length) {
+        let lateResult;
+        try {
+          lateResult = await db.query(
+            `select ${verifixSelectFields}
+             from barber_activity_events e
+             left join branches b on b.id = e.branch_id
+             left join barbers barber on barber.id = e.barber_id
+             where e.id = $1 and (e.is_late = true or e.penalty_amount > 0)`, [req.params.id]
+          );
+        } catch (error) {
+          if (isMissingVerifixTable(error)) return res.status(404).json({ error: 'Penalty not found' });
+          throw error;
+        }
+        if (!lateResult.rows.length) return res.status(404).json({ error: 'Penalty not found' });
+        const lateRow = lateResult.rows[0];
+        if (!PRIVILEGED_ROLES.has(access.role) && lateRow.branch_id !== access.branchId) {
+          return res.status(404).json({ error: 'Penalty not found' });
+        }
+        if (lateRow.metadata?.canceled === true) {
+          return res.status(409).json({ error: 'Penalty is already cancelled' });
+        }
+        await db.query(
+          `update barber_activity_events
+           set metadata = coalesce(metadata, '{}'::jsonb) || $1::jsonb
+           where id = $2`,
+          [JSON.stringify({ canceled: true, canceled_at: new Date().toISOString(), canceled_by: access.userId }), req.params.id]
+        );
+        const canceled = { ...lateRow, metadata: { ...(lateRow.metadata || {}), canceled: true }, penalty_source: 'late_minutes', total_amount: lateRow.penalty_amount, purchased_at: lateRow.occurred_at, status: 'cancelled' };
+        return res.json({ penalty: toItem(canceled) });
+      }
       const row = existing.rows[0];
       if (!PRIVILEGED_ROLES.has(access.role) && row.branch_id !== access.branchId) {
         return res.status(404).json({ error: 'Penalty not found' });
