@@ -1421,7 +1421,9 @@ class Barbers {
             return res.status(403).json({ error: 'Employee access has been revoked' });
         }
 
-        if (ADMIN_ROLES.has(userData.role)) {
+        // Managers work in the selected branch and must receive that branch
+        // in the token, just like the barber workspace roles.
+        if (ADMIN_ROLES.has(userData.role) && !BARBER_WORKSPACE_ROLES.has(userData.role)) {
             const effectiveBranchId = userData.branch_id || null;
             const token = signUserToken({
                 branch_id: effectiveBranchId,
