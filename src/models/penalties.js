@@ -168,6 +168,13 @@ module.exports = {
          where ${where.join(' and ')} order by p.purchased_at desc, p.created_at desc`, values);
       const manualItems = (result.rows || []).map(toItem);
       let lateItems = [];
+      let penaltyPerMinute = 0;
+      try {
+        const settings = await db.query('select penalty_per_minute from verifix_settings where id = 1');
+        penaltyPerMinute = Number(settings.rows[0]?.penalty_per_minute || 0);
+      } catch (error) {
+        if (!String(error?.code || '').includes('42P01')) throw error;
+      }
       const lateValues = [];
       const lateWhere = ['(e.is_late = true OR e.penalty_amount > 0)'];
       const lateAdd = (value) => { lateValues.push(value); return `$${lateValues.length}`; };
@@ -195,7 +202,9 @@ module.exports = {
           metadata: row.metadata || {},
           penalty_source: 'late_minutes',
           purchased_at: row.occurred_at,
-          total_amount: row.penalty_amount,
+          total_amount: Number(row.penalty_amount || 0) > 0
+            ? row.penalty_amount
+            : Math.round(Number(row.late_by_minutes || 0) * Math.max(0, penaltyPerMinute) * 100) / 100,
           recipient_id: row.recipient_id,
           recipient_name: row.recipient_name,
           late_by_minutes: row.late_by_minutes,
