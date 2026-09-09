@@ -22,6 +22,10 @@ const isMissingWarehouseTable = (error) => (
   String(error?.code || '') === '42P01'
   && String(error?.message || '').toLowerCase().includes('warehouse_purchases')
 );
+const isMissingVerifixTable = (error) => (
+  String(error?.code || '') === '42P01'
+  && String(error?.message || '').toLowerCase().includes('barber_activity_events')
+);
 
 const sendDbError = (res, error) => isMissingWarehouseTable(error)
   ? res.status(501).json({ error: 'Warehouse tables are missing', hint: 'The penalties use the existing warehouse_purchases table.' })
@@ -86,6 +90,12 @@ const selectFields = `
   u.login as creator_login, creator_barber.name as creator_name
 `;
 
+const verifixSelectFields = `
+  e.id, e.branch_id, e.occurred_at, e.penalty_amount, e.penalty_reason,
+  e.late_by_minutes, e.created_at, b.name as branch_name,
+  barber.id as recipient_id, barber.name as recipient_name
+`;
+
 const toItem = (row) => {
   const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
   return {
@@ -96,12 +106,16 @@ const toItem = (row) => {
     amount: Number(row.total_amount || 0),
     penalty_at: row.purchased_at,
     date: row.purchased_at,
-    comment: metadata.comment || null,
+    comment: metadata.comment || row.penalty_reason || (row.penalty_source === 'late_minutes' && row.late_by_minutes
+      ? `Опоздание на ${row.late_by_minutes} мин.`
+      : null),
     creator: metadata.created_by ? { id: metadata.created_by, name: row.creator_name || null, login: row.creator_login || null } : null,
     created_at: row.created_at,
     canceled: row.status === 'cancelled' || metadata.canceled === true,
     canceled_at: metadata.canceled_at || null,
     canceled_by: metadata.canceled_by || null,
+    source: row.penalty_source || 'manual',
+    late_minutes: row.late_by_minutes ? Number(row.late_by_minutes) : null,
   };
 };
 
@@ -140,7 +154,43 @@ module.exports = {
          left join users u on u.id::text = p.metadata->>'created_by'
          left join barbers creator_barber on creator_barber.id::text = p.metadata->>'created_by'
          where ${where.join(' and ')} order by p.purchased_at desc, p.created_at desc`, values);
-      return res.json({ items: (result.rows || []).map(toItem), count: result.rows?.length || 0 });
+      const manualItems = (result.rows || []).map(toItem);
+      let lateItems = [];
+      const lateValues = [];
+      const lateWhere = ['e.penalty_amount > 0'];
+      const lateAdd = (value) => { lateValues.push(value); return `$${lateValues.length}`; };
+      if (!PRIVILEGED_ROLES.has(access.role)) lateWhere.push(`e.branch_id = ${lateAdd(access.branchId)}`);
+      else if (req.query.branch_id) lateWhere.push(`e.branch_id = ${lateAdd(req.query.branch_id)}`);
+      if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
+        const [year, month] = req.query.period.split('-').map(Number);
+        lateWhere.push(`e.occurred_at >= ${lateAdd(`${req.query.period}-01T00:00:00.000Z`)}`);
+        lateWhere.push(`e.occurred_at < ${lateAdd(new Date(Date.UTC(year, month, 1)).toISOString() )}`);
+      }
+      try {
+        const lateResult = await db.query(
+          `select ${verifixSelectFields}
+           from barber_activity_events e
+           left join branches b on b.id = e.branch_id
+           left join barbers barber on barber.id = e.barber_id
+           where ${lateWhere.join(' and ')}
+           order by e.occurred_at desc`, lateValues);
+        lateItems = (lateResult.rows || []).map((row) => toItem({
+          ...row,
+          metadata: {},
+          penalty_source: 'late_minutes',
+          purchased_at: row.occurred_at,
+          total_amount: row.penalty_amount,
+          recipient_id: row.recipient_id,
+          recipient_name: row.recipient_name,
+          status: 'received',
+        }));
+      } catch (error) {
+        if (!isMissingVerifixTable(error)) throw error;
+      }
+      const items = [...manualItems, ...lateItems].sort((left, right) => (
+        new Date(right.date || 0).getTime() - new Date(left.date || 0).getTime()
+      ));
+      return res.json({ items, count: items.length });
     } catch (error) { return sendDbError(res, error); }
   },
 
