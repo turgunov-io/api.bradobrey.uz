@@ -116,7 +116,7 @@ const validate = (body, partial = false) => {
 const selectFields = `
   p.id, p.branch_id, p.supplier_name, p.purchased_at, p.total_amount,
   p.metadata, p.created_at, p.updated_at, b.name as branch_name,
-  u.login as creator_login
+  u.login as creator_login, creator_barber.name as creator_name
 `;
 
 const toItem = (row) => {
@@ -132,7 +132,11 @@ const toItem = (row) => {
     date: row.purchased_at,
     comment: metadata.comment || null,
     created_by: metadata.created_by || null,
-    creator: metadata.created_by ? { id: metadata.created_by, login: row.creator_login || null } : null,
+    creator: metadata.created_by ? {
+      id: metadata.created_by,
+      name: row.creator_name || null,
+      login: row.creator_login || null,
+    } : null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -143,6 +147,7 @@ const byId = (id) => db.query(
    from warehouse_purchases p
    left join branches b on b.id = p.branch_id
    left join users u on u.id::text = p.metadata->>'created_by'
+   left join barbers creator_barber on creator_barber.id::text = p.metadata->>'created_by'
    where p.id = $1 and p.metadata->>'type' = $2`, [id, EXPENSE_TYPE]
 );
 
@@ -169,6 +174,7 @@ module.exports = {
          from warehouse_purchases p
          left join branches b on b.id = p.branch_id
          left join users u on u.id::text = p.metadata->>'created_by'
+         left join barbers creator_barber on creator_barber.id::text = p.metadata->>'created_by'
          where ${where.join(' and ')} order by p.purchased_at desc, p.created_at desc`, values);
       return res.json({ items: (result.rows || []).map(toItem), count: result.rows?.length || 0 });
     } catch (error) { return sendDbError(res, error); }
