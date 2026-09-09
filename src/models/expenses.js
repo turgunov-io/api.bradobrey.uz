@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
+const EXPENSE_TYPE = 'expense';
 const PERMISSIONS = {
   read: 'expenses.read',
   create: 'expenses.create',
@@ -23,34 +24,41 @@ const parseDate = (value) => {
   return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== valueText ? null : valueText;
 };
 
-const isMissingTable = (error) => String(error?.code || '') === '42P01';
-const sendDbError = (res, error) => isMissingTable(error)
-  ? res.status(501).json({ error: 'Expenses table is missing', hint: 'Apply db/postgres/expenses.sql on the backend database.' })
+const isMissingWarehouseTable = (error) => {
+  const message = [error?.message, error?.details, error?.hint].filter(Boolean).join(' ').toLowerCase();
+  return String(error?.code || '') === '42P01' && message.includes('warehouse_purchases');
+};
+
+const sendDbError = (res, error) => isMissingWarehouseTable(error)
+  ? res.status(501).json({ error: 'Warehouse tables are missing', hint: 'Apply db/postgres/warehouse.sql on the backend database.' })
   : res.status(500).json({ error: error.message || 'Internal server error' });
 
 async function auth(req, res) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Authorization token is required' });
+  if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
 
   let payload;
   try { payload = jwt.verify(token, process.env.JWT_SECRET); } catch (_error) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return null;
   }
 
   const userId = payload?.sub || payload?.id;
-  if (!userId) return res.status(401).json({ error: 'Invalid token payload' });
+  if (!userId) { res.status(401).json({ error: 'Invalid token payload' }); return null; }
+
   let user = req.employeeAccess?.user;
   if (!user) {
     const result = await db.from('users').select('id, role, branch_id').eq('id', userId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     user = result.data;
   }
-  if (!user) return res.status(401).json({ error: 'Session is no longer valid' });
+  if (!user) { res.status(401).json({ error: 'Session is no longer valid' }); return null; }
 
   const role = String(payload.role || user.role || '').trim().toLowerCase();
   if (!PRIVILEGED_ROLES.has(role) && role !== 'manager') {
-    return res.status(403).json({ error: 'Expenses are not available for this role' });
+    res.status(403).json({ error: 'Expenses are not available for this role' });
+    return null;
   }
 
   let permissions = [];
@@ -105,26 +113,37 @@ const validate = (body, partial = false) => {
   return { payload };
 };
 
-const toItem = (row) => ({
-  id: row.id,
-  branch_id: row.branch_id,
-  branch: row.branch_id ? { id: row.branch_id, name: row.branch_name || null } : null,
-  category: row.category,
-  name: row.name,
-  amount: Number(row.amount),
-  spent_at: row.spent_at,
-  date: row.spent_at,
-  comment: row.comment || null,
-  created_by: row.created_by,
-  creator: row.creator_login ? { id: row.created_by, login: row.creator_login } : null,
-  created_at: row.created_at,
-  updated_at: row.updated_at,
-});
+const selectFields = `
+  p.id, p.branch_id, p.supplier_name, p.purchased_at, p.total_amount,
+  p.metadata, p.created_at, p.updated_at, b.name as branch_name,
+  u.login as creator_login
+`;
+
+const toItem = (row) => {
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  return {
+    id: row.id,
+    branch_id: row.branch_id,
+    branch: row.branch_id ? { id: row.branch_id, name: row.branch_name || null } : null,
+    category: metadata.category || null,
+    name: metadata.name || row.supplier_name || null,
+    amount: Number(row.total_amount || 0),
+    spent_at: row.purchased_at,
+    date: row.purchased_at,
+    comment: metadata.comment || null,
+    created_by: metadata.created_by || null,
+    creator: metadata.created_by ? { id: metadata.created_by, login: row.creator_login || null } : null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+};
 
 const byId = (id) => db.query(
-  `select e.*, b.name as branch_name, u.login as creator_login
-   from expenses e left join branches b on b.id = e.branch_id left join users u on u.id = e.created_by
-   where e.id = $1`, [id]
+  `select ${selectFields}
+   from warehouse_purchases p
+   left join branches b on b.id = p.branch_id
+   left join users u on u.id::text = p.metadata->>'created_by'
+   where p.id = $1 and p.metadata->>'type' = $2`, [id, EXPENSE_TYPE]
 );
 
 module.exports = {
@@ -133,24 +152,24 @@ module.exports = {
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.read, res)) return;
 
-    const values = [];
-    const where = [];
+    const values = [EXPENSE_TYPE];
+    const where = ["p.metadata->>'type' = $1"];
     const add = (value) => { values.push(value); return `$${values.length}`; };
-    if (!PRIVILEGED_ROLES.has(access.role)) where.push(`e.branch_id = ${add(access.branchId)}`);
-    else if (req.query.branch_id) where.push(`e.branch_id = ${add(req.query.branch_id)}`);
-    if (req.query.category) where.push(`e.category = ${add(String(req.query.category).trim())}`);
+    if (!PRIVILEGED_ROLES.has(access.role)) where.push(`p.branch_id = ${add(access.branchId)}`);
+    else if (req.query.branch_id) where.push(`p.branch_id = ${add(req.query.branch_id)}`);
+    if (req.query.category) where.push(`p.metadata->>'category' = ${add(String(req.query.category).trim())}`);
     if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
-      where.push(`e.spent_at >= ${add(`${req.query.period}-01`)}`);
       const [year, month] = req.query.period.split('-').map(Number);
-      where.push(`e.spent_at < ${add(new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10))}`);
+      where.push(`p.purchased_at >= ${add(`${req.query.period}-01`)}`);
+      where.push(`p.purchased_at < ${add(new Date(Date.UTC(year, month, 1)).toISOString())}`);
     }
-    if (req.query.from) { const date = parseDate(req.query.from); if (!date) return res.status(422).json({ error: 'from must be a valid date' }); where.push(`e.spent_at >= ${add(date)}`); }
-    if (req.query.to) { const date = parseDate(req.query.to); if (!date) return res.status(422).json({ error: 'to must be a valid date' }); where.push(`e.spent_at <= ${add(date)}`); }
     try {
       const result = await db.query(
-        `select e.*, b.name as branch_name, u.login as creator_login
-         from expenses e left join branches b on b.id = e.branch_id left join users u on u.id = e.created_by
-         ${where.length ? `where ${where.join(' and ')}` : ''} order by e.spent_at desc, e.created_at desc`, values);
+        `select ${selectFields}
+         from warehouse_purchases p
+         left join branches b on b.id = p.branch_id
+         left join users u on u.id::text = p.metadata->>'created_by'
+         where ${where.join(' and ')} order by p.purchased_at desc, p.created_at desc`, values);
       return res.json({ items: (result.rows || []).map(toItem), count: result.rows?.length || 0 });
     } catch (error) { return sendDbError(res, error); }
   },
@@ -162,11 +181,19 @@ module.exports = {
     if (!access.branchId) return res.status(422).json({ error: 'User branch is not assigned' });
     const draft = validate(req.body || {});
     if (draft.error) return res.status(422).json({ error: draft.error });
+    const metadata = {
+      type: EXPENSE_TYPE,
+      category: draft.payload.category,
+      name: draft.payload.name,
+      comment: draft.payload.comment ?? null,
+      created_by: access.userId,
+    };
     try {
       const created = await db.query(
-        `insert into expenses (branch_id, category, name, amount, spent_at, comment, created_by)
-         values ($1, $2, $3, $4, $5, $6, $7) returning id`,
-        [access.branchId, draft.payload.category, draft.payload.name, draft.payload.amount, draft.payload.spent_at, draft.payload.comment ?? null, access.userId]);
+        `insert into warehouse_purchases
+         (branch_id, supplier_name, purchased_at, status, total_amount, metadata)
+         values ($1, $2, $3, 'received', $4, $5::jsonb) returning id`,
+        [access.branchId, draft.payload.name, draft.payload.spent_at, draft.payload.amount, JSON.stringify(metadata)]);
       const result = await byId(created.rows[0].id);
       return res.status(201).json({ expense: toItem(result.rows[0]) });
     } catch (error) { return sendDbError(res, error); }
@@ -178,16 +205,19 @@ module.exports = {
     if (!access || !requirePermission(access, PERMISSIONS.update, res)) return;
     const draft = validate(req.body || {}, true);
     if (draft.error) return res.status(422).json({ error: draft.error });
-    const keys = Object.keys(draft.payload);
-    if (!keys.length) return res.status(422).json({ error: 'No fields to update' });
-    const values = [];
-    const add = (value) => { values.push(value); return `$${values.length}`; };
-    const assignments = keys.map((key) => `${key} = ${add(draft.payload[key])}`);
-    const idPlaceholder = add(req.params.id);
-    let scope = '';
-    if (!PRIVILEGED_ROLES.has(access.role)) scope = ` and branch_id = ${add(access.branchId)}`;
+    const metadata = Object.fromEntries(Object.entries(draft.payload).filter(([key]) => key !== 'amount' && key !== 'spent_at'));
+    const values = [JSON.stringify(metadata), draft.payload.amount ?? null, draft.payload.spent_at ?? null, req.params.id, EXPENSE_TYPE];
+    const scope = PRIVILEGED_ROLES.has(access.role) ? '' : ' and branch_id = $6';
+    if (scope) values.push(access.branchId);
     try {
-      const result = await db.query(`update expenses set ${assignments.join(', ')}, updated_at = now() where id = ${idPlaceholder}${scope} returning id`, values);
+      const result = await db.query(
+        `update warehouse_purchases
+         set metadata = metadata || $1::jsonb,
+             total_amount = coalesce($2, total_amount),
+             purchased_at = coalesce($3::timestamptz, purchased_at),
+             supplier_name = coalesce(($1::jsonb)->>'name', supplier_name),
+             updated_at = now()
+         where id = $4 and metadata->>'type' = $5${scope} returning id`, values);
       if (!result.rows.length) return res.status(404).json({ error: 'Expense not found' });
       const updated = await byId(result.rows[0].id);
       return res.json({ expense: toItem(updated.rows[0]) });
@@ -198,11 +228,12 @@ module.exports = {
     let access;
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.delete, res)) return;
-    const values = [req.params.id];
-    const scope = PRIVILEGED_ROLES.has(access.role) ? '' : ' and branch_id = $2';
+    const values = [req.params.id, EXPENSE_TYPE];
+    const scope = PRIVILEGED_ROLES.has(access.role) ? '' : ' and branch_id = $3';
     if (scope) values.push(access.branchId);
     try {
-      const result = await db.query(`delete from expenses where id = $1${scope} returning id`, values);
+      const result = await db.query(
+        `delete from warehouse_purchases where id = $1 and metadata->>'type' = $2${scope} returning id`, values);
       if (!result.rows.length) return res.status(404).json({ error: 'Expense not found' });
       return res.status(204).send();
     } catch (error) { return sendDbError(res, error); }
