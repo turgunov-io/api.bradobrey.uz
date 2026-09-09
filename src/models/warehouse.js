@@ -84,6 +84,7 @@ const sendError = (res, error) => {
 };
 
 const pagination = (query = {}) => ({
+  all: parseBoolean(query.all, false) === true,
   limit: Math.min(Math.max(parseInt(query.limit, 10) || 100, 1), 500),
   offset: Math.max(parseInt(query.offset, 10) || 0, 0),
 });
@@ -559,7 +560,7 @@ class Warehouse {
 
   async listPositions(req, res) {
     try {
-      const { limit, offset } = pagination(req.query);
+      const { all, limit, offset } = pagination(req.query);
       const includeInactive = parseBoolean(req.query?.include_inactive, false);
       const search = normalizeText(req.query?.search);
       const category = normalizeText(req.query?.category);
@@ -578,13 +579,14 @@ class Warehouse {
 
       const whereSql = where.length ? `where ${where.join(' and ')}` : '';
       const count = await db.query(`select count(*)::int as count from warehouse_positions ${whereSql}`, params);
-      params.push(limit, offset);
+      const paginationSql = all ? '' : `limit $${params.length + 1} offset $${params.length + 2}`;
+      if (!all) params.push(limit, offset);
       const result = await db.query(
         `select *
          from warehouse_positions
          ${whereSql}
          order by name asc
-         limit $${params.length - 1} offset $${params.length}`,
+         ${paginationSql}`,
         params
       );
 
@@ -675,7 +677,7 @@ class Warehouse {
   async listCategories(req, res) {
     try {
       await ensureCategoriesTable();
-      const { limit, offset } = pagination(req.query);
+      const { all, limit, offset } = pagination(req.query);
       const includeInactive = parseBoolean(req.query?.include_inactive, true);
       const search = normalizeText(req.query?.search);
       const where = [];
@@ -689,13 +691,14 @@ class Warehouse {
 
       const whereSql = where.length ? `where ${where.join(' and ')}` : '';
       const count = await db.query(`select count(*)::int as count from warehouse_categories ${whereSql}`, params);
-      params.push(limit, offset);
+      const paginationSql = all ? '' : `limit $${params.length + 1} offset $${params.length + 2}`;
+      if (!all) params.push(limit, offset);
       const result = await db.query(
         `select *
          from warehouse_categories
          ${whereSql}
          order by sort_order asc, name asc
-         limit $${params.length - 1} offset $${params.length}`,
+         ${paginationSql}`,
         params
       );
 
@@ -782,11 +785,12 @@ class Warehouse {
 
   async listTemplates(req, res) {
     try {
-      const { limit, offset } = pagination(req.query);
+      const { all, limit, offset } = pagination(req.query);
       const includeInactive = parseBoolean(req.query?.include_inactive, false);
       const whereSql = includeInactive ? '' : 'where t.is_active = true';
 
       const count = await db.query(`select count(*)::int as count from warehouse_templates t ${whereSql}`);
+      const paginationSql = all ? '' : 'limit $1 offset $2';
       const result = await db.query(
         `select t.*, count(ti.id)::int as items_count
          from warehouse_templates t
@@ -794,8 +798,8 @@ class Warehouse {
          ${whereSql}
          group by t.id
          order by t.name asc
-         limit $1 offset $2`,
-        [limit, offset]
+         ${paginationSql}`,
+        all ? [] : [limit, offset]
       );
 
       return res.json({ items: result.rows.map(templateItem), total: rowCount(count) });
@@ -912,7 +916,7 @@ class Warehouse {
 
   async listStocks(req, res) {
     try {
-      const { limit, offset } = pagination(req.query);
+      const { all, limit, offset } = pagination(req.query);
       const branchId = normalizeId(req.query?.branch_id);
       const lowOnly = parseBoolean(req.query?.low_only, false);
       const params = [];
@@ -932,7 +936,8 @@ class Warehouse {
          ${whereSql}`,
         params
       );
-      params.push(limit, offset);
+      const paginationSql = all ? '' : `limit $${params.length + 1} offset $${params.length + 2}`;
+      if (!all) params.push(limit, offset);
       const result = await db.query(
         `select s.id, s.branch_id, s.position_id, s.quantity, s.reserved_quantity,
                 greatest(0, s.quantity - s.reserved_quantity) as available_quantity,
@@ -943,7 +948,7 @@ class Warehouse {
          left join branches b on b.id = s.branch_id
          ${whereSql}
          order by b.name asc nulls first, p.name asc
-         limit $${params.length - 1} offset $${params.length}`,
+         ${paginationSql}`,
         params
       );
 
@@ -996,7 +1001,7 @@ class Warehouse {
 
   async listPurchases(req, res) {
     try {
-      const { limit, offset } = pagination(req.query);
+      const { all, limit, offset } = pagination(req.query);
       const branchId = normalizeId(req.query?.branch_id);
       const status = normalizeText(req.query?.status);
       const period = parsePeriod(req.query?.period);
@@ -1024,7 +1029,8 @@ class Warehouse {
 
       const whereSql = where.length ? `where ${where.join(' and ')}` : '';
       const count = await db.query(`select count(*)::int as count from warehouse_purchases p ${whereSql}`, params);
-      params.push(limit, offset);
+      const paginationSql = all ? '' : `limit $${params.length + 1} offset $${params.length + 2}`;
+      if (!all) params.push(limit, offset);
       const result = await db.query(
         `select p.*, b.name as branch_name, count(pi.id)::int as items_count,
                 (array_agg(pi.position_id order by pi.created_at) filter (where pi.id is not null))[1] as position_id,
@@ -1039,7 +1045,7 @@ class Warehouse {
          ${whereSql}
          group by p.id, b.name
          order by p.purchased_at desc
-         limit $${params.length - 1} offset $${params.length}`,
+         ${paginationSql}`,
         params
       );
 

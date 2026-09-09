@@ -398,14 +398,16 @@ class Verifix {
       } = req.query || {};
       const limit = Math.min(Math.max(parseInt(limitParam, 10) || 100, 1), 500);
       const offset = Math.max(parseInt(offsetParam, 10) || 0, 0);
+      const fetchAll = ['1', 'true', 'yes'].includes(String(req.query?.all || '').toLowerCase());
       const requestedEventType = normalizeText(event_type);
       const lateOnly = parseBoolean(late_only, false);
 
       let query = db
         .from('barber_activity_events')
         .select('id, branch_id, barber_id, actor_id, actor_role, event_type, source, occurred_at, schedule_id, scheduled_start_at, grace_minutes, is_late, late_by_minutes, penalty_amount, penalty_reason, metadata, created_at, barber:barbers ( id, name ), branch:branches ( id, name )', { count: 'exact' })
-        .order('occurred_at', { ascending: false })
-        .range(offset, offset + limit - 1);
+        .order('occurred_at', { ascending: false });
+
+      if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
       if (start_date) {
         const start = /^\d{4}-\d{2}-\d{2}$/.test(String(start_date))

@@ -205,11 +205,13 @@ class History {
 
         const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
         const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
+        const fetchAll = ['1', 'true', 'yes'].includes(String(req.query?.all || '').toLowerCase());
 
         const selectWithCertificate = `
                 id,
                 status,
                 created_at,
+                started_at,
                 finished_at,
                 service_id,
                 service_ids,
@@ -226,6 +228,7 @@ class History {
                 id,
                 status,
                 created_at,
+                started_at,
                 finished_at,
                 service_id,
                 service_ids,
@@ -242,8 +245,9 @@ class History {
             .select(selectWithCertificate, { count: 'exact' })
             .eq('barber_id', barberId)
             .in('status', finalStatuses)
-            .order('finished_at', { ascending: false })
-            .range(offset, offset + limit - 1);
+            .order('finished_at', { ascending: false });
+
+        if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
         let { data, error, count } = await query;
 
@@ -253,8 +257,9 @@ class History {
                 .select(selectWithoutCertificate, { count: 'exact' })
                 .eq('barber_id', barberId)
                 .in('status', finalStatuses)
-                .order('finished_at', { ascending: false })
-                .range(offset, offset + limit - 1);
+                .order('finished_at', { ascending: false });
+
+            if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
             ({ data, error, count } = await query);
         }
@@ -286,6 +291,7 @@ class History {
         const branchId = req.query.branch_id || req.query.branchId || req.query.id;
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
         const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+        const fetchAll = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
         const statusesParam = req.query.status;
         const requestedStatuses = Array.isArray(statusesParam)
             ? statusesParam
@@ -304,6 +310,7 @@ class History {
             id,
             status,
             created_at,
+            started_at,
             finished_at,
             service_id,
             service_ids,
@@ -316,8 +323,9 @@ class History {
             barber:barbers ( id, name )
         `, { count: 'exact' })
             .in('status', statuses.length ? statuses : HISTORY_STATUSES)
-            .order('finished_at', { ascending: false })
-            .range(offset, offset + limit - 1);
+            .order('finished_at', { ascending: false });
+
+        if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
         if (branchId) {
             query = query.eq('branch_id', branchId);
@@ -377,6 +385,7 @@ class History {
                 id,
                 status,
                 created_at,
+                started_at,
                 finished_at,
                 service_id,
                 service_ids,
