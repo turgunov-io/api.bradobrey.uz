@@ -5,5 +5,6 @@ const router = express.Router();
 
 router.get('/', (req, res) => penalties.list(req, res));
 router.post('/', (req, res) => penalties.create(req, res));
+router.post('/:id/cancel', (req, res) => penalties.cancel(req, res));
 
 module.exports = router;

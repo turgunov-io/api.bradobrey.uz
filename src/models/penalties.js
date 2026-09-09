@@ -3,7 +3,7 @@ const { db } = require('../config/postgres');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
 const PENALTY_TYPE = 'penalty';
-const PERMISSIONS = { read: 'penalties.read', create: 'penalties.create' };
+const PERMISSIONS = { read: 'penalties.read', create: 'penalties.create', cancel: 'penalties.cancel' };
 
 const text = (value) => {
   if (value === undefined || value === null) return null;
@@ -73,7 +73,7 @@ async function auth(req, res) {
 
 const can = (access, permission) => PRIVILEGED_ROLES.has(access.role)
   || access.permissions.includes(permission)
-  || (access.role === 'manager' && ['penalties.read', 'penalties.create'].includes(permission));
+  || (access.role === 'manager' && ['penalties.read', 'penalties.create', 'penalties.cancel'].includes(permission));
 const requirePermission = (access, permission, res) => {
   if (can(access, permission)) return true;
   res.status(403).json({ error: `Missing permission: ${permission}` });
@@ -81,7 +81,7 @@ const requirePermission = (access, permission, res) => {
 };
 
 const selectFields = `
-  p.id, p.branch_id, p.purchased_at, p.total_amount, p.metadata, p.created_at,
+  p.id, p.branch_id, p.purchased_at, p.total_amount, p.status, p.metadata, p.created_at,
   b.name as branch_name, recipient.id as recipient_id, recipient.name as recipient_name,
   u.login as creator_login, creator_barber.name as creator_name
 `;
@@ -99,6 +99,9 @@ const toItem = (row) => {
     comment: metadata.comment || null,
     creator: metadata.created_by ? { id: metadata.created_by, name: row.creator_name || null, login: row.creator_login || null } : null,
     created_at: row.created_at,
+    canceled: row.status === 'cancelled' || metadata.canceled === true,
+    canceled_at: metadata.canceled_at || null,
+    canceled_by: metadata.canceled_by || null,
   };
 };
 
@@ -182,6 +185,35 @@ module.exports = {
       );
       const result = await queryById(created.rows[0].id);
       return res.status(201).json({ penalty: toItem(result.rows[0]) });
+    } catch (error) { return sendDbError(res, error); }
+  },
+
+  async cancel(req, res) {
+    let access;
+    try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
+    if (!access || !requirePermission(access, PERMISSIONS.cancel, res)) return;
+    try {
+      const existing = await db.query(
+        `select id, branch_id, status, metadata
+         from warehouse_purchases
+         where id = $1 and metadata->>'type' = $2`, [req.params.id, PENALTY_TYPE]
+      );
+      if (!existing.rows.length) return res.status(404).json({ error: 'Penalty not found' });
+      const row = existing.rows[0];
+      if (!PRIVILEGED_ROLES.has(access.role) && row.branch_id !== access.branchId) {
+        return res.status(404).json({ error: 'Penalty not found' });
+      }
+      if (row.status === 'cancelled' || row.metadata?.canceled === true) {
+        return res.status(409).json({ error: 'Penalty is already cancelled' });
+      }
+      await db.query(
+        `update warehouse_purchases
+         set status = 'cancelled', metadata = metadata || $1::jsonb, updated_at = now()
+         where id = $2 and metadata->>'type' = $3`,
+        [JSON.stringify({ canceled: true, canceled_at: new Date().toISOString(), canceled_by: access.userId }), req.params.id, PENALTY_TYPE]
+      );
+      const result = await queryById(req.params.id);
+      return res.json({ penalty: toItem(result.rows[0]) });
     } catch (error) { return sendDbError(res, error); }
   },
 };
