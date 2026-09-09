@@ -22,6 +22,7 @@ const kioskAds = require('./routers/kioskAds');
 const verifix = require('./routers/verifix');
 const warehouse = require('./routers/warehouse');
 const expenses = require('./routers/expenses');
+const penalties = require('./routers/penalties');
 const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
 
 const app = express();
@@ -74,6 +75,7 @@ app.use('/api/kiosk-ads', kioskAds);
 app.use('/api/verifix', verifix);
 app.use('/api/warehouse', warehouse);
 app.use('/api/expenses', expenses);
+app.use('/api/penalties', penalties);
 app.use('/api/merchant', merchant);
 
 app.get('/today/date/', (req, res) => {
