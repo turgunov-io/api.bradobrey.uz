@@ -92,7 +92,8 @@ const selectFields = `
 
 const verifixSelectFields = `
   e.id, e.branch_id, e.occurred_at, e.penalty_amount, e.penalty_reason,
-  e.late_by_minutes, e.created_at, b.name as branch_name,
+  e.late_by_minutes, e.grace_minutes, e.scheduled_start_at, e.is_late,
+  e.created_at, b.name as branch_name,
   barber.id as recipient_id, barber.name as recipient_name
 `;
 
@@ -116,6 +117,9 @@ const toItem = (row) => {
     canceled_by: metadata.canceled_by || null,
     source: row.penalty_source || 'manual',
     late_minutes: row.late_by_minutes ? Number(row.late_by_minutes) : null,
+    scheduled_start_at: row.scheduled_start_at || null,
+    occurred_at: row.occurred_at || null,
+    grace_minutes: row.grace_minutes == null ? null : Number(row.grace_minutes),
   };
 };
 
@@ -157,7 +161,7 @@ module.exports = {
       const manualItems = (result.rows || []).map(toItem);
       let lateItems = [];
       const lateValues = [];
-      const lateWhere = ['e.penalty_amount > 0'];
+      const lateWhere = ['(e.is_late = true OR e.penalty_amount > 0)'];
       const lateAdd = (value) => { lateValues.push(value); return `$${lateValues.length}`; };
       if (!PRIVILEGED_ROLES.has(access.role)) lateWhere.push(`e.branch_id = ${lateAdd(access.branchId)}`);
       else if (req.query.branch_id) lateWhere.push(`e.branch_id = ${lateAdd(req.query.branch_id)}`);
@@ -182,6 +186,11 @@ module.exports = {
           total_amount: row.penalty_amount,
           recipient_id: row.recipient_id,
           recipient_name: row.recipient_name,
+          late_by_minutes: row.late_by_minutes,
+          grace_minutes: row.grace_minutes,
+          scheduled_start_at: row.scheduled_start_at,
+          occurred_at: row.occurred_at,
+          penalty_reason: row.penalty_reason,
           status: 'received',
         }));
       } catch (error) {
