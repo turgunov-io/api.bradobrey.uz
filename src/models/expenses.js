@@ -92,7 +92,9 @@ const validate = (body, partial = false) => {
   }
   if (body.amount !== undefined || !partial) {
     const amount = Number(body.amount);
-    if (!Number.isFinite(amount) || amount <= 0) return { error: 'amount must be greater than 0' };
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99) {
+      return { error: 'amount must be greater than 0 and no more than 999999999999.99' };
+    }
     payload.amount = Math.round(amount * 100) / 100;
   }
   if (body.spent_at !== undefined || body.date !== undefined || !partial) {

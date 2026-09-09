@@ -3,7 +3,7 @@ create table if not exists expenses (
   branch_id uuid not null references branches(id) on delete restrict,
   category text not null,
   name text not null,
-  amount numeric(12, 2) not null check (amount > 0),
+  amount numeric(14, 2) not null check (amount > 0),
   spent_at date not null default current_date,
   comment text,
   created_by uuid not null references users(id) on delete restrict,
