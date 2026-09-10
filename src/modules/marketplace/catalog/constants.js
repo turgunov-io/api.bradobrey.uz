@@ -1,5 +1,5 @@
 const DEFAULT_SERVICE_CATEGORY = 'Uncategorized';
-const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber'];
+const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber', 'manager'];
 
 const PAYMENT_METHODS = [
   { value: 'cash', label: 'Наличные' },
