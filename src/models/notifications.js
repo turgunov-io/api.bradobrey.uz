@@ -1,6 +1,16 @@
 const jwt = require('jsonwebtoken');
+const webpush = require('web-push');
 const { db } = require('../config/postgres');
 const EMPLOYEE_ROLES = ['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'super-barber', 'barber'];
+
+function configureWebPush() {
+    const publicKey = String(process.env.VAPID_PUBLIC_KEY || '').trim();
+    const privateKey = String(process.env.VAPID_PRIVATE_KEY || '').trim();
+    const subject = String(process.env.VAPID_SUBJECT || 'mailto:admin@bradobrey.uz').trim();
+    if (!publicKey || !privateKey) return false;
+    webpush.setVapidDetails(subject, publicKey, privateKey);
+    return true;
+}
 
 async function ensureNotificationsTable() {
     await db.query(`
@@ -18,6 +28,16 @@ async function ensureNotificationsTable() {
         );
         create unique index if not exists notifications_recipient_type_order_idx on notifications (recipient_user_id, type, order_id);
         create index if not exists notifications_recipient_created_idx on notifications (recipient_user_id, created_at desc);
+        create table if not exists push_subscriptions (
+          id uuid default gen_random_uuid() primary key,
+          user_id uuid not null references users(id) on delete cascade,
+          endpoint text not null unique,
+          p256dh text not null,
+          auth text not null,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+        create index if not exists push_subscriptions_user_idx on push_subscriptions (user_id);
     `);
 }
 
@@ -52,10 +72,71 @@ async function createSuspiciousOrderNotifications(entry) {
         recipient_user_id: user.id, type: 'suspicious_order', title: 'Подозрительный заказ', body, order_id: entry.id, branch_id: entry.branch_id,
         data: { barber_name: barberName, client_name: clientName, actual_minutes: actual, expected_minutes: expected },
     }));
-    if (rows.length) { const { error } = await db.from('notifications').upsert(rows, { onConflict: 'recipient_user_id,type,order_id', ignoreDuplicates: true }); if (error) throw new Error(error.message); }
+    if (rows.length) {
+        const inserted = [];
+        for (const row of rows) {
+            const result = await db.query(`
+                insert into notifications (recipient_user_id, type, title, body, order_id, branch_id, data)
+                values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                on conflict (recipient_user_id, type, order_id) do nothing
+                returning recipient_user_id, title, body, order_id, branch_id, data
+            `, [row.recipient_user_id, row.type, row.title, row.body, row.order_id, row.branch_id, JSON.stringify(row.data || {})]);
+            inserted.push(...(result.rows || []));
+        }
+        await Promise.allSettled(inserted.map(notification => sendPushToUser(notification.recipient_user_id, {
+            title: notification.title,
+            body: notification.body,
+            url: notification.order_id ? `/history?scope=all&order_id=${notification.order_id}` : '/notifications',
+            tag: `suspicious-order-${notification.order_id || notification.recipient_user_id}`
+        })));
+    }
+}
+
+async function sendPushToUser(userId, payload) {
+    if (!configureWebPush()) return;
+    const result = await db.query('select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1', [userId]);
+    await Promise.all(result.rows.map(async (subscription) => {
+        try {
+            await webpush.sendNotification({ endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } }, JSON.stringify(payload));
+        }
+        catch (error) {
+            if ([404, 410].includes(error?.statusCode)) {
+                await db.query('delete from push_subscriptions where id = $1', [subscription.id]);
+                return;
+            }
+            console.error('Push notification failed:', error.message);
+        }
+    }));
 }
 
 class Notifications {
+    async savePushSubscription(req, res) {
+        const payload = authenticate(req, res); if (!payload) return;
+        const subscription = req.body || {};
+        const endpoint = String(subscription.endpoint || '').trim();
+        const keys = subscription.keys || {};
+        if (!endpoint || !keys.p256dh || !keys.auth) return res.status(400).json({ error: 'Invalid push subscription' });
+        try {
+            await db.query(`
+                insert into push_subscriptions (user_id, endpoint, p256dh, auth, updated_at)
+                values ($1, $2, $3, $4, now())
+                on conflict (endpoint) do update set user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, updated_at = now()
+            `, [payload.sub || payload.id, endpoint, String(keys.p256dh), String(keys.auth)]);
+            return res.json({ success: true });
+        }
+        catch (error) { return res.status(500).json({ error: error.message }); }
+    }
+
+    async testPush(req, res) {
+        const payload = authenticate(req, res); if (!payload) return;
+        if (!configureWebPush()) return res.status(503).json({ error: 'VAPID keys are not configured' });
+        try {
+            await sendPushToUser(payload.sub || payload.id, { title: 'Тестовое уведомление', body: 'Push работает на этом устройстве.', url: '/notifications', tag: 'test-push' });
+            return res.json({ success: true });
+        }
+        catch (error) { return res.status(500).json({ error: error.message }); }
+    }
+
     async checkToday(req, res) {
         const payload = authenticate(req, res); if (!payload) return;
         const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.date || '')) ? String(req.body.date) : new Date().toISOString().slice(0, 10);
