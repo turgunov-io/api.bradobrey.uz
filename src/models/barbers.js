@@ -3,6 +3,7 @@ const bcrypto = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
+const { createSuspiciousOrderNotifications } = require('./notifications');
 const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback");
 const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
@@ -1980,7 +1981,7 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, swapped_flag, created_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, price_override, price_override_reason, client:clients ( id, name )')
+            .select('id, status, swapped_flag, created_at, started_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, price_override, price_override_reason, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {
@@ -2000,6 +2001,11 @@ class Barbers {
         let cashback = null;
         if (status === 'completed' && entry.status !== 'completed') {
             cashback = await awardCashbackForCompletedQueueEntry(updated);
+            try {
+                await createSuspiciousOrderNotifications(updated);
+            } catch (notificationError) {
+                console.error('Failed to create suspicious-order notification:', notificationError.message);
+            }
         }
 
         return res.json({ entry: updated, cashback });
@@ -2459,7 +2465,7 @@ class Barbers {
 
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
-            .select('id, barber_id, status, service_id, service_ids, payment_method, client_id, price_override')
+            .select('id, barber_id, status, service_id, service_ids, payment_method, client_id, price_override, branch_id, created_at, started_at, client:clients ( name )')
             .eq('id', id)
             .eq('barber_id', barberId)
             .maybeSingle();
@@ -2531,6 +2537,13 @@ class Barbers {
         }
 
         const cashback = await awardCashbackForCompletedQueueEntry(updated);
+
+        try {
+            await createSuspiciousOrderNotifications({ ...entry, ...updated });
+        } catch (notificationError) {
+            // A notification must never make a successfully completed order fail.
+            console.error('Failed to create suspicious-order notification:', notificationError.message);
+        }
 
         return res.json({ entry: { ...updated, payments }, cashback });
     }
