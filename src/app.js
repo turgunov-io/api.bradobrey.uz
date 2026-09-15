@@ -24,9 +24,16 @@ const warehouse = require('./routers/warehouse');
 const expenses = require('./routers/expenses');
 const penalties = require('./routers/penalties');
 const notifications = require('./routers/notifications');
+const { ensureNotificationsTable } = require('./models/notifications');
 const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
 
 const app = express();
+
+// Keep the notification module self-initializing on deployments where SQL files
+// are not applied automatically. This is idempotent and does not affect orders.
+ensureNotificationsTable().catch((error) => {
+  console.error('Failed to initialize notifications table:', error.message);
+});
 
 const extraOrigins = ['https://gleaming-manatee-c42221.netlify.app'];
 

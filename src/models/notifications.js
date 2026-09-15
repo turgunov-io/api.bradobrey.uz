@@ -2,6 +2,25 @@ const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
 const EMPLOYEE_ROLES = ['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'super-barber', 'barber'];
 
+async function ensureNotificationsTable() {
+    await db.query(`
+        create table if not exists notifications (
+          id uuid default gen_random_uuid() primary key,
+          recipient_user_id uuid not null references users(id) on delete cascade,
+          type text not null default 'suspicious_order',
+          title text not null,
+          body text not null,
+          order_id uuid references queue_entries(id) on delete cascade,
+          branch_id uuid references branches(id) on delete set null,
+          data jsonb not null default '{}'::jsonb,
+          read_at timestamptz,
+          created_at timestamptz not null default now()
+        );
+        create unique index if not exists notifications_recipient_type_order_idx on notifications (recipient_user_id, type, order_id);
+        create index if not exists notifications_recipient_created_idx on notifications (recipient_user_id, created_at desc);
+    `);
+}
+
 function authenticate(req, res) {
     const token = (req.headers.authorization || '').replace(/^Bearer /, '');
     if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
@@ -50,4 +69,4 @@ class Notifications {
     async read(req, res) { const payload = authenticate(req, res); if (!payload) return; const { data, error } = await db.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', req.params.id).eq('recipient_user_id', payload.sub || payload.id).select('*').maybeSingle(); if (error) return res.status(500).json({ error: error.message }); if (!data) return res.status(404).json({ error: 'Notification not found' }); return res.json({ item: data }); }
     async readAll(req, res) { const payload = authenticate(req, res); if (!payload) return; const { error } = await db.from('notifications').update({ read_at: new Date().toISOString() }).eq('recipient_user_id', payload.sub || payload.id).is('read_at', null); if (error) return res.status(500).json({ error: error.message }); return res.json({ success: true }); }
 }
-module.exports = { notifications: new Notifications(), createSuspiciousOrderNotifications };
+module.exports = { notifications: new Notifications(), createSuspiciousOrderNotifications, ensureNotificationsTable };
