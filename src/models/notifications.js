@@ -56,6 +56,23 @@ async function createSuspiciousOrderNotifications(entry) {
 }
 
 class Notifications {
+    async checkToday(req, res) {
+        const payload = authenticate(req, res); if (!payload) return;
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.date || '')) ? String(req.body.date) : new Date().toISOString().slice(0, 10);
+        const from = `${date}T00:00:00.000Z`;
+        const to = new Date(Date.parse(from) + 86400000).toISOString();
+        const { data: orders, error } = await db.from('queue_entries').select('id, status, created_at, started_at, finished_at, service_id, service_ids, branch_id, barber_id, client:clients ( name )').eq('status', 'completed').gte('finished_at', from).lt('finished_at', to);
+        if (error) return res.status(500).json({ error: error.message });
+        let suspiciousCount = 0;
+        for (const order of orders || []) {
+            const before = await db.from('notifications').select('id', { count: 'exact' }).eq('order_id', order.id).eq('type', 'suspicious_order');
+            await createSuspiciousOrderNotifications(order);
+            const after = await db.from('notifications').select('id', { count: 'exact' }).eq('order_id', order.id).eq('type', 'suspicious_order');
+            if ((after.count || 0) > (before.count || 0)) suspiciousCount += 1;
+        }
+        return res.json({ checked_count: (orders || []).length, suspicious_count: suspiciousCount, date });
+    }
+
     async list(req, res) {
         const payload = authenticate(req, res); if (!payload) return;
         const userId = payload.sub || payload.id; const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
