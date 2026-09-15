@@ -93,20 +93,25 @@ async function createSuspiciousOrderNotifications(entry) {
 }
 
 async function sendPushToUser(userId, payload) {
-    if (!configureWebPush()) return;
+    if (!configureWebPush()) throw new Error('VAPID keys are not configured');
     const result = await db.query('select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1', [userId]);
+    const summary = { found: result.rows.length, sent: 0, failed: 0, removed: 0 };
     await Promise.all(result.rows.map(async (subscription) => {
         try {
             await webpush.sendNotification({ endpoint: subscription.endpoint, keys: { p256dh: subscription.p256dh, auth: subscription.auth } }, JSON.stringify(payload));
+            summary.sent += 1;
         }
         catch (error) {
             if ([404, 410].includes(error?.statusCode)) {
                 await db.query('delete from push_subscriptions where id = $1', [subscription.id]);
+                summary.removed += 1;
                 return;
             }
+            summary.failed += 1;
             console.error('Push notification failed:', error.message);
         }
     }));
+    return summary;
 }
 
 class Notifications {
@@ -131,8 +136,10 @@ class Notifications {
         const payload = authenticate(req, res); if (!payload) return;
         if (!configureWebPush()) return res.status(503).json({ error: 'VAPID keys are not configured' });
         try {
-            await sendPushToUser(payload.sub || payload.id, { title: 'Тестовое уведомление', body: 'Push работает на этом устройстве.', url: '/notifications', tag: 'test-push' });
-            return res.json({ success: true });
+            const result = await sendPushToUser(payload.sub || payload.id, { title: 'Тестовое уведомление', body: 'Push работает на этом устройстве.', url: '/notifications', tag: 'test-push' });
+            if (!result.found) return res.status(404).json({ error: 'No push subscriptions found for this user', ...result });
+            if (!result.sent) return res.status(502).json({ error: 'Push delivery failed', ...result });
+            return res.json({ success: true, ...result });
         }
         catch (error) { return res.status(500).json({ error: error.message }); }
     }
