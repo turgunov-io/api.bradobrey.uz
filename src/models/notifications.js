@@ -102,7 +102,11 @@ async function sendPushToUser(userId, payload) {
             summary.sent += 1;
         }
         catch (error) {
-            if ([404, 410].includes(error?.statusCode)) {
+            const statusCode = Number(error?.statusCode || error?.status || 0);
+            // Endpoints rejected by the push service are no longer usable.
+            // Remove all client-side/authorization 4xx failures so a device
+            // can register a fresh subscription after a VAPID-key rotation.
+            if ([400, 401, 403, 404, 410].includes(statusCode)) {
                 await db.query('delete from push_subscriptions where id = $1', [subscription.id]);
                 summary.removed += 1;
                 return;
@@ -110,7 +114,7 @@ async function sendPushToUser(userId, payload) {
             summary.failed += 1;
             console.error('Push notification failed:', {
                 message: error.message,
-                statusCode: error.statusCode || error.status || null,
+                statusCode: statusCode || null,
                 body: error.body || error.response?.body || null,
             });
         }
@@ -142,6 +146,7 @@ class Notifications {
         try {
             const result = await sendPushToUser(payload.sub || payload.id, { title: 'Тестовое уведомление', body: 'Push работает на этом устройстве.', url: '/notifications', tag: 'test-push' });
             if (!result.found) return res.status(404).json({ error: 'No push subscriptions found for this user', ...result });
+            if (!result.sent && result.removed && !result.failed) return res.status(410).json({ error: 'Push subscription expired; enable notifications again on this device', ...result });
             if (!result.sent) return res.status(502).json({ error: 'Push delivery failed', ...result });
             return res.json({ success: true, ...result });
         }
