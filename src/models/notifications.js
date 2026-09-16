@@ -108,7 +108,11 @@ async function sendPushToUser(userId, payload) {
                 return;
             }
             summary.failed += 1;
-            console.error('Push notification failed:', error.message);
+            console.error('Push notification failed:', {
+                message: error.message,
+                statusCode: error.statusCode || error.status || null,
+                body: error.body || error.response?.body || null,
+            });
         }
     }));
     return summary;

@@ -12,3 +12,14 @@ create table if not exists notifications (
 );
 create unique index if not exists notifications_recipient_type_order_idx on notifications (recipient_user_id, type, order_id);
 create index if not exists notifications_recipient_created_idx on notifications (recipient_user_id, created_at desc);
+
+create table if not exists push_subscriptions (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid not null references users(id) on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists push_subscriptions_user_idx on push_subscriptions (user_id);
