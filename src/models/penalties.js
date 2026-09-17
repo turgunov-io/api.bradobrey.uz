@@ -235,7 +235,8 @@ module.exports = {
 
     const recipientId = text(req.body?.recipient_id || req.body?.recipientId);
     const comment = text(req.body?.comment);
-    const penaltyAt = parseDate(req.body?.penalty_at || req.body?.date || new Date().toISOString().slice(0, 10));
+    // Manual penalties are dated by creation day, not by a client-selected date.
+    const penaltyAt = parseDate(tashkentDate(new Date()));
     const amount = Number(req.body?.amount);
     if (!recipientId) return res.status(422).json({ error: 'recipient_id is required' });
     if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99) {

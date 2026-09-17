@@ -206,7 +206,10 @@ module.exports = {
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.create, res)) return;
     if (!access.branchId) return res.status(422).json({ error: 'User branch is not assigned' });
-    const draft = validate(req.body || {});
+    // New expenses always belong to the calendar day on which they are created.
+    // Do not trust a client-provided date, otherwise a manager can move an
+    // expense into another accounting period from the mobile app.
+    const draft = validate({ ...(req.body || {}), spent_at: tashkentDate(new Date()) });
     if (draft.error) return res.status(422).json({ error: draft.error });
     const metadata = {
       type: EXPENSE_TYPE,
