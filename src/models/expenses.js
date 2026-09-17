@@ -97,7 +97,10 @@ async function auth(req, res) {
 
 const can = (access, permission) => PRIVILEGED_ROLES.has(access.role)
   || access.permissions.includes(permission)
-  || (access.role === 'manager' && ['expenses.read', 'expenses.create'].includes(permission));
+  || (
+    access.role === 'manager'
+    && ['expenses.read', 'expenses.create', 'expenses.delete'].includes(permission)
+  );
 
 const requirePermission = (access, permission, res) => {
   if (can(access, permission)) return true;

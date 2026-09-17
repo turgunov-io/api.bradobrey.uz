@@ -55,22 +55,29 @@ function authenticate(req, res) {
 async function createSuspiciousOrderNotifications(entry) {
     if (!entry?.id || !entry?.branch_id) return;
     const ids = Array.from(new Set([...(Array.isArray(entry.service_ids) ? entry.service_ids : []), ...(entry.service_id ? [entry.service_id] : [])].filter(Boolean)));
-    const { data: services, error: serviceError } = ids.length ? await db.from('services').select('id, duration_minutes').in('id', ids) : { data: [], error: null };
+    const { data: services, error: serviceError } = ids.length ? await db.from('services').select('id, name, duration_minutes').in('id', ids) : { data: [], error: null };
     if (serviceError) throw new Error(serviceError.message);
     const expected = ids.reduce((sum, id) => sum + (Number((services || []).find(s => String(s.id) === String(id))?.duration_minutes) || 0), 0);
     const actual = (new Date(entry.finished_at).getTime() - new Date(entry.started_at || entry.created_at).getTime()) / 60000;
     if (entry.status !== 'completed' || !expected || !Number.isFinite(actual) || actual < 0 || actual >= expected * 0.5) return;
-    const [{ data: barber }, { data: recipients, error: recipientError }] = await Promise.all([
+    const [{ data: barber }, { data: branch }, { data: recipients, error: recipientError }] = await Promise.all([
         db.from('barbers').select('name').eq('id', entry.barber_id).maybeSingle(),
+        db.from('branches').select('name').eq('id', entry.branch_id).maybeSingle(),
         db.from('users').select('id, role, branch_id').in('role', EMPLOYEE_ROLES),
     ]);
     if (recipientError) throw new Error(recipientError.message);
     const barberName = barber?.name || 'Неизвестный барбер';
+    const branchName = branch?.name || 'Неизвестный филиал';
     const clientName = entry.client?.name || 'Клиент';
-    const body = `${barberName} • ${clientName} • заказ #${String(entry.id).slice(0, 8)} • ${Math.round(actual)} мин. при норме ${expected} мин.`;
+    const serviceNames = ids
+        .map(id => (services || []).find(service => String(service.id) === String(id))?.name)
+        .filter(Boolean)
+        .join(', ') || 'Услуга не указана';
+    const title = `${clientName} — информация по заказу`;
+    const body = `Филиал: ${branchName} • Мастер: ${barberName} • Услуга: ${serviceNames} • Время: ${Math.round(actual)} мин. из ${expected} мин.`;
     const rows = (recipients || []).filter(user => ['admin_network', 'admin', 'super-manager', 'super-barber'].includes(user.role) || String(user.branch_id) === String(entry.branch_id)).map(user => ({
-        recipient_user_id: user.id, type: 'suspicious_order', title: 'Подозрительный заказ', body, order_id: entry.id, branch_id: entry.branch_id,
-        data: { barber_name: barberName, client_name: clientName, actual_minutes: actual, expected_minutes: expected },
+        recipient_user_id: user.id, type: 'suspicious_order', title, body, order_id: entry.id, branch_id: entry.branch_id,
+        data: { branch_name: branchName, barber_name: barberName, service_name: serviceNames, client_name: clientName, actual_minutes: actual, expected_minutes: expected },
     }));
     if (rows.length) {
         const inserted = [];
@@ -86,7 +93,9 @@ async function createSuspiciousOrderNotifications(entry) {
         await Promise.allSettled(inserted.map(notification => sendPushToUser(notification.recipient_user_id, {
             title: notification.title,
             body: notification.body,
-            url: notification.order_id ? `/history?scope=all&order_id=${notification.order_id}` : '/notifications',
+            // Open the inbox first. The user can then choose "Подробнее" on
+            // the notification row to open the related order in history.
+            url: '/notifications',
             tag: `suspicious-order-${notification.order_id || notification.recipient_user_id}`
         })));
     }
@@ -136,6 +145,20 @@ class Notifications {
                 on conflict (endpoint) do update set user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, updated_at = now()
             `, [payload.sub || payload.id, endpoint, String(keys.p256dh), String(keys.auth)]);
             return res.json({ success: true });
+        }
+        catch (error) { return res.status(500).json({ error: error.message }); }
+    }
+
+    async removePushSubscription(req, res) {
+        const payload = authenticate(req, res); if (!payload) return;
+        const endpoint = String(req.body?.endpoint || '').trim();
+        if (!endpoint) return res.status(400).json({ error: 'Push subscription endpoint is required' });
+        try {
+            const result = await db.query(
+                'delete from push_subscriptions where user_id = $1 and endpoint = $2',
+                [payload.sub || payload.id, endpoint]
+            );
+            return res.json({ success: true, removed: result.rowCount || 0 });
         }
         catch (error) { return res.status(500).json({ error: error.message }); }
     }
