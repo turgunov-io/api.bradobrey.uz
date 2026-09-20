@@ -12,6 +12,21 @@ const BARBER_HISTORY_ROLES = new Set([
 const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
 const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
 
+const normalizeHistoryDateBound = (value, endOfDay = false) => {
+    if (value === undefined || value === null || value === '') return null;
+
+    const text = String(value).trim();
+    const dateOnly = /^(\d{4}-\d{2}-\d{2})$/.exec(text);
+    const timestamp = dateOnly
+        ? `${dateOnly[1]}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`
+        : text;
+    const parsed = new Date(timestamp);
+
+    if (Number.isNaN(parsed.getTime())) return undefined;
+    if (dateOnly && parsed.toISOString().slice(0, 10) !== dateOnly[1]) return undefined;
+    return parsed.toISOString();
+};
+
 const toAmount = (value) => {
     const amount = Number(value);
     return Number.isFinite(amount) ? amount : 0;
@@ -292,6 +307,15 @@ class History {
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
         const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
         const fetchAll = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
+        const fromValue = req.query.from || req.query.start_date;
+        const toValue = req.query.to || req.query.end_date;
+        const from = normalizeHistoryDateBound(fromValue);
+        const to = normalizeHistoryDateBound(toValue, true);
+
+        if ((fromValue && !from) || (toValue && !to)) {
+            return res.status(400).json({ error: 'Invalid history date range' });
+        }
+
         const statusesParam = req.query.status;
         const requestedStatuses = Array.isArray(statusesParam)
             ? statusesParam
@@ -330,6 +354,9 @@ class History {
         if (branchId) {
             query = query.eq('branch_id', branchId);
         }
+
+        if (from) query = query.gte('created_at', from);
+        if (to) query = query.lte('created_at', to);
 
         const { data, error, count } = await query;
 

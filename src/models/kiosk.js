@@ -350,7 +350,7 @@ class Kiosk {
 
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
-            .select("id, barber_id, client_id, status, created_at, service_ids") // 🔥 ADDED service_ids
+            .select("id, barber_id, client_id, status, created_at, started_at, service_ids") // 🔥 ADDED service_ids
             .eq("branch_id", branch_id);
 
         if (queuesError) {
@@ -440,6 +440,7 @@ class Kiosk {
                 name: clientsById[entry.client_id] || null,
                 status: entry.status,
                 created_at: entry.created_at,
+                started_at: entry.started_at || null,
                 estimated_time: serviceDuration
             });
         }
