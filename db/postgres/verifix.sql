@@ -3,9 +3,10 @@ create table if not exists barber_work_schedules (
   branch_id uuid references branches(id) on delete cascade,
   barber_id uuid references barbers(id) on delete cascade,
   day_of_week integer not null check (day_of_week between 0 and 6),
-  start_time time not null,
+  start_time time,
   end_time time,
   grace_minutes integer not null default 0 check (grace_minutes >= 0),
+  is_working boolean not null default true,
   is_active boolean not null default true,
   valid_from date,
   valid_to date,
@@ -20,6 +21,7 @@ alter table barber_work_schedules
   add column if not exists start_time time,
   add column if not exists end_time time,
   add column if not exists grace_minutes integer not null default 0,
+  add column if not exists is_working boolean not null default true,
   add column if not exists is_active boolean not null default true,
   add column if not exists valid_from date,
   add column if not exists valid_to date,
@@ -32,6 +34,8 @@ update barber_work_schedules set is_active = true where is_active is null;
 alter table barber_work_schedules
   alter column grace_minutes set default 0,
   alter column grace_minutes set not null,
+  alter column is_working set default true,
+  alter column is_working set not null,
   alter column is_active set default true,
   alter column is_active set not null,
   alter column created_at set default now(),
@@ -40,12 +44,17 @@ alter table barber_work_schedules
   alter column updated_at set not null;
 
 alter table barber_work_schedules
+  alter column start_time drop not null;
+
+alter table barber_work_schedules
   drop constraint if exists barber_work_schedules_day_of_week_check,
-  drop constraint if exists barber_work_schedules_grace_minutes_check;
+  drop constraint if exists barber_work_schedules_grace_minutes_check,
+  drop constraint if exists barber_work_schedules_working_start_check;
 
 alter table barber_work_schedules
   add constraint barber_work_schedules_day_of_week_check check (day_of_week between 0 and 6),
-  add constraint barber_work_schedules_grace_minutes_check check (grace_minutes >= 0);
+  add constraint barber_work_schedules_grace_minutes_check check (grace_minutes >= 0),
+  add constraint barber_work_schedules_working_start_check check (not is_working or start_time is not null);
 
 create index if not exists idx_barber_work_schedules_branch_day
   on barber_work_schedules (branch_id, day_of_week, is_active);

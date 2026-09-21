@@ -229,7 +229,7 @@ const findSchedule = async ({ barberId, branchId, occurredAt, timeZone }) => {
 
   const { data, error } = await db
     .from('barber_work_schedules')
-    .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to')
+    .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_working, is_active, valid_from, valid_to')
     .eq('branch_id', branchId)
     .eq('day_of_week', dayOfWeek)
     .eq('is_active', true);
@@ -250,7 +250,7 @@ const findSchedule = async ({ barberId, branchId, occurredAt, timeZone }) => {
 };
 
 const calculateLateState = ({ eventType, occurredAt, schedule, timeZone }) => {
-  if (!LATE_EVENT_TYPES.has(eventType) || !schedule?.start_time) {
+  if (!LATE_EVENT_TYPES.has(eventType) || schedule?.is_working === false || !schedule?.start_time) {
     return {
       grace_minutes: Number(schedule?.grace_minutes || 0),
       is_late: false,
@@ -652,7 +652,7 @@ class Verifix {
 
       let query = db
         .from('barber_work_schedules')
-        .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to, created_at, updated_at, barber:barbers ( id, name ), branch:branches ( id, name )')
+        .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_working, is_active, valid_from, valid_to, created_at, updated_at, barber:barbers ( id, name ), branch:branches ( id, name )')
         .order('day_of_week', { ascending: true })
         .order('start_time', { ascending: true });
 
@@ -686,6 +686,7 @@ class Verifix {
       const branchId = normalizeId(body.branch_id);
       const barberId = normalizeId(body.barber_id);
       const dayOfWeek = Number(body.day_of_week);
+      const isWorking = parseBoolean(body.is_working, true);
       const startTime = normalizeTime(body.start_time);
       const endTime = body.end_time === undefined || body.end_time === null || body.end_time === ''
         ? null
@@ -695,7 +696,7 @@ class Verifix {
       if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
         return res.status(400).json({ error: 'day_of_week must be an integer from 0 to 6' });
       }
-      if (!startTime) return res.status(400).json({ error: 'start_time must be HH:mm or HH:mm:ss' });
+      if (isWorking && !startTime) return res.status(400).json({ error: 'start_time must be HH:mm or HH:mm:ss on working days' });
       if (body.end_time !== undefined && body.end_time !== null && body.end_time !== '' && !endTime) {
         return res.status(400).json({ error: 'end_time must be HH:mm or HH:mm:ss' });
       }
@@ -706,14 +707,15 @@ class Verifix {
           barber_id: barberId,
           branch_id: branchId,
           day_of_week: dayOfWeek,
-          end_time: endTime,
+          end_time: isWorking ? endTime : null,
           grace_minutes: parseNonNegativeInteger(body.grace_minutes, 0),
           is_active: parseBoolean(body.is_active, true),
-          start_time: startTime,
+          is_working: isWorking,
+          start_time: isWorking ? startTime : null,
           valid_from: normalizeDate(body.valid_from),
           valid_to: normalizeDate(body.valid_to),
         })
-        .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to, created_at, updated_at')
+        .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_working, is_active, valid_from, valid_to, created_at, updated_at')
         .maybeSingle();
 
       if (error) return res.status(500).json({ error: error.message });
@@ -741,6 +743,7 @@ class Verifix {
       }
 
       if (body.barber_id !== undefined) update.barber_id = normalizeId(body.barber_id);
+      if (body.is_working !== undefined) update.is_working = parseBoolean(body.is_working, true);
 
       if (body.day_of_week !== undefined) {
         const dayOfWeek = Number(body.day_of_week);
@@ -751,9 +754,13 @@ class Verifix {
       }
 
       if (body.start_time !== undefined) {
-        const startTime = normalizeTime(body.start_time);
-        if (!startTime) return res.status(400).json({ error: 'start_time must be HH:mm or HH:mm:ss' });
-        update.start_time = startTime;
+        if (body.start_time === null || body.start_time === '') {
+          update.start_time = null;
+        } else {
+          const startTime = normalizeTime(body.start_time);
+          if (!startTime) return res.status(400).json({ error: 'start_time must be HH:mm or HH:mm:ss' });
+          update.start_time = startTime;
+        }
       }
 
       if (body.end_time !== undefined) {
@@ -771,11 +778,19 @@ class Verifix {
       if (body.valid_from !== undefined) update.valid_from = normalizeDate(body.valid_from);
       if (body.valid_to !== undefined) update.valid_to = normalizeDate(body.valid_to);
 
+      if (update.is_working === false) {
+        update.start_time = null;
+        update.end_time = null;
+      }
+      if (update.is_working === true && (update.start_time === null || body.start_time === undefined)) {
+        return res.status(400).json({ error: 'start_time is required on working days' });
+      }
+
       const { data, error } = await db
         .from('barber_work_schedules')
         .update(update)
         .eq('id', id)
-        .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to, created_at, updated_at')
+        .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_working, is_active, valid_from, valid_to, created_at, updated_at')
         .maybeSingle();
 
       if (error) return res.status(500).json({ error: error.message });
