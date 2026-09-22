@@ -10,7 +10,10 @@ const BARBER_HISTORY_ROLES = new Set([
     'super-manager',
 ]);
 const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
-const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
+// Every terminal queue state belongs in history. Rejected orders were
+// previously omitted, which made the dashboard appear empty for branches that
+// mostly close orders through the rejection flow.
+const HISTORY_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
 
 const normalizeHistoryDateBound = (value, endOfDay = false) => {
     if (value === undefined || value === null || value === '') return null;
