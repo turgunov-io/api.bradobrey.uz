@@ -273,11 +273,50 @@ async function createReview(req, res) {
              where bp.booking_id = marketplace_bookings.id and bp.queue_entry_id = $1
           ))`, [bookingId, clientId]
     );
-    if (!booking.rows[0]) {
+    let resolvedBookingId = booking.rows[0]?.id;
+    if (!resolvedBookingId) {
+      // Older completed marketplace visits may exist only as queue_entries.
+      // Backfill the aggregate booking lazily when the client submits its
+      // first review, so the review remains compatible with legacy history.
+      const legacyQueueEntry = await dbClient.query(
+        `select q.id, q.barber_id, c.name as client_name
+           from queue_entries q
+           join clients c on c.id = q.client_id
+           join marketplace_clients mc on mc.phone = c.phone
+          where q.id = $1
+            and mc.id = $2
+            and q.source = 'site'
+            and q.status = 'completed'
+          limit 1`,
+        [bookingId, clientId],
+      );
+      if (legacyQueueEntry.rows[0]) {
+        const legacy = legacyQueueEntry.rows[0];
+        const createdBooking = await dbClient.query(
+          `insert into marketplace_bookings
+             (marketplace_client_id, source, status)
+           values ($1, 'MARKETPLACE', 'COMPLETED')
+           returning id`,
+          [clientId],
+        );
+        resolvedBookingId = createdBooking.rows[0].id;
+        await dbClient.query(
+          `insert into marketplace_booking_persons
+             (booking_id, person_index, display_name, barber_id, queue_entry_id)
+           values ($1, 1, $2, $3, $4)`,
+          [
+            resolvedBookingId,
+            legacy.client_name || 'Client',
+            legacy.barber_id,
+            legacy.id,
+          ],
+        );
+      }
+    }
+    if (!resolvedBookingId) {
       await dbClient.query('ROLLBACK');
       return res.status(409).json({ error: 'REVIEW_NOT_ALLOWED' });
     }
-    const resolvedBookingId = booking.rows[0].id;
     const result = await dbClient.query(
       `insert into marketplace_reviews (marketplace_client_id, booking_id, rating, comment)
        values ($1, $2, $3, $4) returning *`,
