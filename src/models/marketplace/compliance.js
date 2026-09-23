@@ -4,8 +4,11 @@ const { pool } = require('../../config/postgres');
 
 const MARKETPLACE_ROLE = 'marketplace';
 
-const fallbackReferralCode = (clientId) =>
-  `BR${crypto.createHash('sha256').update(String(clientId)).digest('hex').slice(0, 10).toUpperCase()}`;
+const fallbackReferralCode = (seed) => {
+  let hash = 0;
+  for (const char of String(seed || '')) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  return `BR${(hash >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
+};
 
 const isMissingCashbackSchemaError = (error) => {
   const code = String(error?.code || '');
@@ -187,8 +190,12 @@ async function referral(req, res) {
     // The compliance migration may not yet be applied on an older database.
     // Keep the mobile screen usable and expose an explicit unavailable state.
     if (error?.code === '42P01' || error?.code === '42703') {
+      const client = await pool.query(
+        'select email from marketplace_clients where id = $1',
+        [clientId],
+      );
       return res.json({
-        referral_code: fallbackReferralCode(clientId),
+        referral_code: fallbackReferralCode(client.rows[0]?.email || clientId),
         bonus_balance: 0,
         invited: [],
         available: false,
