@@ -51,7 +51,7 @@ class FraudAlerts {
 
     try {
       const result = await pool.query(
-        `select a.id, a.marketplace_client_id, mc.phone, mc.display_name,
+        `select a.id, a.marketplace_client_id, mc.phone, mc.email,
                 a.kind, a.source_ip, a.device_id, a.metadata, a.status,
                 a.reviewed_at, a.reviewed_by, a.created_at
            from marketplace_fraud_alerts a

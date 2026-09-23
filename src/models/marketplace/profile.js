@@ -153,9 +153,9 @@ class MarketplaceProfile {
       return null;
     }
 
-    const { data: client, error } = await db
+    const { data: baseClient, error } = await db
       .from('marketplace_clients')
-      .select('id,email,phone,photo_url,display_name,status_points,blocked_until,referral_bonus_balance,is_active,created_at,last_login_at')
+      .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -164,17 +164,25 @@ class MarketplaceProfile {
       return null;
     }
 
-    if (!client) {
+    if (!baseClient) {
       res.status(404).json({ error: 'Marketplace client not found' });
       return null;
     }
 
-    if (client.is_active === false) {
+    if (baseClient.is_active === false) {
       res.status(403).json({ error: 'Account is disabled' });
       return null;
     }
 
-    return { payload, client };
+    // These columns are added by the marketplace compliance migration. Keep
+    // profile and cashback screens usable against older databases too.
+    const { data: optionalFields } = await db
+      .from('marketplace_clients')
+      .select('status_points,blocked_until,referral_bonus_balance')
+      .eq('id', clientId)
+      .maybeSingle();
+
+    return { payload, client: { ...baseClient, ...(optionalFields || {}) } };
   }
 
   async me(req, res) {
@@ -213,7 +221,7 @@ class MarketplaceProfile {
       return res.json({
         profile: {
           ...formatProfile(auth.client, { cashback_balance }),
-          display_name: auth.client.display_name || null,
+          display_name: null,
           status_points: Number(auth.client.status_points || 0),
           referral_bonus_balance: Number(auth.client.referral_bonus_balance || 0),
           blocked_until: auth.client.blocked_until || null,
@@ -326,7 +334,7 @@ class MarketplaceProfile {
         .from('marketplace_clients')
         .update(updatePayload)
         .eq('id', auth.client.id)
-            .select('id,email,phone,photo_url,display_name,status_points,blocked_until,referral_bonus_balance,is_active,created_at,last_login_at')
+            .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
         .maybeSingle();
 
       if (updateError) {

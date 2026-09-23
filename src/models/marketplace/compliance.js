@@ -31,7 +31,7 @@ function authClient(req, res) {
 
 async function getClient(clientId) {
   const result = await pool.query(
-    `select id, phone, display_name, status_points, blocked_until, is_active,
+    `select id, phone, status_points, blocked_until, is_active,
             case when cancel_count_date = (now() at time zone 'Asia/Tashkent')::date then cancel_count_today else 0 end as cancel_count_today
        from marketplace_clients where id = $1`,
     [clientId]
@@ -168,13 +168,13 @@ async function referral(req, res) {
   );
   const invited = await pool.query(
     `select r.id, r.expires_at, r.activated_at, r.created_at,
-            coalesce(mc.display_name, mc.phone) as referred_name,
+            coalesce(mc.email, mc.phone) as referred_name,
             coalesce(sum(rt.amount), 0) as earned
        from referrals r
        join marketplace_clients mc on mc.id = r.referred_client_id
        left join referral_transactions rt on rt.referral_id = r.id
       where r.referrer_client_id = $1
-      group by r.id, mc.display_name, mc.phone
+      group by r.id, mc.email, mc.phone
       order by r.created_at desc`, [clientId]
   );
   return res.json({ referral_code: result.rows[0].referral_code, bonus_balance: Number(balance.rows[0]?.referral_bonus_balance || 0), invited: invited.rows });
@@ -272,7 +272,7 @@ async function cancelBooking(req, res) {
   try {
     await dbClient.query('BEGIN');
     const lockedClientResult = await dbClient.query(
-      `select id, phone, display_name, status_points, blocked_until,
+      `select id, phone, status_points, blocked_until,
               case when cancel_count_date = (now() at time zone 'Asia/Tashkent')::date then cancel_count_today else 0 end as cancel_count_today,
               is_active
          from marketplace_clients

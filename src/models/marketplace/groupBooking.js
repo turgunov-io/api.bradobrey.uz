@@ -53,7 +53,7 @@ async function create(req, res) {
   try {
     await dbClient.query('BEGIN');
     const clientResult = await dbClient.query(
-      `select mc.id, mc.phone, mc.display_name, mc.is_active, mc.blocked_until,
+      `select mc.id, mc.phone, mc.email, mc.is_active, mc.blocked_until,
               c.id as legacy_client_id
          from marketplace_clients mc
          left join clients c on c.phone = mc.phone

@@ -215,7 +215,6 @@ class MarketplaceAuth {
   async verifyPhone(req, res) {
     const phone = normalizePhone(req.body?.phone);
     const code = normalizeOtpCode(req.body?.code);
-    const displayName = String(req.body?.display_name || '').trim() || null;
     if (!isValidE164(phone) || !/^\d{6}$/.test(code)) {
       return res.status(400).json({ error: 'Valid phone and six-digit code are required' });
     }
@@ -234,11 +233,11 @@ class MarketplaceAuth {
       }
 
       const accountResult = await client.query(
-        `insert into marketplace_clients (phone, display_name, is_active)
-         values ($1, $2, true)
-         on conflict (phone) where phone is not null do update set display_name = coalesce(excluded.display_name, marketplace_clients.display_name), last_login_at = now()
-         returning id, phone, display_name, is_active, (xmax = 0) as created_new`,
-        [phone, displayName]
+        `insert into marketplace_clients (phone, is_active)
+         values ($1, true)
+         on conflict (phone) where phone is not null do update set last_login_at = now()
+         returning id, phone, is_active, (xmax = 0) as created_new`,
+        [phone]
       );
       const account = accountResult.rows[0];
       if (!account || account.is_active === false) {
@@ -300,7 +299,7 @@ class MarketplaceAuth {
         client: {
           id: account.id,
           phone: account.phone,
-          display_name: account.display_name,
+          display_name: null,
           is_active: account.is_active,
         },
       });
