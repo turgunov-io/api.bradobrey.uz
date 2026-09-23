@@ -108,11 +108,22 @@ async function closePreviousDayOpenQueueEntries({ io = null, now = new Date(), t
 
     if (io) {
         for (const branchId of branchIds) {
-            io.to(`branch:${branchId}`).emit('queue:update', {
+            const branchRows = rows.filter((row) => row.branch_id === branchId);
+            const room = io.to(`branch:${branchId}`);
+            room.emit('queue:update', {
                 type: 'queue_auto_closed',
                 branchId,
-                count: rows.filter((row) => row.branch_id === branchId).length,
+                count: branchRows.length,
             });
+            for (const row of branchRows) {
+                room.emit('queue.no_show', {
+                    type: 'no_show',
+                    branchId,
+                    entryId: row.id,
+                    barberId: row.barber_id,
+                    status: row.status,
+                });
+            }
         }
     }
 

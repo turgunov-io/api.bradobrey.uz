@@ -15,6 +15,8 @@ create table if not exists cashback_transactions (
   kind text not null check (kind in ('earn', 'spend', 'adjust')),
   amount numeric(12,2) not null,
   meta jsonb,
+  request_id text,
+  reversal_of uuid references cashback_transactions(id) on delete restrict,
   created_at timestamptz not null default now(),
   check (amount > 0)
 );
@@ -29,3 +31,10 @@ create index if not exists idx_cashback_transactions_client_created_at
 
 create index if not exists idx_cashback_transactions_queue_entry_id
   on cashback_transactions (queue_entry_id);
+
+alter table cashback_transactions add column if not exists request_id text;
+alter table cashback_transactions add column if not exists reversal_of uuid references cashback_transactions(id) on delete restrict;
+create unique index if not exists idx_cashback_transactions_request_id
+  on cashback_transactions (request_id) where request_id is not null;
+create unique index if not exists idx_cashback_transactions_reversal_kind
+  on cashback_transactions (reversal_of, kind) where reversal_of is not null;

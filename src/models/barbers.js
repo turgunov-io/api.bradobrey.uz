@@ -5,6 +5,7 @@ const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadIm
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
 const { createSuspiciousOrderNotifications } = require('./notifications');
 const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback");
+const { settlePendingReferralBonuses } = require('../services/referralBonus');
 const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
 
@@ -952,14 +953,34 @@ const scheduleCallFollowUp = (entry, io) => {
 
 const emitCallEvent = (io, entry) => {
     if (!io || !entry?.branch_id) return;
-    io.to(`branch:${entry.branch_id}`).emit('queue:update', {
+    const payload = {
         type: 'call',
         entryId: entry.id,
         barberId: entry.barber_id,
         branchId: entry.branch_id,
         clientId: entry.client?.id || entry.client_id || null,
         clientName: entry.client?.name || entry.client_name || null,
-    });
+    };
+    const room = io.to(`branch:${entry.branch_id}`);
+    room.emit('queue:update', payload);
+    room.emit('queue.client_called', payload);
+    room.emit('queue:call', payload);
+};
+
+const emitLifecycleEvent = (io, entry, { type, eventName }) => {
+    if (!io || !entry?.branch_id) return;
+    const payload = {
+        type,
+        entryId: entry.id,
+        barberId: entry.barber_id,
+        branchId: entry.branch_id,
+        clientId: entry.client?.id || entry.client_id || null,
+        clientName: entry.client?.name || entry.client_name || null,
+        status: entry.status,
+    };
+    const room = io.to(`branch:${entry.branch_id}`);
+    room.emit('queue:update', payload);
+    room.emit(eventName, payload);
 };
 
 const logVerifixEvent = async ({ actorId, actorRole, barberId, branchId, eventType, io, metadata, source = 'barber_kiosk' }) => {
@@ -2177,12 +2198,21 @@ class Barbers {
 
             const io = req.app.get('io');
             if (io) {
-                io.to(`branch:${entry.branch_id}`).emit('queue:update', {
+                const reassignmentPayload = {
                     type: 'queue_reassigned',
                     entryId: updated.id,
                     branchId: entry.branch_id,
                     fromBarberId: entry.barber_id,
                     barberId: selectedBarber.id,
+                };
+                io.to(`branch:${entry.branch_id}`).emit('queue:update', reassignmentPayload);
+                io.to(`branch:${entry.branch_id}`).emit('barber_changed', {
+                    ...reassignmentPayload,
+                    type: 'barber_changed',
+                });
+                io.to(`branch:${entry.branch_id}`).emit('queue.barber_changed', {
+                    ...reassignmentPayload,
+                    type: 'barber_changed',
                 });
             }
 
@@ -2323,6 +2353,11 @@ class Barbers {
         if (updateError) {
             return res.status(500).json({ error: updateError.message });
         }
+
+        emitLifecycleEvent(req.app.get('io'), updated, {
+            type: 'service_started',
+            eventName: 'queue.service_started',
+        });
 
         return res.json({ entry: updated });
     }
@@ -2537,6 +2572,18 @@ class Barbers {
         }
 
         const cashback = await awardCashbackForCompletedQueueEntry(updated);
+        try {
+            await settlePendingReferralBonuses({ limit: 20 });
+        } catch (referralError) {
+            // Referral settlement has a scheduled recovery path and must not
+            // make a successfully completed service fail.
+            console.error('Failed to settle referral bonus:', referralError.message);
+        }
+
+        emitLifecycleEvent(req.app.get('io'), updated, {
+            type: 'service_completed',
+            eventName: 'queue.service_completed',
+        });
 
         try {
             await createSuspiciousOrderNotifications({ ...entry, ...updated });

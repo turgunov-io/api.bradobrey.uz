@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../../config/postgres');
+const catalogService = require('../../modules/marketplace/catalog/service');
 
 function getClientId(req, res) {
   const header = String(req.headers.authorization || '');
@@ -27,7 +28,10 @@ async function create(req, res) {
   const branchId = String(body.branch_id || '').trim();
   const persons = Array.isArray(body.persons) ? body.persons : [];
   const requestId = String(body.request_id || req.get('Idempotency-Key') || '').trim() || null;
-  if (!branchId || persons.length < 1 || persons.length > 4) {
+  if (persons.length > 4) {
+    return res.status(400).json({ error: 'TOO_MANY_PERSONS' });
+  }
+  if (!branchId || persons.length < 1) {
     return res.status(400).json({ error: 'branch_id and 1 to 4 persons are required' });
   }
 
@@ -36,11 +40,15 @@ async function create(req, res) {
     barberId: String(person?.barber_id || '').trim(),
     serviceIds: Array.isArray(person?.service_ids) ? person.service_ids.map(String).filter(Boolean) : [],
   }));
-  if (normalizedPersons.some((person) => !person.barberId || person.serviceIds.length < 1 || person.serviceIds.length > 3)) {
+  if (normalizedPersons.some((person) => person.serviceIds.length > 3)) {
+    return res.status(400).json({ error: 'TOO_MANY_SERVICES' });
+  }
+  if (normalizedPersons.some((person) => !person.barberId || person.serviceIds.length < 1)) {
     return res.status(400).json({ error: 'Each person needs a barber and 1 to 3 services' });
   }
 
   const allServiceIds = [...new Set(normalizedPersons.flatMap((person) => person.serviceIds))];
+  const payloadHash = require('crypto').createHash('sha256').update(JSON.stringify(body)).digest('hex');
   const dbClient = await pool.connect();
   try {
     await dbClient.query('BEGIN');
@@ -60,10 +68,14 @@ async function create(req, res) {
 
     if (requestId) {
       const prior = await dbClient.query(
-        `select id, status, response from marketplace_idempotency_requests
+        `select id, status, response, payload_hash from marketplace_idempotency_requests
           where request_id = $1 and marketplace_client_id = $2 for update`,
         [requestId, marketplaceClientId]
       );
+      if (prior.rows[0]?.payload_hash && prior.rows[0].payload_hash !== payloadHash) {
+        await dbClient.query('ROLLBACK');
+        return res.status(409).json({ error: 'IDEMPOTENCY_KEY_REUSED' });
+      }
       if (prior.rows[0]?.response) {
         await dbClient.query('ROLLBACK');
         return res.status(Number(prior.rows[0].status || 201)).json(prior.rows[0].response);
@@ -76,18 +88,23 @@ async function create(req, res) {
         await dbClient.query(
           `insert into marketplace_idempotency_requests (request_id, marketplace_client_id, operation, payload_hash)
            values ($1, $2, 'GROUP_BOOKING', $3)`,
-          [requestId, marketplaceClientId, require('crypto').createHash('sha256').update(JSON.stringify(body)).digest('hex')]
+          [requestId, marketplaceClientId, payloadHash]
         );
       }
     }
+
+    const branchResult = await dbClient.query('select id, timezone, work_hours, marketplace_barbershop_id, is_active from branches where id = $1', [branchId]);
+    if (!branchResult.rows[0] || branchResult.rows[0].is_active === false) { await dbClient.query('ROLLBACK'); return res.status(404).json({ error: 'Branch not found' }); }
 
     const limitsResult = await dbClient.query(`select value from platform_settings where key = 'booking_limits'`);
     const limits = limitsResult.rows[0]?.value || {};
     const dailyLimit = Number(limits.max_daily_bookings || 5);
     const dailyCount = await dbClient.query(
       `select count(*)::int as count from marketplace_bookings
-        where marketplace_client_id = $1 and created_at >= current_date and status <> 'CANCELLED'`,
-      [marketplaceClientId]
+        where marketplace_client_id = $1
+          and (created_at at time zone coalesce($2, 'Asia/Tashkent'))::date =
+              (now() at time zone coalesce($2, 'Asia/Tashkent'))::date`,
+      [marketplaceClientId, branchResult.rows[0].timezone || 'Asia/Tashkent']
     );
     if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
       await dbClient.query('ROLLBACK');
@@ -103,8 +120,15 @@ async function create(req, res) {
       return res.status(429).json({ error: 'CANCEL_COOLDOWN_ACTIVE', cooldown_until: cooldown.rows[0].cooldown_until });
     }
 
-    const branchResult = await dbClient.query('select id, timezone, is_active from branches where id = $1', [branchId]);
-    if (!branchResult.rows[0] || branchResult.rows[0].is_active === false) { await dbClient.query('ROLLBACK'); return res.status(404).json({ error: 'Branch not found' }); }
+    if (branchResult.rows[0].marketplace_barbershop_id) {
+      await dbClient.query(
+        `insert into client_barbershop_origins (marketplace_client_id, barbershop_id)
+         values ($1, $2)
+         on conflict (marketplace_client_id, barbershop_id) do update set
+           last_booking_at = now(), booking_count = client_barbershop_origins.booking_count + 1, updated_at = now()`,
+        [marketplaceClientId, branchResult.rows[0].marketplace_barbershop_id]
+      );
+    }
 
     const barbersResult = await dbClient.query(
       `select id from barbers where id = any($1::uuid[]) and branch_id = $2 and is_active = true and is_archived = false`,
@@ -116,10 +140,28 @@ async function create(req, res) {
       `select id, duration_minutes, base_price from services where id = any($1::uuid[]) and is_active = true and (branch_id is null or branch_id = $2)`,
       [allServiceIds, branchId]
     );
-    if (servicesResult.rows.length !== allServiceIds.length) { await dbClient.query('ROLLBACK'); return res.status(400).json({ error: 'One or more services are not available for this branch' }); }
+    if (servicesResult.rows.length !== allServiceIds.length) { await dbClient.query('ROLLBACK'); return res.status(400).json({ error: 'SERVICE_NOT_AVAILABLE_TODAY' }); }
     const serviceById = new Map(servicesResult.rows.map((service) => [String(service.id), service]));
     const totalMinutes = normalizedPersons.reduce((sum, person) => sum + person.serviceIds.reduce((inner, serviceId) => inner + Number(serviceById.get(serviceId).duration_minutes || 0), 0), 0);
     if (totalMinutes > Number(limits.max_duration_minutes || 180)) { await dbClient.query('ROLLBACK'); return res.status(400).json({ error: 'DURATION_EXCEEDED' }); }
+
+    try {
+      for (const person of normalizedPersons) {
+        const personDuration = person.serviceIds.reduce(
+          (sum, serviceId) => sum + Number(serviceById.get(serviceId).duration_minutes || 0),
+          0,
+        );
+        await catalogService.ensureBookingWithinWorkHours({
+          branch: branchResult.rows[0],
+          barberId: person.barberId,
+          startsAt: new Date(),
+          durationMinutes: personDuration,
+        });
+      }
+    } catch (hoursError) {
+      await dbClient.query('ROLLBACK');
+      return res.status(hoursError.statusCode || 400).json({ error: hoursError.code || hoursError.message });
+    }
 
     const bookingResult = await dbClient.query(
       `insert into marketplace_bookings (marketplace_client_id, source, status, request_id)
@@ -174,6 +216,16 @@ async function create(req, res) {
       [marketplaceClientId, booking.id, requestId, JSON.stringify({ persons: normalizedPersons.length, total_minutes: totalMinutes })]
     );
     await dbClient.query('COMMIT');
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`branch:${branchId}`).emit('booking.created', {
+        type: 'booking_created',
+        bookingId: booking.id,
+        branchId,
+        source: 'MARKETPLACE',
+        queueEntryIds: createdPersons.map((person) => person.queue_entry?.id).filter(Boolean),
+      });
+    }
     return res.status(201).json(response);
   } catch (error) {
     try { await dbClient.query('ROLLBACK'); } catch (_) { /* ignore */ }

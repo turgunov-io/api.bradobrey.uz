@@ -208,6 +208,34 @@ class PromoCodes {
 
     if (error) return res.status(500).json({ error: error.message });
 
+    // Marketplace-scoped promotions are delivered only to clients who have
+    // previously interacted with that barbershop.  The notification is
+    // best-effort so legacy installations without the marketplace tables can
+    // continue creating promo codes normally.
+    if (data?.marketplace_barbershop_id) {
+      try {
+        const { data: origins, error: originsError } = await db
+          .from('client_barbershop_origins')
+          .select('marketplace_client_id')
+          .eq('barbershop_id', data.marketplace_barbershop_id);
+        if (!originsError && Array.isArray(origins) && origins.length) {
+          const clientIds = [...new Set(origins.map((row) => row.marketplace_client_id).filter(Boolean))];
+          const notifications = clientIds.map((marketplaceClientId) => ({
+            marketplace_client_id: marketplaceClientId,
+            type: 'PROMO_FROM_SHOP',
+            payload: {
+              promo_code_id: data.id,
+              promo_code: data.code,
+              barbershop_id: data.marketplace_barbershop_id,
+            },
+          }));
+          await db.from('marketplace_notifications').insert(notifications);
+        }
+      } catch (notificationError) {
+        console.warn('Marketplace promo notification skipped:', notificationError.message);
+      }
+    }
+
     return res.status(201).json({
       promo_code: data,
       message: 'Promo code created',

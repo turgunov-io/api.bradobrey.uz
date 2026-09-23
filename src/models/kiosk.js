@@ -1,6 +1,7 @@
 const { db } = require("../config/postgres");
 const { toAbsolutePublicUrl } = require("../config/uploads");
 const jwt = require("jsonwebtoken");
+const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 
 const {
     applyPromoDiscount,
@@ -51,9 +52,8 @@ const parseOptionalMoney = (value) => {
 };
 
 const getZonedDateString = (date, timeZone) => {
-    const tz = timeZone || DEFAULT_TIMEZONE;
     const formatter = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz,
+        timeZone: timeZone || DEFAULT_TIMEZONE,
         year: 'numeric',
         month: '2-digit',
         day: '2-digit',
@@ -829,7 +829,8 @@ class Kiosk {
                 .from('marketplace_bookings')
                 .select('id, cooldown_until')
                 .eq('marketplace_client_id', marketplaceClient.id)
-                .gte('created_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString())
+                .gte('created_at', zonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
+                .lt('created_at', nextZonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
                 .order('created_at', { ascending: false });
             if (recentBookingsError) return res.status(500).json({ error: recentBookingsError.message });
             if ((recentBookings || []).length >= 5) return res.status(429).json({ error: 'DAILY_LIMIT_REACHED' });
@@ -854,7 +855,7 @@ class Kiosk {
 
             if (cashbackSpendAmount > cashbackWalletBalance) {
                 return res.status(409).json({
-                    error: 'Insufficient cashback balance',
+                    error: 'INSUFFICIENT_BALANCE',
                     reason: 'insufficient_balance',
                     balance: cashbackWalletBalance,
                     requested_amount: cashbackSpendAmount,
@@ -1070,6 +1071,17 @@ class Kiosk {
 
         let marketplaceBooking = null;
         if (marketplaceClient?.id) {
+            if (branch?.marketplace_barbershop_id) {
+                const { error: originError } = await db.from('client_barbershop_origins').upsert({
+                    marketplace_client_id: marketplaceClient.id,
+                    barbershop_id: branch.marketplace_barbershop_id,
+                    last_booking_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                }, { onConflict: 'marketplace_client_id,barbershop_id' });
+                if (originError && !isMissingColumnError(originError, 'client_barbershop_origins')) {
+                    return res.status(500).json({ error: originError.message });
+                }
+            }
             const { data: createdBooking, error: bookingError } = await db
                 .from('marketplace_bookings')
                 .insert({
@@ -1088,6 +1100,16 @@ class Kiosk {
                 return res.status(500).json({ error: bookingError?.message || 'Failed to create marketplace booking' });
             }
             marketplaceBooking = createdBooking;
+            const bookingIo = req.app.get('io');
+            if (bookingIo && branch_id) {
+                bookingIo.to(`branch:${branch_id}`).emit('booking.created', {
+                    type: 'booking_created',
+                    bookingId: createdBooking.id,
+                    branchId: branch_id,
+                    source: 'MARKETPLACE',
+                    queueEntryIds: [entry.id],
+                });
+            }
             await db.from('marketplace_notifications').insert({
                 marketplace_client_id: marketplaceClient.id,
                 type: 'BOOKING_CREATED',
@@ -1121,6 +1143,24 @@ class Kiosk {
                 await db.from('marketplace_bookings').delete().eq('id', createdBooking.id);
                 await db.from('queue_entries').delete().eq('id', entry.id);
                 return res.status(500).json({ error: personServicesError.message });
+            }
+            const { error: marketplaceAuditError } = await db.from('marketplace_audit_logs').insert({
+                marketplace_client_id: marketplaceClient.id,
+                action: 'BOOKING_CREATED',
+                entity_type: 'marketplace_booking',
+                entity_id: createdBooking.id,
+                request_id: normalizedIdempotencyKey,
+                metadata: {
+                    source: 'KIOSK_ENDPOINT',
+                    queue_entry_id: entry.id,
+                    person_count: 1,
+                    service_count: services.length,
+                },
+            });
+            if (marketplaceAuditError && !isMissingColumnError(marketplaceAuditError, 'request_id')) {
+                await db.from('marketplace_bookings').delete().eq('id', createdBooking.id);
+                await db.from('queue_entries').delete().eq('id', entry.id);
+                return res.status(500).json({ error: marketplaceAuditError.message });
             }
         }
 
@@ -1171,7 +1211,7 @@ class Kiosk {
                     return res.status(status).json({
                         error:
                             spendRes?.reason === 'insufficient_balance'
-                                ? 'Insufficient cashback balance'
+                                ? 'INSUFFICIENT_BALANCE'
                                 : 'Failed to spend cashback',
                         reason: spendRes?.reason || null,
                         balance: spendRes?.balance ?? cashbackWalletBalance,
@@ -1442,10 +1482,17 @@ class Kiosk {
 
         const io = req.app.get('io');
         if (io && cancelled.branch_id) {
-            io.to(`branch:${cancelled.branch_id}`).emit('queue:update', {
+            const payload = {
                 type: 'queue_cancelled',
                 entry: cancelled,
-            });
+            };
+            const room = io.to(`branch:${cancelled.branch_id}`);
+            room.emit('queue:update', payload);
+            room.emit('booking.cancelled', {
+                type: 'booking_cancelled',
+                branchId: cancelled.branch_id,
+                queueEntryIds: [cancelled.id],
+              });
         }
 
         return res.json({ cancelled: true, entry: cancelled });

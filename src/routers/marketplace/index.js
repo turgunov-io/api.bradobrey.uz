@@ -6,6 +6,7 @@ const profileRouter = require('./profile');
 const barbershopsRouter = require('./barbershops');
 const catalogRouter = require('./catalog');
 const complianceRouter = require('./compliance');
+const adminRouter = require('./admin');
 
 const marketplaceRouter = express.Router();
 
@@ -16,5 +17,6 @@ marketplaceRouter.use('/profile', profileRouter);
 marketplaceRouter.use('/banners', bannerRouter);
 marketplaceRouter.use('/barbershops', barbershopsRouter);
 marketplaceRouter.use('/compliance', complianceRouter);
+marketplaceRouter.use('/admin', adminRouter);
 
 module.exports = marketplaceRouter;

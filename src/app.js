@@ -24,10 +24,18 @@ const warehouse = require('./routers/warehouse');
 const expenses = require('./routers/expenses');
 const penalties = require('./routers/penalties');
 const notifications = require('./routers/notifications');
+const cashbackSettlements = require('./routers/cashbackSettlements');
 const { ensureNotificationsTable } = require('./models/notifications');
 const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
+const { securityHeaders } = require('./middleware/securityHeaders');
 
 const app = express();
+
+// Only trust forwarded client IP headers when the deployment explicitly sits
+// behind a known reverse proxy. This keeps OTP/fraud/rate-limit identity data
+// from being spoofed by arbitrary clients in direct deployments.
+if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
+app.use(securityHeaders);
 
 // Keep the notification module self-initializing on deployments where SQL files
 // are not applied automatically. This is idempotent and does not affect orders.
@@ -35,16 +43,18 @@ ensureNotificationsTable().catch((error) => {
   console.error('Failed to initialize notifications table:', error.message);
 });
 
-const extraOrigins = ['https://gleaming-manatee-c42221.netlify.app'];
-
 const envOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
-  : '*';
+  : [];
+
+if (process.env.NODE_ENV === 'production' && envOrigins.length === 0) {
+  throw new Error('CORS_ORIGIN must be configured explicitly in production');
+}
 
 const corsOrigin =
-  envOrigins === '*'
+  envOrigins.length === 0
     ? '*'
-    : Array.from(new Set([...(envOrigins || []), ...extraOrigins]));
+    : Array.from(new Set(envOrigins));
 
 app.set('corsOrigin', corsOrigin);
 
@@ -85,6 +95,7 @@ app.use('/api/warehouse', warehouse);
 app.use('/api/expenses', expenses);
 app.use('/api/penalties', penalties);
 app.use('/api/notifications', notifications);
+app.use('/api/finance/cashback-settlements', cashbackSettlements);
 app.use('/api/merchant', merchant);
 
 app.get('/today/date/', (req, res) => {

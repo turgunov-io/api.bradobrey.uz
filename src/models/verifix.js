@@ -35,6 +35,32 @@ const normalizeId = (value) => {
   return text || null;
 };
 
+const enqueueBarberReadyNotifications = async ({ branchId, barberId, activityEventId }) => {
+  if (!branchId || !barberId || !activityEventId) return;
+  await pool.query(
+    `insert into marketplace_notifications (marketplace_client_id, type, payload)
+     select mc.id, 'BARBER_READY', jsonb_build_object(
+              'activity_event_id', $3::text,
+              'queue_entry_id', q.id,
+              'branch_id', q.branch_id,
+              'barber_id', q.barber_id
+            )
+       from queue_entries q
+       join clients c on c.id = q.client_id
+       join marketplace_clients mc on mc.phone = c.phone
+      where q.branch_id = $1
+        and q.barber_id = $2
+        and q.status in ('waiting', 'called', 'swapped')
+        and not exists (
+          select 1 from marketplace_notifications n
+           where n.marketplace_client_id = mc.id
+             and n.type = 'BARBER_READY'
+             and n.payload ->> 'activity_event_id' = $3::text
+        )`,
+    [branchId, barberId, activityEventId],
+  );
+};
+
 const parseBoolean = (value, fallback = undefined) => {
   if (value === undefined) return fallback;
   if (typeof value === 'boolean') return value;
@@ -372,14 +398,38 @@ async function recordActivityEvent({
 
   if (error) throw new Error(error.message);
 
+  if (data?.id && ['shift_start', 'break_end'].includes(data.event_type)) {
+    try {
+      await enqueueBarberReadyNotifications({
+        branchId: data.branch_id,
+        barberId: data.barber_id,
+        activityEventId: data.id,
+      });
+    } catch (notificationError) {
+      // Push/inbox delivery must not make Verifix activity recording fail.
+      console.error('marketplace barber-ready notification failed:', notificationError.message);
+    }
+  }
+
   if (io && data?.branch_id) {
-    io.to(`branch:${data.branch_id}`).emit('queue:update', {
+    const payload = {
       type: 'verifix_activity',
       branchId: data.branch_id,
       barberId: data.barber_id,
       eventType: data.event_type,
       isLate: data.is_late,
-    });
+    };
+    const room = io.to(`branch:${data.branch_id}`);
+    // Keep the generic event for old kiosk clients and expose the explicit
+    // WebSocket contract required by the marketplace client.
+    room.emit('queue:update', payload);
+    const semanticEvent = {
+      shift_start: 'barber.shift_started',
+      shift_end: 'barber.shift_ended',
+      break_start: 'barber.break_started',
+      break_end: 'barber.break_ended',
+    }[data.event_type];
+    if (semanticEvent) room.emit(semanticEvent, payload);
   }
 
   return data;

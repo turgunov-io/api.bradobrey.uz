@@ -29,6 +29,24 @@ const normalizeOtpCode = (codeInput) => {
 
 const shouldReturnOtpInResponse = () => process.env.OTP_DEBUG_RETURN_CODE === 'true';
 
+const writeAuthAudit = async ({ clientId = null, action, req, metadata = {} }) => {
+  try {
+    await db.from('marketplace_audit_logs').insert({
+      marketplace_client_id: clientId,
+      action,
+      entity_type: 'marketplace_auth',
+      request_id: String(req.get('Idempotency-Key') || '').trim() || null,
+      metadata: {
+        ...metadata,
+        ip: req.ip || null,
+        user_agent: String(req.get('user-agent') || '').slice(0, 512) || null,
+      },
+    });
+  } catch (auditError) {
+    console.error('[marketplace-auth] audit write failed', auditError.message);
+  }
+};
+
 const signMarketplaceToken = ({ id, email = null, phone = null }) => {
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
@@ -202,7 +220,7 @@ class MarketplaceAuth {
         `insert into marketplace_clients (phone, display_name, is_active)
          values ($1, $2, true)
          on conflict (phone) where phone is not null do update set display_name = coalesce(excluded.display_name, marketplace_clients.display_name), last_login_at = now()
-         returning id, phone, display_name, is_active`,
+         returning id, phone, display_name, is_active, (xmax = 0) as created_new`,
         [phone, displayName]
       );
       const account = accountResult.rows[0];
@@ -210,9 +228,9 @@ class MarketplaceAuth {
         await client.query('ROLLBACK');
         return res.status(403).json({ error: 'Account is disabled' });
       }
-      if (otpResult.rows[0].referral_code) {
+      if (otpResult.rows[0].referral_code && account.created_new === true) {
         const referral = await client.query(
-          `select marketplace_client_id, referral_code from referral_accounts where referral_code = $1`,
+          `select marketplace_client_id, referral_code from referral_accounts where referral_code = $1 for update`,
           [String(otpResult.rows[0].referral_code).trim().toUpperCase()]
         );
         if (!referral.rows[0] || referral.rows[0].marketplace_client_id === account.id) {
@@ -223,9 +241,11 @@ class MarketplaceAuth {
           `select value from platform_settings where key = 'referral'`
         );
         const dailyLimit = Number(referralSettings.rows[0]?.value?.daily_limit || 10);
+        const expiryDays = Math.max(1, Number(referralSettings.rows[0]?.value?.expiry_days || 365));
         const dailyCount = await client.query(
           `select count(*)::int as count from referrals
-            where referrer_client_id = $1 and created_at >= current_date`,
+            where referrer_client_id = $1
+              and (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date`,
           [referral.rows[0].marketplace_client_id]
         );
         if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
@@ -236,7 +256,7 @@ class MarketplaceAuth {
         const deviceId = otpResult.rows[0].device_id || null;
         const sourceCount = await client.query(
           `select count(*)::int as count from referrals
-            where created_at >= current_date
+            where (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date
               and (($1::inet is not null and source_ip = $1::inet)
                 or ($2::text is not null and device_id = $2::text))`,
           [sourceIp, deviceId]
@@ -250,9 +270,9 @@ class MarketplaceAuth {
         }
         await client.query(
           `insert into referrals (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
-           values ($1, $2, $3, now() + interval '365 days', $4::inet, $5)
+           values ($1, $2, $3, now() + ($4::text || ' days')::interval, $5::inet, $6)
            on conflict (referred_client_id) do nothing`,
-          [referral.rows[0].marketplace_client_id, account.id, referral.rows[0].referral_code, sourceIp, deviceId]
+          [referral.rows[0].marketplace_client_id, account.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId]
         );
       }
       await client.query('update otp_codes set used = true where id = $1', [otpResult.rows[0].id]);
@@ -260,7 +280,12 @@ class MarketplaceAuth {
 
       return res.json({
         token: signMarketplaceToken({ id: account.id, phone: account.phone }),
-        client: account,
+        client: {
+          id: account.id,
+          phone: account.phone,
+          display_name: account.display_name,
+          is_active: account.is_active,
+        },
       });
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
@@ -495,15 +520,18 @@ class MarketplaceAuth {
       }
 
       if (!client || !client.password_hash) {
+        await writeAuthAudit({ action: 'LOGIN_FAILED', req, metadata: { reason: 'INVALID_CREDENTIALS', email } });
         return res.status(400).json({ error: 'Invalid credentials' });
       }
 
       if (client.is_active === false) {
+        await writeAuthAudit({ clientId: client.id, action: 'LOGIN_FAILED', req, metadata: { reason: 'ACCOUNT_DISABLED' } });
         return res.status(403).json({ error: 'Account is disabled' });
       }
 
       const passwordCheck = bcrypto.compareSync(password, client.password_hash);
       if (!passwordCheck) {
+        await writeAuthAudit({ clientId: client.id, action: 'LOGIN_FAILED', req, metadata: { reason: 'INVALID_CREDENTIALS' } });
         return res.status(400).json({ error: 'Invalid credentials' });
       }
 

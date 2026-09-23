@@ -6,6 +6,8 @@ const {
   normalizeText,
 } = require('./helpers');
 
+const STALE_QUEUE_HOURS = 9;
+
 const serviceIdsForEntry = (entry = {}) => (
   Array.isArray(entry.service_ids) && entry.service_ids.length
     ? entry.service_ids.filter(Boolean)
@@ -78,7 +80,13 @@ const getBranchOperationalBarbers = async (branchId) => {
 
   if (queueError) throw queueError;
 
-  const activeQueues = (queues || []).filter((entry) => allowedBarberIds.has(entry?.barber_id));
+  const cutoffDate = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000);
+  const activeQueues = (queues || []).filter((entry) => {
+    if (!allowedBarberIds.has(entry?.barber_id)) return false;
+    if (!entry?.created_at) return true;
+    if (!['waiting', 'called', 'swapped'].includes(entry.status)) return true;
+    return new Date(entry.created_at) >= cutoffDate;
+  });
 
   const serviceIds = Array.from(new Set(
     activeQueues.flatMap((entry) => (

@@ -158,12 +158,20 @@ class MarketplaceCatalogController {
         source: 'site',
       };
 
-      // Same-day enforcement (only when client provided a concrete slot)
-      if (req.body.scheduled_start_at) {
-        const quote = await service.quoteBooking(req.body);
-        const startsAt = new Date(req.body.scheduled_start_at);
-        service.ensureSameDay({ startsAt, branchTimezone: quote?.branch?.timezone });
-      }
+      const quote = await service.quoteBooking(req.body);
+      const startsAt = req.body.scheduled_start_at
+        ? new Date(req.body.scheduled_start_at)
+        : new Date();
+      service.ensureSameDay({ startsAt, branchTimezone: quote?.branch?.timezone });
+      await service.ensureBookingWithinWorkHours({
+        branch: quote.branch,
+        barberId: req.body.barber_id,
+        startsAt,
+        durationMinutes: (quote.services || []).reduce(
+          (sum, item) => sum + Number(item?.duration_minutes || 0),
+          0,
+        ),
+      });
 
       return kiosk.book(req, res);
     } catch (error) {

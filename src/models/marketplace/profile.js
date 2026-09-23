@@ -95,6 +95,37 @@ async function fetchRankSettings() {
   }
 }
 
+async function fetchStatusLoyalty(statusPoints) {
+  const points = Math.max(0, Number(statusPoints) || 0);
+  const { data, error } = await db
+    .from('platform_settings')
+    .select('value')
+    .eq('key', 'loyalty_levels')
+    .maybeSingle();
+  if (error || !data?.value || typeof data.value !== 'object') {
+    return {
+      name: 'NONE',
+      min_points: 0,
+      cashback_percent: 0,
+      next_level: null,
+    };
+  }
+
+  const levels = Object.entries(data.value)
+    .filter(([, value]) => value && typeof value === 'object')
+    .map(([name, value]) => ({
+      name,
+      min_points: Math.max(0, Number(value.min_points) || 0),
+      cashback_percent: Math.max(0, Number(value.cashback_percent) || 0),
+    }))
+    .sort((left, right) => left.min_points - right.min_points);
+  const current = levels.filter((level) => points >= level.min_points).at(-1)
+    || levels[0]
+    || { name: 'NONE', min_points: 0, cashback_percent: 0 };
+  const next = levels.find((level) => level.min_points > points) || null;
+  return { ...current, status_points: points, next_level: next };
+}
+
 class MarketplaceProfile {
   async _auth(req, res) {
     const token = getBearerToken(req);
@@ -152,6 +183,8 @@ class MarketplaceProfile {
       if (!auth) return;
 
       const rankSettings = await fetchRankSettings();
+      const statusPoints = Number(auth.client.status_points || 0);
+      const statusLoyalty = await fetchStatusLoyalty(statusPoints);
       let cashback_balance = null;
       let loyalty = null;
       if (auth.client.phone) {
@@ -168,8 +201,11 @@ class MarketplaceProfile {
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
         if (linked?.id) {
           loyalty = {
-            rank: linked.rank || 'guest',
+            rank: statusLoyalty.name,
             completed_visits: Number(linked.completed_visits || 0),
+            status_points: statusPoints,
+            cashback_percent: statusLoyalty.cashback_percent,
+            legacy_rank: linked.rank || 'guest',
           };
         }
       }
@@ -182,6 +218,7 @@ class MarketplaceProfile {
           referral_bonus_balance: Number(auth.client.referral_bonus_balance || 0),
           blocked_until: auth.client.blocked_until || null,
           loyalty,
+          status_loyalty: statusLoyalty,
           loyalty_settings: rankSettings,
         },
       });
@@ -301,6 +338,8 @@ class MarketplaceProfile {
       }
 
       const rankSettings = await fetchRankSettings();
+      const statusPoints = Number(updated?.status_points || 0);
+      const statusLoyalty = await fetchStatusLoyalty(statusPoints);
       let cashback_balance = null;
       let loyalty = null;
       if (updated?.phone) {
@@ -317,8 +356,11 @@ class MarketplaceProfile {
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
         if (linked?.id) {
           loyalty = {
-            rank: linked.rank || 'guest',
+            rank: statusLoyalty.name,
             completed_visits: Number(linked.completed_visits || 0),
+            status_points: statusPoints,
+            cashback_percent: statusLoyalty.cashback_percent,
+            legacy_rank: linked.rank || 'guest',
           };
         }
       }
@@ -327,6 +369,7 @@ class MarketplaceProfile {
         profile: {
           ...formatProfile(updated, { cashback_balance }),
           loyalty,
+          status_loyalty: statusLoyalty,
           loyalty_settings: rankSettings,
         },
       });

@@ -4,6 +4,9 @@ const { Server } = require('socket.io');
 require('dotenv').config();
 const app = require('./app');
 const { startQueueAutoCloseScheduler, stopQueueAutoCloseScheduler } = require('./jobs/autoCloseQueue');
+const { startMarketplaceNotificationDispatcher } = require('./services/marketplacePush');
+const { startCashbackReconciliationScheduler } = require('./services/cashbackReconciliation');
+const { startReferralBonusScheduler } = require('./services/referralBonus');
 const server = http.createServer(app);
 
 const corsOrigin = app.get('corsOrigin') || '*';
@@ -16,6 +19,9 @@ const isSafeBranchId = (value) => /^[0-9a-f-]{20,64}$/i.test(String(value || '')
 
 app.set('io', io);
 startQueueAutoCloseScheduler({ io });
+const stopMarketplaceNotificationDispatcher = startMarketplaceNotificationDispatcher();
+const stopCashbackReconciliationScheduler = startCashbackReconciliationScheduler();
+const stopReferralBonusScheduler = startReferralBonusScheduler();
 
 io.on('connection', (socket) => {
   const branchId = String(socket.handshake.query.branchId || '');
@@ -46,5 +52,15 @@ server.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
 });
 
-process.on('SIGTERM', stopQueueAutoCloseScheduler);
-process.on('SIGINT', stopQueueAutoCloseScheduler);
+process.on('SIGTERM', () => {
+  stopQueueAutoCloseScheduler();
+  stopMarketplaceNotificationDispatcher();
+  stopCashbackReconciliationScheduler();
+  stopReferralBonusScheduler();
+});
+process.on('SIGINT', () => {
+  stopQueueAutoCloseScheduler();
+  stopMarketplaceNotificationDispatcher();
+  stopCashbackReconciliationScheduler();
+  stopReferralBonusScheduler();
+});

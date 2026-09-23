@@ -428,6 +428,58 @@ const ensureSameDay = ({ startsAt, branchTimezone }) => {
   }
 };
 
+const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durationMinutes }) => {
+  const timezone = branch?.timezone || DEFAULT_TIMEZONE;
+  const start = startsAt instanceof Date ? startsAt : new Date(startsAt || Date.now());
+  if (Number.isNaN(start.getTime())) {
+    const err = new Error('Invalid booking start time');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const localDate = getZonedDateString(start, timezone);
+  const weekday = getZonedWeekdayIndex(start, timezone);
+  const { data: schedule, error: scheduleError } = await repo.fetchBranchScheduleForDay({
+    branchId: branch.id,
+    dayOfWeek: weekday,
+    barberId,
+    localDate,
+  });
+  if (scheduleError && !isMissingRelationError(scheduleError, 'barber_work_schedules')) {
+    throw scheduleError;
+  }
+
+  const fallback = extractWorkHoursForDay({ workHours: branch.work_hours, dayOfWeek: weekday });
+  const startHHMM = parseTimeToHHMM(schedule?.start_time) || fallback?.start || null;
+  const endHHMM = parseTimeToHHMM(schedule?.end_time) || fallback?.end || null;
+  // A branch without configured hours is handled by the existing operational
+  // flow; once hours are configured, booking must fit inside that window.
+  if (!startHHMM || !endHHMM) return;
+
+  const scheduleStart = zonedDateTimeToUtc({ dateStr: localDate, timeStr: startHHMM, timeZone: timezone });
+  let scheduleEnd = zonedDateTimeToUtc({ dateStr: localDate, timeStr: endHHMM, timeZone: timezone });
+  if (!scheduleStart || !scheduleEnd) {
+    const err = new Error('Invalid work schedule time');
+    err.statusCode = 500;
+    throw err;
+  }
+  if (scheduleEnd <= scheduleStart) {
+    scheduleEnd = zonedDateTimeToUtc({
+      dateStr: addDaysToDateString(localDate, 1),
+      timeStr: endHHMM,
+      timeZone: timezone,
+    });
+  }
+
+  const end = new Date(start.getTime() + Math.max(1, Number(durationMinutes || 0)) * 60 * 1000);
+  if (start < scheduleStart || end > scheduleEnd) {
+    const err = new Error('SERVICE_NOT_AVAILABLE_TODAY');
+    err.statusCode = 400;
+    err.code = 'SERVICE_NOT_AVAILABLE_TODAY';
+    throw err;
+  }
+};
+
 const listAvailability = async ({ branchId, barberId, serviceIds, date }) => {
   const branch = await getBranchOrThrow(branchId);
   const timezone = branch.timezone || DEFAULT_TIMEZONE;
@@ -575,5 +627,6 @@ module.exports = {
   getPaymentOptions,
   quoteBooking,
   ensureSameDay,
+  ensureBookingWithinWorkHours,
   listAvailability,
 };

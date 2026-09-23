@@ -54,6 +54,22 @@ create table if not exists marketplace_booking_person_services (
   primary key (person_id, service_id)
 );
 
+-- Keeps the first/last marketplace interaction of a client with each
+-- barbershop without duplicating the global client account.
+create table if not exists client_barbershop_origins (
+  marketplace_client_id uuid not null references marketplace_clients(id) on delete cascade,
+  barbershop_id uuid not null references marketplace_barbershops(id) on delete cascade,
+  first_booking_at timestamptz not null default now(),
+  last_booking_at timestamptz not null default now(),
+  booking_count integer not null default 1 check (booking_count >= 0),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (marketplace_client_id, barbershop_id)
+);
+
+create index if not exists client_barbershop_origins_barbershop_idx
+  on client_barbershop_origins (barbershop_id, last_booking_at desc);
+
 create index if not exists marketplace_booking_persons_booking_idx
   on marketplace_booking_persons (booking_id);
 
@@ -157,6 +173,19 @@ create table if not exists marketplace_fraud_alerts (
 create index if not exists marketplace_fraud_alerts_created_idx
   on marketplace_fraud_alerts (created_at desc);
 
+alter table marketplace_fraud_alerts add column if not exists status text not null default 'OPEN';
+alter table marketplace_fraud_alerts add column if not exists reviewed_at timestamptz;
+alter table marketplace_fraud_alerts add column if not exists reviewed_by text;
+do $$
+begin
+  alter table marketplace_fraud_alerts
+    add constraint marketplace_fraud_alerts_status_check
+    check (status in ('OPEN', 'REVIEWED', 'DISMISSED'));
+exception when duplicate_object then null;
+end $$;
+create index if not exists marketplace_fraud_alerts_status_idx
+  on marketplace_fraud_alerts (status, created_at desc);
+
 create table if not exists marketplace_idempotency_requests (
   request_id text primary key,
   marketplace_client_id uuid references marketplace_clients(id) on delete set null,
@@ -178,9 +207,130 @@ create table if not exists marketplace_notifications (
 );
 
 alter table marketplace_notifications add column if not exists read_at timestamptz;
+alter table marketplace_notifications add column if not exists push_claimed_at timestamptz;
+alter table marketplace_notifications add column if not exists push_attempts integer not null default 0;
 
 create index if not exists marketplace_notifications_client_created_idx
   on marketplace_notifications (marketplace_client_id, created_at desc);
+
+create or replace function notify_marketplace_queue_status()
+returns trigger
+language plpgsql
+as $$
+declare
+  marketplace_id uuid;
+  notification_type text;
+  affected record;
+  affected_marketplace_id uuid;
+begin
+  if coalesce(new.source, '') <> 'site' or (tg_op = 'UPDATE' and old.status = new.status) then
+    return new;
+  end if;
+
+  notification_type := case new.status
+    when 'waiting' then 'QUEUE_POSITION_CHANGED'
+    when 'swapped' then 'QUEUE_POSITION_CHANGED'
+    when 'called' then 'YOU_ARE_CALLED'
+    when 'in_progress' then 'SERVICE_STARTED'
+    when 'completed' then 'SERVICE_COMPLETED'
+    when 'no_show' then 'NO_SHOW_PENALTY'
+    else null
+  end;
+  if notification_type is null then return new; end if;
+
+  select mc.id into marketplace_id
+    from marketplace_clients mc
+    join clients c on c.phone = mc.phone
+   where c.id = new.client_id
+   limit 1;
+  if marketplace_id is null then return new; end if;
+
+  insert into marketplace_notifications (marketplace_client_id, type, payload)
+  select marketplace_id, notification_type, jsonb_build_object(
+    'queue_entry_id', new.id,
+    'status', new.status,
+    'branch_id', new.branch_id,
+    'barber_id', new.barber_id
+  )
+   where notification_type <> 'QUEUE_POSITION_CHANGED'
+      or (select count(*) from marketplace_notifications n
+           where n.marketplace_client_id = marketplace_id
+             and n.type = 'QUEUE_POSITION_CHANGED'
+           and n.payload ->> 'queue_entry_id' = new.id::text) < 3;
+
+  -- Give the client an early warning once their live position reaches the
+  -- first two places.  The unique logical check keeps repeated queue
+  -- recalculations from creating push storms.
+  if new.status in ('waiting', 'swapped') then
+    if (
+      select count(*) + 1
+        from queue_entries q2
+       where q2.barber_id = new.barber_id
+         and q2.status in ('waiting', 'called', 'swapped', 'in_progress')
+         and (q2.created_at < new.created_at or (q2.created_at = new.created_at and q2.id < new.id))
+    ) <= 2 then
+      insert into marketplace_notifications (marketplace_client_id, type, payload)
+      select marketplace_id, 'ALMOST_YOUR_TURN', jsonb_build_object(
+        'queue_entry_id', new.id,
+        'queue_position', (
+          select count(*) + 1
+            from queue_entries q3
+           where q3.barber_id = new.barber_id
+             and q3.status in ('waiting', 'called', 'swapped', 'in_progress')
+             and (q3.created_at < new.created_at or (q3.created_at = new.created_at and q3.id < new.id))
+        ),
+        'branch_id', new.branch_id,
+        'barber_id', new.barber_id
+      )
+       where not exists (
+         select 1 from marketplace_notifications n
+          where n.marketplace_client_id = marketplace_id
+            and n.type = 'ALMOST_YOUR_TURN'
+            and n.payload ->> 'queue_entry_id' = new.id::text
+       );
+    end if;
+  end if;
+
+  -- A status change ahead of other clients changes their position/ETA too.
+  -- Keep this bounded per queue entry to avoid notification storms.
+  if new.status in ('called', 'in_progress', 'completed', 'no_show', 'cancelled') then
+    for affected in
+      select q.id, q.client_id, q.barber_id, q.branch_id
+        from queue_entries q
+       where q.branch_id = new.branch_id
+         and q.barber_id = new.barber_id
+         and q.status in ('waiting', 'swapped')
+         and q.id <> new.id
+    loop
+      select mc.id into affected_marketplace_id
+        from marketplace_clients mc
+        join clients c on c.phone = mc.phone
+       where c.id = affected.client_id
+       limit 1;
+      if affected_marketplace_id is not null and
+         (select count(*) from marketplace_notifications n
+           where n.marketplace_client_id = affected_marketplace_id
+             and n.type = 'QUEUE_POSITION_CHANGED'
+             and n.payload ->> 'queue_entry_id' = affected.id::text) < 3 then
+        insert into marketplace_notifications (marketplace_client_id, type, payload)
+        values (affected_marketplace_id, 'QUEUE_POSITION_CHANGED', jsonb_build_object(
+          'queue_entry_id', affected.id,
+          'status', affected.status,
+          'branch_id', affected.branch_id,
+          'barber_id', affected.barber_id,
+          'cause_entry_id', new.id
+        ));
+      end if;
+    end loop;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists marketplace_queue_status_notification on queue_entries;
+create trigger marketplace_queue_status_notification
+after insert or update of status on queue_entries
+for each row execute function notify_marketplace_queue_status();
 
 create table if not exists marketplace_push_tokens (
   marketplace_client_id uuid not null references marketplace_clients(id) on delete cascade,
@@ -220,6 +370,68 @@ values
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
 on conflict (key) do nothing;
 
+create or replace function marketplace_loyalty_level(points integer)
+returns text
+language sql
+stable
+as $$
+  select coalesce((
+    select level_name
+      from jsonb_each(coalesce((select value from platform_settings where key = 'loyalty_levels'), '{}'::jsonb)) as levels(level_name, config)
+     where coalesce((config ->> 'min_points')::integer, 0) <= coalesce(points, 0)
+     order by coalesce((config ->> 'min_points')::integer, 0) desc
+     limit 1
+  ), 'NONE');
+$$;
+
+-- The cashback ledger is shared with kiosk and must be available before
+-- marketplace completion/referral triggers run.
+alter table cashback_transactions add column if not exists request_id text;
+alter table cashback_transactions add column if not exists reversal_of uuid references cashback_transactions(id) on delete restrict;
+create unique index if not exists idx_cashback_transactions_request_id
+  on cashback_transactions (request_id) where request_id is not null;
+create unique index if not exists idx_cashback_transactions_reversal_kind
+  on cashback_transactions (reversal_of, kind) where reversal_of is not null;
+
+create table if not exists cashback_settlements (
+  id uuid default gen_random_uuid() primary key,
+  queue_entry_id uuid not null unique references queue_entries(id) on delete restrict,
+  branch_id uuid references branches(id) on delete set null,
+  client_id uuid not null references clients(id) on delete restrict,
+  cashback_amount numeric(12,2) not null check (cashback_amount >= 0),
+  status text not null default 'PENDING' check (status in ('PENDING', 'SETTLED', 'REVERSED')),
+  settled_at timestamptz,
+  processed_at timestamptz,
+  processed_by text,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists cashback_settlements_branch_status_idx
+  on cashback_settlements (branch_id, status, created_at desc);
+
+alter table cashback_settlements add column if not exists processed_at timestamptz;
+alter table cashback_settlements add column if not exists processed_by text;
+
+create table if not exists cashback_reconciliation_alerts (
+  id uuid default gen_random_uuid() primary key,
+  client_id uuid not null references clients(id) on delete cascade,
+  wallet_balance numeric(12,2) not null,
+  ledger_balance numeric(12,2) not null,
+  difference numeric(12,2) not null,
+  status text not null default 'OPEN' check (status in ('OPEN', 'RESOLVED')),
+  detected_at timestamptz not null default now(),
+  resolved_at timestamptz,
+  metadata jsonb not null default '{}'::jsonb
+);
+
+create unique index if not exists cashback_reconciliation_open_client_uidx
+  on cashback_reconciliation_alerts (client_id) where status = 'OPEN';
+
+create index if not exists cashback_reconciliation_status_detected_idx
+  on cashback_reconciliation_alerts (status, detected_at desc);
+
 -- Keep the marketplace booking aggregate synchronized with the shared queue.
 -- Queue entries remain the operational source of truth for barber/kiosk flows.
 create or replace function sync_marketplace_booking_from_queue()
@@ -227,22 +439,37 @@ returns trigger
 language plpgsql
 as $$
 begin
-  if new.source = 'site' then
+  if new.source = 'site' and new.status in ('completed', 'no_show', 'cancelled', 'rejected', 'not_in_time') then
     update marketplace_bookings b
        set status = case
-         when new.status = 'completed' then 'COMPLETED'
-         when new.status = 'no_show' then 'NO_SHOW'
-         when new.status in ('cancelled', 'rejected', 'not_in_time') then 'CANCELLED'
-         else b.status
+         when exists (
+           select 1
+             from marketplace_booking_persons bp
+             join queue_entries q on q.id = bp.queue_entry_id
+            where bp.booking_id = b.id and q.status = 'no_show'
+         ) then 'NO_SHOW'
+         when exists (
+           select 1
+             from marketplace_booking_persons bp
+             join queue_entries q on q.id = bp.queue_entry_id
+            where bp.booking_id = b.id and q.status = 'completed'
+         ) then 'COMPLETED'
+         else 'CANCELLED'
        end,
        updated_at = now()
      where b.status = 'ACTIVE'
-       and b.marketplace_client_id = (
-         select mc.id
-           from marketplace_clients mc
-           join clients c on c.phone = mc.phone
-          where c.id = new.client_id
+       and b.id = (
+         select bp.booking_id
+           from marketplace_booking_persons bp
+          where bp.queue_entry_id = new.id
           limit 1
+       )
+       and not exists (
+         select 1
+           from marketplace_booking_persons bp
+           join queue_entries q on q.id = bp.queue_entry_id
+          where bp.booking_id = b.id
+            and q.status in ('waiting', 'called', 'swapped', 'in_progress')
        );
   end if;
   return new;
@@ -265,6 +492,8 @@ declare
   positive_today integer;
   no_show_count integer;
   block_threshold integer;
+  old_level text;
+  new_level text;
 begin
   if coalesce(new.source, '') <> 'site' or (tg_op = 'UPDATE' and old.status = new.status) then
     return new;
@@ -276,20 +505,39 @@ begin
    where c.id = new.client_id limit 1;
   if marketplace_id is null then return new; end if;
 
+  -- Serialize status-point updates per marketplace client.  Without this
+  -- lock, two concurrent completions could both observe the same daily
+  -- positive-point total and exceed the configured cap.
+  perform 1 from marketplace_clients where id = marketplace_id for update;
+
   points_config := coalesce((select value from platform_settings where key = 'status_points'), '{}'::jsonb);
   if new.status = 'completed' then
+    select marketplace_loyalty_level(status_points) into old_level
+      from marketplace_clients where id = marketplace_id;
     points_amount := greatest(0, coalesce((points_config ->> 'completed_service_points')::integer, 10));
+    -- A successfully completed service breaks the no-show streak even when
+    -- the daily positive-points cap has already been reached.
+    update marketplace_clients set no_show_streak = 0 where id = marketplace_id;
     positive_today := coalesce((select sum(amount) from status_point_transactions
-      where marketplace_client_id = marketplace_id and amount > 0 and created_at >= current_date), 0);
+      where marketplace_client_id = marketplace_id and amount > 0
+        and (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date), 0);
     if positive_today + points_amount <= coalesce((points_config ->> 'daily_positive_limit')::integer, 100) then
       insert into status_point_transactions (marketplace_client_id, queue_entry_id, kind, amount, reason)
       values (marketplace_id, new.id, 'EARN', points_amount, 'COMPLETED_SERVICE')
       on conflict (queue_entry_id, kind) where queue_entry_id is not null do nothing;
       if found then
         update marketplace_clients set status_points = status_points + points_amount, no_show_streak = 0 where id = marketplace_id;
+        select marketplace_loyalty_level(status_points) into new_level
+          from marketplace_clients where id = marketplace_id;
+        if old_level is distinct from new_level then
+          insert into marketplace_notifications (marketplace_client_id, type, payload)
+          values (marketplace_id, 'LEVEL_CHANGED', jsonb_build_object('old_level', old_level, 'new_level', new_level));
+        end if;
       end if;
     end if;
   elsif new.status = 'no_show' then
+    select marketplace_loyalty_level(status_points) into old_level
+      from marketplace_clients where id = marketplace_id for update;
     points_amount := least(-1, coalesce((points_config ->> 'no_show_penalty')::integer, -20));
     insert into status_point_transactions (marketplace_client_id, queue_entry_id, kind, amount, reason)
     values (marketplace_id, new.id, 'PENALTY', points_amount, 'NO_SHOW')
@@ -299,10 +547,25 @@ begin
         status_points = greatest(0, status_points + points_amount),
         no_show_streak = no_show_streak + 1
       where id = marketplace_id;
+      select marketplace_loyalty_level(status_points) into new_level
+        from marketplace_clients where id = marketplace_id;
+      if old_level is distinct from new_level then
+        insert into marketplace_notifications (marketplace_client_id, type, payload)
+        values (marketplace_id, 'LEVEL_CHANGED', jsonb_build_object(
+          'old_level', old_level,
+          'new_level', new_level,
+          'reason', 'NO_SHOW'));
+      end if;
       select no_show_streak into no_show_count from marketplace_clients where id = marketplace_id;
       block_threshold := coalesce((select (value ->> 'no_show_block_threshold')::integer from platform_settings where key = 'anti_fraud'), 5);
       if no_show_count >= block_threshold then
-        update marketplace_clients set blocked_until = now() + interval '24 hours' where id = marketplace_id;
+        update marketplace_clients
+           set blocked_until = now() + make_interval(hours => coalesce((select (value ->> 'block_hours')::integer from platform_settings where key = 'anti_fraud'), 24))
+         where id = marketplace_id;
+        insert into marketplace_notifications (marketplace_client_id, type, payload)
+        values (marketplace_id, 'ACCOUNT_BLOCKED', jsonb_build_object(
+          'blocked_until', now() + make_interval(hours => coalesce((select (value ->> 'block_hours')::integer from platform_settings where key = 'anti_fraud'), 24)),
+          'reason', 'NO_SHOW_LIMIT'));
       end if;
     end if;
   end if;

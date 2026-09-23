@@ -1,4 +1,5 @@
-const { db } = require('../config/postgres');
+const { db, pool } = require('../config/postgres');
+const { resolveLoyaltyCashbackPercent } = require('../utils/loyalty');
 
 const roundMoney = (value) => {
   const n = Number(value);
@@ -11,6 +12,51 @@ const parsePercent = (raw) => {
   if (!Number.isFinite(n) || n <= 0) return 0;
   return Math.min(n, 100);
 };
+
+async function getCashbackPercentForEntry(entry) {
+  const fallback = parsePercent(process.env.CASHBACK_PERCENT);
+  if (!entry?.client_id) return fallback;
+
+  try {
+    const marketplaceClient = await pool.query(
+      `select mc.status_points
+         from marketplace_clients mc
+         join clients c on c.phone = mc.phone
+        where c.id = $1
+        limit 1`,
+      [entry.client_id],
+    );
+    if (!marketplaceClient.rows[0]) return fallback;
+
+    const settings = await pool.query(
+      `select value from platform_settings where key = 'loyalty_levels'`,
+    );
+    return resolveLoyaltyCashbackPercent(
+      marketplaceClient.rows[0].status_points,
+      settings.rows[0]?.value,
+      0,
+    );
+  } catch (error) {
+    if (error?.code === '42P01' || String(error?.message || '').includes('marketplace_')) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+async function getPaidMoneyForQueueEntry(queueEntryId) {
+  const result = await pool.query(
+    `select coalesce(sum(amount) filter (where method in ('cash', 'card')), 0)::numeric as paid_money,
+            count(*)::int as payment_count
+       from payments
+      where queue_entry_id = $1`,
+    [queueEntryId],
+  );
+  return {
+    amount: roundMoney(result.rows[0]?.paid_money),
+    hasRecords: Number(result.rows[0]?.payment_count || 0) > 0,
+  };
+}
 
 const getServiceIdsFromEntry = (entry) => {
   if (Array.isArray(entry?.service_ids) && entry.service_ids.length) {
@@ -95,36 +141,51 @@ async function spendCashback({ clientId, queueEntryId, amount, meta }) {
     return { spent: false, amount: 0, balance: await getWalletBalance(clientId), transaction: null };
   }
 
-  const balance = await getWalletBalance(clientId);
-  if (balance < amt) {
-    return { spent: false, amount: 0, balance, reason: 'insufficient_balance', transaction: null };
-  }
-
-  const { inserted, transaction } = await insertCashbackTransaction({
-    clientId,
-    queueEntryId,
-    kind: 'spend',
-    amount: amt,
-    meta: meta || null,
-  });
-
-  if (!inserted) {
-    return { spent: false, amount: 0, balance: await getWalletBalance(clientId), reason: 'already_spent', transaction: null };
-  }
-
-  const { ok, balance: nextBalance } = await decrementWalletBalance(clientId, amt);
-  if (!ok) {
-    if (transaction?.id) {
-      await db
-        .from('cashback_transactions')
-        .delete()
-        .eq('id', transaction.id)
-        .catch(() => { });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `insert into cashback_wallets (client_id, balance) values ($1, 0)
+       on conflict (client_id) do nothing`, [clientId]
+    );
+    const wallet = await client.query(
+      `select balance from cashback_wallets where client_id = $1 for update`, [clientId]
+    );
+    const balance = roundMoney(wallet.rows[0]?.balance);
+    if (balance < amt) {
+      await client.query('ROLLBACK');
+      return { spent: false, amount: 0, balance, reason: 'insufficient_balance', transaction: null };
     }
-    return { spent: false, amount: 0, balance: nextBalance ?? balance, reason: 'insufficient_balance', transaction: null };
+    const transaction = await client.query(
+      `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta)
+       values ($1, $2, 'spend', $3, $4::jsonb)
+       on conflict (queue_entry_id, kind) do nothing
+       returning id, client_id, queue_entry_id, kind, amount, created_at`,
+      [clientId, queueEntryId, amt, JSON.stringify(meta || null)]
+    );
+    if (!transaction.rows[0]) {
+      await client.query('ROLLBACK');
+      return { spent: false, amount: 0, balance, reason: 'already_spent', transaction: null };
+    }
+    const updated = await client.query(
+      `update cashback_wallets set balance = round((balance - $2)::numeric, 2), updated_at = now()
+        where client_id = $1 and balance >= $2 returning balance`, [clientId, amt]
+    );
+    if (!updated.rows[0]) {
+      await client.query('ROLLBACK');
+      return { spent: false, amount: 0, balance, reason: 'insufficient_balance', transaction: null };
+    }
+    await client.query('COMMIT');
+    return { spent: true, amount: amt, balance: roundMoney(updated.rows[0].balance), transaction: transaction.rows[0] };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    if (error?.code === '42P01' || String(error?.message || '').includes('cashback_')) {
+      return { spent: false, amount: 0, balance: null, reason: 'cashback_schema_unavailable', transaction: null };
+    }
+    throw error;
+  } finally {
+    client.release();
   }
-
-  return { spent: true, amount: amt, balance: nextBalance, transaction };
 }
 
 async function refundCashbackSpend({ clientId, queueEntryId, amount, transactionId }) {
@@ -137,22 +198,46 @@ async function refundCashbackSpend({ clientId, queueEntryId, amount, transaction
     return { refunded: false, balance: await getWalletBalance(clientId) };
   }
 
+  const client = await pool.connect();
   try {
-    if (transactionId) {
-      await db.from('cashback_transactions').delete().eq('id', transactionId);
-    } else if (queueEntryId) {
-      await db
-        .from('cashback_transactions')
-        .delete()
-        .eq('queue_entry_id', String(queueEntryId))
-        .eq('kind', 'spend');
+    await client.query('BEGIN');
+    const original = transactionId
+      ? await client.query(`select id, amount from cashback_transactions where id = $1 and client_id = $2 for update`, [transactionId, clientId])
+      : await client.query(`select id, amount from cashback_transactions where queue_entry_id = $1 and client_id = $2 and kind = 'spend' for update`, [queueEntryId, clientId]);
+    if (!original.rows[0]) {
+      await client.query('ROLLBACK');
+      return { refunded: false, balance: await getWalletBalance(clientId), reason: 'spend_not_found' };
     }
-  } catch (_) {
-    // best-effort
+    const refundAmount = roundMoney(Math.min(amt, Number(original.rows[0].amount) || 0));
+    if (refundAmount <= 0) {
+      await client.query('ROLLBACK');
+      return { refunded: false, balance: await getWalletBalance(clientId), reason: 'invalid_refund_amount' };
+    }
+    const reversal = await client.query(
+      `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, reversal_of, meta)
+       values ($1, $2, 'adjust', $3, $4, $5::jsonb)
+       on conflict (reversal_of, kind) where reversal_of is not null do nothing
+       returning id`,
+      [clientId, queueEntryId || null, refundAmount, original.rows[0].id, JSON.stringify({ type: 'spend_reversal' })]
+    );
+    if (!reversal.rows[0]) {
+      await client.query('ROLLBACK');
+      return { refunded: false, balance: await getWalletBalance(clientId), reason: 'already_refunded' };
+    }
+    await client.query(
+      `insert into cashback_wallets (client_id, balance) values ($1, $2)
+       on conflict (client_id) do update set balance = round((cashback_wallets.balance + excluded.balance)::numeric, 2), updated_at = now()`,
+      [clientId, refundAmount]
+    );
+    const wallet = await client.query(`select balance from cashback_wallets where client_id = $1`, [clientId]);
+    await client.query('COMMIT');
+    return { refunded: true, balance: roundMoney(wallet.rows[0]?.balance), transaction_id: reversal.rows[0].id };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const balance = await incrementWalletBalance(clientId, amt);
-  return { refunded: true, balance };
 }
 
 async function getCashbackSpendForOrder(orderId) {
@@ -479,7 +564,7 @@ async function spendCashbackForQueueEntry(entry, amountInput) {
 async function awardCashbackForCompletedQueueEntry(entry) {
   if (!entry?.id || !entry?.client_id) return { awarded: false, balance: null };
 
-  const percent = parsePercent(process.env.CASHBACK_PERCENT);
+  const percent = await getCashbackPercentForEntry(entry);
   if (!percent) return { awarded: false, balance: null };
 
   const usedCertificate =
@@ -492,31 +577,103 @@ async function awardCashbackForCompletedQueueEntry(entry) {
     if (total <= 0) return { awarded: false, balance: null };
 
     const spent = await getCashbackSpendForOrder(entry.id);
-    const netPaid = roundMoney(Math.max(0, discountedTotal - spent));
+    const recordedPayments = await getPaidMoneyForQueueEntry(entry.id);
+    const calculatedNetPaid = roundMoney(Math.max(0, discountedTotal - spent));
+    // When payment rows exist, trust only cash/card rows. This prevents a
+    // certificate (including mixed payment) portion from earning cashback.
+    // The fallback preserves legacy kiosk installations that completed old
+    // entries without writing payment rows.
+    const legacyMoneyMethod = ['cash', 'card'].includes(
+      String(entry.payment_method || '').toLowerCase(),
+    );
+    const netPaid = recordedPayments.hasRecords
+      ? roundMoney(Math.min(calculatedNetPaid, recordedPayments.amount))
+      : legacyMoneyMethod
+        ? calculatedNetPaid
+        : 0;
     if (netPaid <= 0) return { awarded: false, balance: await getWalletBalance(entry.client_id), earned: 0 };
 
     const cashbackEarned = roundMoney((netPaid * percent) / 100);
     if (!cashbackEarned) return { awarded: false, balance: await getWalletBalance(entry.client_id), earned: 0 };
 
-    const { inserted } = await insertCashbackTransaction({
-      clientId: entry.client_id,
-      queueEntryId: entry.id,
-      kind: 'earn',
-      amount: cashbackEarned,
-      meta: {
-        percent,
-        total,
-        discounted_total: discountedTotal,
-        cashback_spent: spent,
-        net_paid: netPaid,
-        promo_code: promo?.code || null,
-      },
-    });
-
-    if (!inserted) return { awarded: false, balance: null };
-
-    const balance = await incrementWalletBalance(entry.client_id, cashbackEarned);
-    return { awarded: true, balance, earned: cashbackEarned };
+    const ledgerMeta = {
+      percent,
+      total,
+      discounted_total: discountedTotal,
+      cashback_spent: spent,
+      net_paid: netPaid,
+      paid_money: recordedPayments.amount,
+      promo_code: promo?.code || null,
+    };
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const transaction = await client.query(
+        `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta)
+         values ($1, $2, 'earn', $3, $4::jsonb)
+         on conflict (queue_entry_id, kind) do nothing returning id`,
+        [entry.client_id, entry.id, cashbackEarned, JSON.stringify(ledgerMeta)]
+      );
+      if (!transaction.rows[0]) {
+        await client.query('ROLLBACK');
+        return { awarded: false, balance: null, reason: 'already_awarded' };
+      }
+      // Settlement is an additive accounting record. Keep cashback awarding
+      // compatible with installations that have not applied the new table yet.
+      await client.query('SAVEPOINT cashback_settlement');
+      try {
+        await client.query(
+          `insert into cashback_settlements (queue_entry_id, branch_id, client_id, cashback_amount, metadata)
+           values ($1, $2, $3, $4, $5::jsonb)
+           on conflict (queue_entry_id) do update set cashback_amount = excluded.cashback_amount, updated_at = now()`,
+          [entry.id, entry.branch_id || null, entry.client_id, cashbackEarned, JSON.stringify({ percent, net_paid: netPaid })]
+        );
+        await client.query('RELEASE SAVEPOINT cashback_settlement');
+      } catch (settlementError) {
+        await client.query('ROLLBACK TO SAVEPOINT cashback_settlement');
+        console.warn('Cashback settlement table is unavailable:', settlementError.message);
+      }
+      const wallet = await client.query(
+        `insert into cashback_wallets (client_id, balance) values ($1, $2)
+         on conflict (client_id) do update set balance = round((cashback_wallets.balance + excluded.balance)::numeric, 2), updated_at = now()
+         returning balance`, [entry.client_id, cashbackEarned]
+      );
+      // Marketplace clients should see a transaction notification only after
+      // the cashback ledger and wallet update succeed. Keep this optional for
+      // legacy kiosk deployments that have not applied the marketplace schema.
+      await client.query('SAVEPOINT cashback_notification');
+      try {
+        await client.query(
+          `insert into marketplace_notifications (marketplace_client_id, type, payload)
+           select mc.id, 'CASHBACK_EARNED', $2::jsonb
+             from marketplace_clients mc
+             join clients c on c.phone = mc.phone
+            where c.id = $1
+              and not exists (
+                select 1 from marketplace_notifications n
+                 where n.marketplace_client_id = mc.id
+                   and n.type = 'CASHBACK_EARNED'
+                   and n.payload ->> 'queue_entry_id' = $3::text
+              )`,
+          [entry.client_id, JSON.stringify({
+            queue_entry_id: entry.id,
+            amount: cashbackEarned,
+            balance: roundMoney(wallet.rows[0]?.balance),
+          }), entry.id],
+        );
+        await client.query('RELEASE SAVEPOINT cashback_notification');
+      } catch (notificationError) {
+        await client.query('ROLLBACK TO SAVEPOINT cashback_notification');
+        console.warn('Cashback notification table is unavailable:', notificationError.message);
+      }
+      await client.query('COMMIT');
+      return { awarded: true, balance: roundMoney(wallet.rows[0]?.balance), earned: cashbackEarned };
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (e) {
     console.error('Cashback award failed:', e?.message || e);
     return { awarded: false, balance: null };
