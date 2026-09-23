@@ -315,6 +315,7 @@ class MarketplaceAuth {
   async register(req, res) {
     try {
       const { email: emailInput } = req.body || {};
+      const referralCode = String(req.body?.referral_code || '').trim().toUpperCase() || null;
 
       if (typeof emailInput !== 'string') {
         return res.status(400).json({ error: 'Email is required' });
@@ -328,15 +329,17 @@ class MarketplaceAuth {
       const code = generateMarketplaceOtpCode();
       const expiresAt = new Date(Date.now() + OTP_TTL_MS);
 
+      const otpPayload = {
+        email,
+        code,
+        expires_at: expiresAt.toISOString(),
+        used: false,
+        ...(referralCode ? { referral_code: referralCode } : {}),
+      };
       const { data: insertedOtp, error: insertError } = await db
         .from('otp_codes')
-        .insert({
-          email,
-          code,
-          expires_at: expiresAt.toISOString(),
-          used: false,
-        })
-        .select('id')
+        .insert(otpPayload)
+        .select('id,referral_code')
         .single();
 
       if (insertError || !insertedOtp) {
@@ -400,7 +403,7 @@ class MarketplaceAuth {
 
       const { data: otp, error: otpError } = await db
         .from('otp_codes')
-        .select('id')
+        .select('id,referral_code')
         .eq('email', email)
         .eq('code', code)
         .eq('used', false)
@@ -463,6 +466,34 @@ class MarketplaceAuth {
 
       if (!client) {
         return res.status(500).json({ error: 'Failed to save client' });
+      }
+
+      if (otp.referral_code) {
+        try {
+          const referral = await pool.query(
+            `select marketplace_client_id from referral_accounts
+              where referral_code = $1 and marketplace_client_id <> $2
+              limit 1`,
+            [String(otp.referral_code).trim().toUpperCase(), client.id],
+          );
+          if (referral.rows[0]?.marketplace_client_id) {
+            await pool.query(
+              `insert into referrals
+                (referrer_client_id, referred_client_id, referral_code, expires_at)
+               values ($1, $2, $3, now() + interval '365 days')
+               on conflict (referred_client_id) do nothing`,
+              [
+                referral.rows[0].marketplace_client_id,
+                client.id,
+                String(otp.referral_code).trim().toUpperCase(),
+              ],
+            );
+          }
+        } catch (referralError) {
+          if (!['42P01', '42703'].includes(String(referralError?.code || ''))) {
+            console.error('[marketplace-auth] referral binding failed:', referralError.message);
+          }
+        }
       }
 
       const useNowIso = new Date().toISOString();

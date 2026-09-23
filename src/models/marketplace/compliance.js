@@ -4,6 +4,9 @@ const { pool } = require('../../config/postgres');
 
 const MARKETPLACE_ROLE = 'marketplace';
 
+const fallbackReferralCode = (clientId) =>
+  `BR${crypto.createHash('sha256').update(String(clientId)).digest('hex').slice(0, 10).toUpperCase()}`;
+
 const isMissingCashbackSchemaError = (error) => {
   const code = String(error?.code || '');
   const message = String(error?.message || '').toLowerCase();
@@ -184,7 +187,13 @@ async function referral(req, res) {
     // The compliance migration may not yet be applied on an older database.
     // Keep the mobile screen usable and expose an explicit unavailable state.
     if (error?.code === '42P01' || error?.code === '42703') {
-      return res.json({ referral_code: null, bonus_balance: 0, invited: [], available: false });
+      return res.json({
+        referral_code: fallbackReferralCode(clientId),
+        bonus_balance: 0,
+        invited: [],
+        available: false,
+        warning: 'Referral migration is not applied yet',
+      });
     }
     throw error;
   }
