@@ -551,24 +551,48 @@ class Kiosk {
 
         let marketplaceClient = null;
         let cashbackActor = null;
+        let marketplacePayload = null;
+        if (normalizedSource === 'site' || useCashback) {
+            const token = getBearerToken(req);
+            if (!token) {
+                return res.status(401).json({ error: 'Authorization token is required for marketplace bookings' });
+            }
+            try {
+                marketplacePayload = verifyJwt(token);
+            } catch (_err) {
+                return res.status(401).json({ error: 'Invalid or expired token' });
+            }
+        }
+
+        if (normalizedSource === 'site') {
+            const actorId = marketplacePayload?.sub || marketplacePayload?.id;
+            if (marketplacePayload?.role !== MARKETPLACE_ROLE || !actorId) {
+                return res.status(403).json({ error: 'Marketplace user token is required for source=site' });
+            }
+            const { data: mpClient, error: mpError } = await db
+                .from('marketplace_clients')
+                .select('id, phone, is_active, blocked_until, no_show_streak')
+                .eq('id', actorId)
+                .maybeSingle();
+            if (mpError) return res.status(500).json({ error: mpError.message });
+            if (!mpClient) return res.status(404).json({ error: 'Marketplace client not found' });
+            if (mpClient.is_active === false) return res.status(403).json({ error: 'Account is disabled' });
+            if (mpClient.blocked_until && new Date(mpClient.blocked_until) > new Date()) {
+                return res.status(403).json({ error: 'ACCOUNT_BLOCKED' });
+            }
+            if (!mpClient.phone || String(mpClient.phone) !== String(normalizedPhone)) {
+                return res.status(403).json({ error: 'Phone mismatch for marketplace booking' });
+            }
+            marketplaceClient = mpClient;
+        }
+
         if (useCashback) {
             if (effectivePaymentMethod === 'certificate' || certificate_code) {
                 return res.status(400).json({ error: 'Cashback cannot be used with certificate payment' });
             }
 
-            const token = getBearerToken(req);
-            if (!token) {
-                return res.status(401).json({ error: 'Authorization token is required to use cashback' });
-            }
-
-            let payload;
-            try {
-                payload = verifyJwt(token);
-            } catch (_err) {
-                return res.status(401).json({ error: 'Invalid or expired token' });
-            }
-
-            const actorId = payload.sub || payload.id;
+            const payload = marketplacePayload;
+            const actorId = payload?.sub || payload?.id;
             if (!actorId) {
                 return res.status(401).json({ error: 'Invalid token payload' });
             }
@@ -578,37 +602,18 @@ class Kiosk {
                     return res.status(403).json({ error: 'Marketplace users can use cashback only for source=site' });
                 }
 
-                const { data: mpClient, error: mpError } = await db
-                    .from('marketplace_clients')
-                    .select('id, phone, is_active')
-                    .eq('id', actorId)
-                    .maybeSingle();
-
-                if (mpError) {
-                    return res.status(500).json({ error: mpError.message });
-                }
-
-                if (!mpClient) {
-                    return res.status(404).json({ error: 'Marketplace client not found' });
-                }
-
-                if (mpClient.is_active === false) {
-                    return res.status(403).json({ error: 'Account is disabled' });
-                }
-
-                if (!mpClient.phone) {
+                if (!marketplaceClient?.phone) {
                     return res.status(428).json({
                         error: 'Phone number is required to use cashback',
                         code: 'PHONE_REQUIRED',
                     });
                 }
 
-                if (String(mpClient.phone) !== String(normalizedPhone)) {
+                if (String(marketplaceClient.phone) !== String(normalizedPhone)) {
                     return res.status(403).json({ error: 'Phone mismatch: cashback can only be used for your own phone number' });
                 }
 
-                marketplaceClient = mpClient;
-                cashbackActor = { type: 'marketplace', id: mpClient.id, role: payload.role };
+                cashbackActor = { type: 'marketplace', id: marketplaceClient.id, role: payload.role };
             } else if (CASHBACK_STAFF_ROLES.has(payload?.role)) {
                 if (normalizedSource === 'site') {
                     return res.status(403).json({ error: 'Marketplace cashback orders require a marketplace user token' });
@@ -808,6 +813,28 @@ class Kiosk {
                 .maybeSingle();
             if (clientCreateError) return res.status(500).json({ error: clientCreateError.message });
             clientId = newClient.id;
+        }
+
+        if (marketplaceClient?.id) {
+            const { data: activeBooking, error: activeBookingError } = await db
+                .from('marketplace_bookings')
+                .select('id')
+                .eq('marketplace_client_id', marketplaceClient.id)
+                .eq('status', 'ACTIVE')
+                .maybeSingle();
+            if (activeBookingError) return res.status(500).json({ error: activeBookingError.message });
+            if (activeBooking) return res.status(409).json({ error: 'ALREADY_HAS_ACTIVE_BOOKING' });
+
+            const { data: recentBookings, error: recentBookingsError } = await db
+                .from('marketplace_bookings')
+                .select('id, cooldown_until')
+                .eq('marketplace_client_id', marketplaceClient.id)
+                .gte('created_at', new Date(new Date().setHours(0, 0, 0, 0)).toISOString())
+                .order('created_at', { ascending: false });
+            if (recentBookingsError) return res.status(500).json({ error: recentBookingsError.message });
+            if ((recentBookings || []).length >= 5) return res.status(429).json({ error: 'DAILY_LIMIT_REACHED' });
+            const cooldown = (recentBookings || []).find((item) => item.cooldown_until && new Date(item.cooldown_until) > new Date());
+            if (cooldown) return res.status(429).json({ error: 'CANCEL_COOLDOWN_ACTIVE', cooldown_until: cooldown.cooldown_until });
         }
 
         let cashbackWalletBalance = null;
@@ -1041,6 +1068,62 @@ class Kiosk {
             return res.status(500).json({ error: insertError.message });
         }
 
+        let marketplaceBooking = null;
+        if (marketplaceClient?.id) {
+            const { data: createdBooking, error: bookingError } = await db
+                .from('marketplace_bookings')
+                .insert({
+                    marketplace_client_id: marketplaceClient.id,
+                    source: 'MARKETPLACE',
+                    status: 'ACTIVE',
+                    request_id: normalizedIdempotencyKey,
+                    scheduled_start_at: scheduledStartAtIso,
+                    scheduled_end_at: scheduledEndAtIso,
+                })
+                .select('id, status, source, created_at')
+                .maybeSingle();
+            if (bookingError || !createdBooking) {
+                await db.from('queue_entries').delete().eq('id', entry.id);
+                if (bookingError?.code === '23505') return res.status(409).json({ error: 'ALREADY_HAS_ACTIVE_BOOKING' });
+                return res.status(500).json({ error: bookingError?.message || 'Failed to create marketplace booking' });
+            }
+            marketplaceBooking = createdBooking;
+            await db.from('marketplace_notifications').insert({
+                marketplace_client_id: marketplaceClient.id,
+                type: 'BOOKING_CREATED',
+                payload: { booking_id: createdBooking.id, queue_entry_id: entry.id },
+            });
+            const { data: person, error: personError } = await db
+                .from('marketplace_booking_persons')
+                .insert({
+                    booking_id: createdBooking.id,
+                    person_index: 1,
+                    display_name: customer_name,
+                    barber_id,
+                    queue_entry_id: entry.id,
+                })
+                .select('id')
+                .maybeSingle();
+            if (personError || !person) {
+                await db.from('marketplace_bookings').delete().eq('id', createdBooking.id);
+                await db.from('queue_entries').delete().eq('id', entry.id);
+                return res.status(500).json({ error: personError?.message || 'Failed to create booking person' });
+            }
+            const { error: personServicesError } = await db.from('marketplace_booking_person_services').insert(
+                services.map((item) => ({
+                    person_id: person.id,
+                    service_id: item.id,
+                    price: Number(item.base_price || 0),
+                    duration_minutes: Number(item.duration_minutes || 0),
+                }))
+            );
+            if (personServicesError) {
+                await db.from('marketplace_bookings').delete().eq('id', createdBooking.id);
+                await db.from('queue_entries').delete().eq('id', entry.id);
+                return res.status(500).json({ error: personServicesError.message });
+            }
+        }
+
         if (certificate) {
             const { data: usedCert, error: useError } = await db
                 .from('certificates')
@@ -1263,6 +1346,7 @@ class Kiosk {
             certificate,
             promo: promoSummary,
             promo_usage,
+            marketplace_booking: marketplaceBooking,
             totals: {
                 total: finalOrderTotal,
                 discounted_total: discountedTotal,

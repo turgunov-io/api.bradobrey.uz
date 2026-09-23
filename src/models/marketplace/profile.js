@@ -124,7 +124,7 @@ class MarketplaceProfile {
 
     const { data: client, error } = await db
       .from('marketplace_clients')
-      .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
+      .select('id,email,phone,photo_url,display_name,status_points,blocked_until,referral_bonus_balance,is_active,created_at,last_login_at')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -177,6 +177,10 @@ class MarketplaceProfile {
       return res.json({
         profile: {
           ...formatProfile(auth.client, { cashback_balance }),
+          display_name: auth.client.display_name || null,
+          status_points: Number(auth.client.status_points || 0),
+          referral_bonus_balance: Number(auth.client.referral_bonus_balance || 0),
+          blocked_until: auth.client.blocked_until || null,
           loyalty,
           loyalty_settings: rankSettings,
         },
@@ -285,7 +289,7 @@ class MarketplaceProfile {
         .from('marketplace_clients')
         .update(updatePayload)
         .eq('id', auth.client.id)
-        .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
+            .select('id,email,phone,photo_url,display_name,status_points,blocked_until,referral_bonus_balance,is_active,created_at,last_login_at')
         .maybeSingle();
 
       if (updateError) {

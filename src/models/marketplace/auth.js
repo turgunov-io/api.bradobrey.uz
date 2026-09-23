@@ -2,12 +2,19 @@ const jwt = require('jsonwebtoken');
 const bcrypto = require('bcryptjs');
 const crypto = require('crypto');
 
-const { db } = require('../../config/postgres');
+const { db, pool } = require('../../config/postgres');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const OTP_TTL_MS = 10 * 60 * 1000;
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
+const normalizePhone = (phoneInput) => {
+  const cleaned = String(phoneInput || '').trim().replace(/[\s()-]/g, '');
+  return cleaned || null;
+};
+
+const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
@@ -22,12 +29,30 @@ const normalizeOtpCode = (codeInput) => {
 
 const shouldReturnOtpInResponse = () => process.env.OTP_DEBUG_RETURN_CODE === 'true';
 
-const signMarketplaceToken = ({ id, email }) => {
+const signMarketplaceToken = ({ id, email = null, phone = null }) => {
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
 
   const expiresIn = process.env.JWT_EXPIRES_IN || '12h';
-  return jwt.sign({ sub: id, email, role: MARKETPLACE_ROLE }, jwtSecret, { expiresIn });
+  return jwt.sign({ sub: id, email, phone, role: MARKETPLACE_ROLE }, jwtSecret, { expiresIn });
+};
+
+const sendPhoneOtp = async ({ phone, code }) => {
+  const url = String(process.env.SMS_WEBHOOK_URL || '').trim();
+  if (!url) return { sent: false, reason: 'sms_provider_not_configured' };
+
+  const headers = { 'content-type': 'application/json' };
+  if (process.env.SMS_WEBHOOK_TOKEN) {
+    headers.authorization = `Bearer ${process.env.SMS_WEBHOOK_TOKEN}`;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ phone, message: `BRADOBREY verification code: ${code}` }),
+  });
+  if (!response.ok) return { sent: false, reason: `sms_provider_http_${response.status}` };
+  return { sent: true };
 };
 
 const canSendOtpEmail = () =>
@@ -112,6 +137,140 @@ const trySendOtpEmail = async ({ to, code }) => {
 };
 
 class MarketplaceAuth {
+  async requestPhoneOtp(req, res) {
+    try {
+      const phone = normalizePhone(req.body?.phone);
+      if (!isValidE164(phone)) {
+        return res.status(400).json({ error: 'phone must be in E.164 format' });
+      }
+
+      const code = generateOtpCode();
+      const referralCode = String(req.body?.referral_code || '').trim().toUpperCase() || null;
+      const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
+      const { error: invalidateError } = await db.from('otp_codes')
+        .update({ used: true })
+        .eq('phone', phone)
+        .eq('used', false);
+      if (invalidateError) return res.status(500).json({ error: invalidateError.message });
+
+      const { error: insertError } = await db.from('otp_codes').insert({
+        phone,
+        referral_code: referralCode,
+        request_ip: req.ip || null,
+        device_id: String(req.get('x-device-id') || '').trim() || null,
+        code,
+        expires_at: expiresAt,
+        used: false,
+      });
+      if (insertError) return res.status(500).json({ error: insertError.message });
+
+      const result = await sendPhoneOtp({ phone, code });
+      if (result.sent) return res.json({ message: 'OTP sent' });
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(503).json({ error: 'SMS delivery is not configured' });
+      }
+      console.log(`Marketplace OTP for ${phone}: ${code}`);
+      return res.json({ message: 'OTP sent', ...(shouldReturnOtpInResponse() ? { code } : {}) });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+  }
+
+  async verifyPhone(req, res) {
+    const phone = normalizePhone(req.body?.phone);
+    const code = normalizeOtpCode(req.body?.code);
+    const displayName = String(req.body?.display_name || '').trim() || null;
+    if (!isValidE164(phone) || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: 'Valid phone and six-digit code are required' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const otpResult = await client.query(
+        `select id, referral_code, request_ip, device_id from otp_codes where phone = $1 and code = $2 and used = false and expires_at > now()
+         order by created_at desc limit 1 for update`,
+        [phone, code]
+      );
+      if (!otpResult.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Invalid or expired OTP' });
+      }
+
+      const accountResult = await client.query(
+        `insert into marketplace_clients (phone, display_name, is_active)
+         values ($1, $2, true)
+         on conflict (phone) where phone is not null do update set display_name = coalesce(excluded.display_name, marketplace_clients.display_name), last_login_at = now()
+         returning id, phone, display_name, is_active`,
+        [phone, displayName]
+      );
+      const account = accountResult.rows[0];
+      if (!account || account.is_active === false) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Account is disabled' });
+      }
+      if (otpResult.rows[0].referral_code) {
+        const referral = await client.query(
+          `select marketplace_client_id, referral_code from referral_accounts where referral_code = $1`,
+          [String(otpResult.rows[0].referral_code).trim().toUpperCase()]
+        );
+        if (!referral.rows[0] || referral.rows[0].marketplace_client_id === account.id) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Invalid referral code' });
+        }
+        const referralSettings = await client.query(
+          `select value from platform_settings where key = 'referral'`
+        );
+        const dailyLimit = Number(referralSettings.rows[0]?.value?.daily_limit || 10);
+        const dailyCount = await client.query(
+          `select count(*)::int as count from referrals
+            where referrer_client_id = $1 and created_at >= current_date`,
+          [referral.rows[0].marketplace_client_id]
+        );
+        if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
+          await client.query('ROLLBACK');
+          return res.status(429).json({ error: 'REFERRAL_DAILY_LIMIT_REACHED' });
+        }
+        const sourceIp = otpResult.rows[0].request_ip || null;
+        const deviceId = otpResult.rows[0].device_id || null;
+        const sourceCount = await client.query(
+          `select count(*)::int as count from referrals
+            where created_at >= current_date
+              and (($1::inet is not null and source_ip = $1::inet)
+                or ($2::text is not null and device_id = $2::text))`,
+          [sourceIp, deviceId]
+        );
+        if (Number(sourceCount.rows[0]?.count || 0) >= dailyLimit) {
+          await client.query(
+            `insert into marketplace_fraud_alerts (marketplace_client_id, kind, source_ip, device_id, metadata)
+             values ($1, 'REFERRAL_VELOCITY', $2::inet, $3, $4::jsonb)`,
+            [referral.rows[0].marketplace_client_id, sourceIp, deviceId, JSON.stringify({ daily_limit: dailyLimit })]
+          );
+        }
+        await client.query(
+          `insert into referrals (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
+           values ($1, $2, $3, now() + interval '365 days', $4::inet, $5)
+           on conflict (referred_client_id) do nothing`,
+          [referral.rows[0].marketplace_client_id, account.id, referral.rows[0].referral_code, sourceIp, deviceId]
+        );
+      }
+      await client.query('update otp_codes set used = true where id = $1', [otpResult.rows[0].id]);
+      await client.query('COMMIT');
+
+      return res.json({
+        token: signMarketplaceToken({ id: account.id, phone: account.phone }),
+        client: account,
+      });
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    } finally {
+      client.release();
+    }
+  }
+
   async register(req, res) {
     try {
       const { email: emailInput } = req.body || {};

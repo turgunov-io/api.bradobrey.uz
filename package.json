@@ -9,7 +9,7 @@
     "build": "echo \"Build step (no-op)\"",
     "backfill:cashback": "node scripts/backfill-cashback.js",
     "sync:cashback-wallets": "node scripts/sync-cashback-wallets.js",
-    "test": "echo \"No automated tests configured\" && exit 0"
+    "test": "node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",

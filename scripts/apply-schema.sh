@@ -26,7 +26,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
   exit 1
 fi
 
-PSQL="psql $DATABASE_URL -v ON_ERROR_STOP=0 -q"
+PSQL="psql $DATABASE_URL -v ON_ERROR_STOP=1 -q"
 
 # Dependency-ordered: extensions and base tables first, then dependents.
 FILES=(
@@ -58,6 +58,7 @@ FILES=(
   marketplace_clients.sql
   otp_codes.sql
   banners.sql
+  marketplace_tz_compliance.sql
 )
 
 list_tables() {

@@ -1,5 +1,7 @@
 const express = require('express');
 const catalog = require('../../modules/marketplace/catalog/controller');
+const groupBooking = require('../../models/marketplace/groupBooking');
+const { rateLimit } = require('../../middleware/rateLimit');
 
 const router = express.Router();
 
@@ -12,6 +14,7 @@ router.get('/branches/:id/services', (req, res) => catalog.branchServices(req, r
 router.get('/branches/:id', (req, res) => catalog.branchDetails(req, res));
 router.get('/branches/:id/availability', (req, res) => catalog.availability(req, res));
 router.post('/bookings/quote', (req, res) => catalog.quote(req, res));
-router.post('/bookings', (req, res) => catalog.createBooking(req, res));
+router.post('/bookings', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-booking' }), (req, res) => catalog.createBooking(req, res));
+router.post('/group-bookings', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-booking' }), (req, res) => groupBooking.create(req, res));
 
 module.exports = router;

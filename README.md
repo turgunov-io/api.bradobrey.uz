@@ -72,7 +72,15 @@ Backend for a barbershop live-queue system (JWT auth for barbers, PostgreSQL per
   - `GET /api/marketplace/catalog/barbershops/:id/payment-options`
   - `GET /api/marketplace/catalog/branches/:id/availability?barber_id=...&service_ids=...&date=YYYY-MM-DD`
   - `POST /api/marketplace/catalog/bookings/quote`
-  - `POST /api/marketplace/catalog/bookings` (accepts optional `scheduled_start_at`, `scheduled_end_at`, `Idempotency-Key` header)
+- `POST /api/marketplace/catalog/bookings` (accepts optional `scheduled_start_at`, `scheduled_end_at`, `Idempotency-Key` header)
+- `POST /api/marketplace/catalog/group-bookings` (1–4 persons, up to 3 services per person, different barbers allowed)
+
+Marketplace TЗ compliance migration:
+
+- Apply `db/postgres/marketplace_tz_compliance.sql` after the existing marketplace SQL files.
+- Phone auth: `POST /api/marketplace/auth/phone/request-otp`, `POST /api/marketplace/auth/phone/verify`.
+- Compliance endpoints: `GET /api/marketplace/compliance/active`, `POST /api/marketplace/compliance/:id/cancel`, `GET /api/marketplace/compliance/loyalty`, `GET /api/marketplace/compliance/referral`, `POST /api/marketplace/compliance/reviews`.
+- Client notifications: `GET /api/marketplace/compliance/notifications`, `POST /api/marketplace/compliance/notifications/:id/read`, `POST /api/marketplace/compliance/push-tokens`.
 
 ## Notes
 
