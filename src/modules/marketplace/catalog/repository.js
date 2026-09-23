@@ -6,6 +6,12 @@ const {
   normalizeText,
 } = require('./helpers');
 
+const serviceIdsForEntry = (entry = {}) => (
+  Array.isArray(entry.service_ids) && entry.service_ids.length
+    ? entry.service_ids.filter(Boolean)
+    : entry.service_id ? [entry.service_id] : []
+);
+
 const getBranch = async (branchId) => {
   let { data, error } = await db
     .from('branches')
@@ -65,9 +71,10 @@ const getBranchOperationalBarbers = async (branchId) => {
 
   const { data: queues, error: queueError } = await db
     .from('queue_entries')
-    .select('id, barber_id, service_id, service_ids, status')
+    .select('id, client_id, barber_id, service_id, service_ids, status, created_at, started_at, client:clients ( id, name )')
     .eq('branch_id', branchId)
-    .in('status', ACTIVE_QUEUE_STATUSES);
+    .in('status', ACTIVE_QUEUE_STATUSES)
+    .order('created_at', { ascending: true });
 
   if (queueError) throw queueError;
 
@@ -113,17 +120,35 @@ const getBranchOperationalBarbers = async (branchId) => {
   }
 
   return visibleBarbers
-    .map((barber) => ({
-      id: barber.id,
-      name: barber.name,
-      photo_url: barber.photo_url || null,
-      specialization: barber.specialization || null,
-      branch_id: barber.branch_id,
-      is_on_shift: barber.is_on_shift === true,
-      is_active: barber.is_active !== false,
-      queue_count: queueCountByBarber.get(String(barber.id)) || 0,
-      estimated_waiting_time: waitingByBarber.get(String(barber.id)) || 0,
-    }))
+    .map((barber) => {
+      const barberQueue = activeQueues.filter((entry) => String(entry?.barber_id) === String(barber.id));
+      return {
+        id: barber.id,
+        name: barber.name,
+        photo_url: barber.photo_url || null,
+        specialization: barber.specialization || null,
+        branch_id: barber.branch_id,
+        is_on_shift: barber.is_on_shift === true,
+        is_active: barber.is_active !== false,
+        queue_count: queueCountByBarber.get(String(barber.id)) || 0,
+        estimated_waiting_time: waitingByBarber.get(String(barber.id)) || 0,
+        // Same public queue snapshot used by the kiosk. Phone numbers and
+        // other private client fields are deliberately excluded.
+        clients: barberQueue.map((entry, index) => ({
+          entry_id: entry.id,
+          client_id: entry.client_id || entry.client?.id || null,
+          name: entry.client?.name || 'Client',
+          status: entry.status,
+          queue_position: index + 1,
+          service_ids: serviceIdsForEntry(entry),
+          created_at: entry.created_at || null,
+          started_at: entry.started_at || null,
+          estimated_time: serviceIdsForEntry(entry).reduce((sum, serviceId) => (
+            sum + (serviceDurationById.get(String(serviceId)) || 0)
+          ), 0),
+        })),
+      };
+    })
     .sort((left, right) => {
       if (left.is_on_shift !== right.is_on_shift) return left.is_on_shift ? -1 : 1;
       if (left.estimated_waiting_time !== right.estimated_waiting_time) {
