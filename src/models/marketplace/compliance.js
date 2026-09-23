@@ -256,6 +256,11 @@ async function createReview(req, res) {
         // Older production databases may have reviews but not the optional
         // idempotency table yet. Keep review submission working; the table is
         // still created by marketplace_tz_compliance.sql when migrations run.
+        // PostgreSQL marks the current transaction as aborted after the
+        // missing-relation error, so start a clean transaction before the
+        // review queries continue.
+        await dbClient.query('ROLLBACK');
+        await dbClient.query('BEGIN');
         idempotencyAvailable = false;
         console.warn('[MarketplaceCompliance] idempotency table is unavailable; creating review without deduplication');
       }
