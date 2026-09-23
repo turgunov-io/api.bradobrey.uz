@@ -235,6 +235,39 @@ async function createReview(req, res) {
         );
         const reviewPayloadHash = crypto.createHash('md5').update(JSON.stringify(req.body || {})).digest('hex');
         if (prior.rows[0]?.payload_hash && prior.rows[0].payload_hash !== reviewPayloadHash) {
+          // The mobile review form allows a client to change its rating or
+          // comment for the same completed visit. Treat that action as an
+          // update of the existing review instead of rejecting it because the
+          // request id is intentionally stable per booking.
+          const existingReview = await dbClient.query(
+            `select r.id, r.booking_id
+               from marketplace_reviews r
+              where r.marketplace_client_id = $2
+                and (r.booking_id = $1 or exists (
+                  select 1 from marketplace_booking_persons bp
+                   where bp.booking_id = r.booking_id and bp.queue_entry_id = $1
+                ))
+              limit 1`,
+            [bookingId, clientId],
+          );
+          if (existingReview.rows[0]) {
+            const updatedReview = await dbClient.query(
+              `update marketplace_reviews
+                  set rating = $2, comment = $3, updated_at = now()
+                where id = $1
+                returning *`,
+              [existingReview.rows[0].id, rating, comment],
+            );
+            const response = { review: updatedReview.rows[0] };
+            await dbClient.query(
+              `update marketplace_idempotency_requests
+                  set payload_hash = $2, status = 200, response = $3::jsonb, completed_at = now()
+                where request_id = $1`,
+              [requestId, reviewPayloadHash, JSON.stringify(response)],
+            );
+            await dbClient.query('COMMIT');
+            return res.status(200).json(response);
+          }
           await dbClient.query('ROLLBACK');
           return res.status(409).json({ error: 'IDEMPOTENCY_KEY_REUSED' });
         }
