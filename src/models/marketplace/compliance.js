@@ -226,29 +226,39 @@ async function createReview(req, res) {
   const dbClient = await pool.connect();
   try {
     await dbClient.query('BEGIN');
+    let idempotencyAvailable = Boolean(requestId);
     if (requestId) {
-      const prior = await dbClient.query(
-        `select status, response, payload_hash from marketplace_idempotency_requests
-          where request_id = $1 and marketplace_client_id = $2 for update`, [requestId, clientId]
-      );
-      const reviewPayloadHash = crypto.createHash('md5').update(JSON.stringify(req.body || {})).digest('hex');
-      if (prior.rows[0]?.payload_hash && prior.rows[0].payload_hash !== reviewPayloadHash) {
-        await dbClient.query('ROLLBACK');
-        return res.status(409).json({ error: 'IDEMPOTENCY_KEY_REUSED' });
+      try {
+        const prior = await dbClient.query(
+          `select status, response, payload_hash from marketplace_idempotency_requests
+            where request_id = $1 and marketplace_client_id = $2 for update`, [requestId, clientId]
+        );
+        const reviewPayloadHash = crypto.createHash('md5').update(JSON.stringify(req.body || {})).digest('hex');
+        if (prior.rows[0]?.payload_hash && prior.rows[0].payload_hash !== reviewPayloadHash) {
+          await dbClient.query('ROLLBACK');
+          return res.status(409).json({ error: 'IDEMPOTENCY_KEY_REUSED' });
+        }
+        if (prior.rows[0]?.response) {
+          await dbClient.query('ROLLBACK');
+          return res.status(Number(prior.rows[0].status || 201)).json(prior.rows[0].response);
+        }
+        if (prior.rows[0]) {
+          await dbClient.query('ROLLBACK');
+          return res.status(409).json({ error: 'IDEMPOTENCY_REQUEST_IN_PROGRESS' });
+        }
+        await dbClient.query(
+          `insert into marketplace_idempotency_requests (request_id, marketplace_client_id, operation, payload_hash)
+           values ($1, $2, 'REVIEW_CREATE', md5($3))`,
+          [requestId, clientId, JSON.stringify(req.body || {})]
+        );
+      } catch (error) {
+        if (error?.code !== '42P01') throw error;
+        // Older production databases may have reviews but not the optional
+        // idempotency table yet. Keep review submission working; the table is
+        // still created by marketplace_tz_compliance.sql when migrations run.
+        idempotencyAvailable = false;
+        console.warn('[MarketplaceCompliance] idempotency table is unavailable; creating review without deduplication');
       }
-      if (prior.rows[0]?.response) {
-        await dbClient.query('ROLLBACK');
-        return res.status(Number(prior.rows[0].status || 201)).json(prior.rows[0].response);
-      }
-      if (prior.rows[0]) {
-        await dbClient.query('ROLLBACK');
-        return res.status(409).json({ error: 'IDEMPOTENCY_REQUEST_IN_PROGRESS' });
-      }
-      await dbClient.query(
-        `insert into marketplace_idempotency_requests (request_id, marketplace_client_id, operation, payload_hash)
-         values ($1, $2, 'REVIEW_CREATE', md5($3))`,
-        [requestId, clientId, JSON.stringify(req.body || {})]
-      );
     }
     const booking = await dbClient.query(
       `select id from marketplace_bookings
@@ -274,7 +284,7 @@ async function createReview(req, res) {
       [clientId, resolvedBookingId, JSON.stringify({ rating })]
     );
     const response = { review: result.rows[0] };
-    if (requestId) {
+    if (requestId && idempotencyAvailable) {
       await dbClient.query(
         `update marketplace_idempotency_requests set status = 201, response = $2::jsonb, completed_at = now() where request_id = $1`,
         [requestId, JSON.stringify(response)]
