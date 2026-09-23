@@ -31,12 +31,13 @@ function authClient(req, res) {
 
 async function getClient(clientId) {
   const result = await pool.query(
-    `select id, phone, status_points, blocked_until, is_active,
-            case when cancel_count_date = (now() at time zone 'Asia/Tashkent')::date then cancel_count_today else 0 end as cancel_count_today
+    `select id, phone, is_active
        from marketplace_clients where id = $1`,
     [clientId]
   );
-  return result.rows[0] || null;
+  return result.rows[0]
+    ? { ...result.rows[0], status_points: 0, blocked_until: null, cancel_count_today: 0 }
+    : null;
 }
 
 async function getPlatformSetting(key, fallback) {
@@ -156,28 +157,37 @@ async function loyalty(req, res) {
 async function referral(req, res) {
   const clientId = authClient(req, res);
   if (!clientId) return;
-  const code = `BR${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
-  const result = await pool.query(
-    `insert into referral_accounts (marketplace_client_id, referral_code) values ($1, $2)
-     on conflict (marketplace_client_id) do update set referral_code = referral_accounts.referral_code
-     returning referral_code`,
-    [clientId, code]
-  );
-  const balance = await pool.query(
-    `select referral_bonus_balance from marketplace_clients where id = $1`, [clientId]
-  );
-  const invited = await pool.query(
-    `select r.id, r.expires_at, r.activated_at, r.created_at,
-            coalesce(mc.email, mc.phone) as referred_name,
-            coalesce(sum(rt.amount), 0) as earned
-       from referrals r
-       join marketplace_clients mc on mc.id = r.referred_client_id
-       left join referral_transactions rt on rt.referral_id = r.id
-      where r.referrer_client_id = $1
-      group by r.id, mc.email, mc.phone
-      order by r.created_at desc`, [clientId]
-  );
-  return res.json({ referral_code: result.rows[0].referral_code, bonus_balance: Number(balance.rows[0]?.referral_bonus_balance || 0), invited: invited.rows });
+  try {
+    const code = `BR${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
+    const result = await pool.query(
+      `insert into referral_accounts (marketplace_client_id, referral_code) values ($1, $2)
+       on conflict (marketplace_client_id) do update set referral_code = referral_accounts.referral_code
+       returning referral_code`,
+      [clientId, code]
+    );
+    const balance = await pool.query(
+      `select referral_bonus_balance from marketplace_clients where id = $1`, [clientId]
+    );
+    const invited = await pool.query(
+      `select r.id, r.expires_at, r.activated_at, r.created_at,
+              coalesce(mc.email, mc.phone) as referred_name,
+              coalesce(sum(rt.amount), 0) as earned
+         from referrals r
+         join marketplace_clients mc on mc.id = r.referred_client_id
+         left join referral_transactions rt on rt.referral_id = r.id
+        where r.referrer_client_id = $1
+        group by r.id, mc.email, mc.phone
+        order by r.created_at desc`, [clientId]
+    );
+    return res.json({ referral_code: result.rows[0].referral_code, bonus_balance: Number(balance.rows[0]?.referral_bonus_balance || 0), invited: invited.rows });
+  } catch (error) {
+    // The compliance migration may not yet be applied on an older database.
+    // Keep the mobile screen usable and expose an explicit unavailable state.
+    if (error?.code === '42P01' || error?.code === '42703') {
+      return res.json({ referral_code: null, bonus_balance: 0, invited: [], available: false });
+    }
+    throw error;
+  }
 }
 
 async function createReview(req, res) {
