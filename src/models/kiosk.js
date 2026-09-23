@@ -795,6 +795,7 @@ class Kiosk {
         const discountedTotal = applyPromoDiscount(finalOrderTotal, promo);
 
         let clientId;
+        let marketplaceBookingTablesAvailable = true;
         const { data: existingClient, error: clientLookupError } = await db
             .from('clients')
             .select('id, name')
@@ -824,20 +825,36 @@ class Kiosk {
                 .eq('marketplace_client_id', marketplaceClient.id)
                 .eq('status', 'ACTIVE')
                 .maybeSingle();
-            if (activeBookingError) return res.status(500).json({ error: activeBookingError.message });
+            if (activeBookingError) {
+                if (activeBookingError.code === '42P01' || activeBookingError.code === '42703') {
+                    marketplaceBookingTablesAvailable = false;
+                } else {
+                    return res.status(500).json({ error: activeBookingError.message });
+                }
+            }
             if (activeBooking) return res.status(409).json({ error: 'ALREADY_HAS_ACTIVE_BOOKING' });
 
-            const { data: recentBookings, error: recentBookingsError } = await db
-                .from('marketplace_bookings')
-                .select('id, cooldown_until')
-                .eq('marketplace_client_id', marketplaceClient.id)
-                .gte('created_at', zonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
-                .lt('created_at', nextZonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
-                .order('created_at', { ascending: false });
-            if (recentBookingsError) return res.status(500).json({ error: recentBookingsError.message });
-            if ((recentBookings || []).length >= 5) return res.status(429).json({ error: 'DAILY_LIMIT_REACHED' });
-            const cooldown = (recentBookings || []).find((item) => item.cooldown_until && new Date(item.cooldown_until) > new Date());
-            if (cooldown) return res.status(429).json({ error: 'CANCEL_COOLDOWN_ACTIVE', cooldown_until: cooldown.cooldown_until });
+            if (marketplaceBookingTablesAvailable) {
+                const { data: recentBookings, error: recentBookingsError } = await db
+                    .from('marketplace_bookings')
+                    .select('id, cooldown_until')
+                    .eq('marketplace_client_id', marketplaceClient.id)
+                    .gte('created_at', zonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
+                    .lt('created_at', nextZonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
+                    .order('created_at', { ascending: false });
+                if (recentBookingsError) {
+                    if (recentBookingsError.code === '42P01' || recentBookingsError.code === '42703') {
+                        marketplaceBookingTablesAvailable = false;
+                    } else {
+                        return res.status(500).json({ error: recentBookingsError.message });
+                    }
+                }
+                if (marketplaceBookingTablesAvailable) {
+                    if ((recentBookings || []).length >= 5) return res.status(429).json({ error: 'DAILY_LIMIT_REACHED' });
+                    const cooldown = (recentBookings || []).find((item) => item.cooldown_until && new Date(item.cooldown_until) > new Date());
+                    if (cooldown) return res.status(429).json({ error: 'CANCEL_COOLDOWN_ACTIVE', cooldown_until: cooldown.cooldown_until });
+                }
+            }
         }
 
         let cashbackWalletBalance = null;
@@ -1072,7 +1089,7 @@ class Kiosk {
         }
 
         let marketplaceBooking = null;
-        if (marketplaceClient?.id) {
+        if (marketplaceClient?.id && marketplaceBookingTablesAvailable) {
             if (branch?.marketplace_barbershop_id) {
                 const { error: originError } = await db.from('client_barbershop_origins').upsert({
                     marketplace_client_id: marketplaceClient.id,
