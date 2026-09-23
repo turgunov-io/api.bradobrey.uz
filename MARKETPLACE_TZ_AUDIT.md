@@ -6,7 +6,7 @@
 
 | Область | Статус | Реализация / доказательство | Остаток |
 |---|---|---|---|
-| Phone OTP и один аккаунт на номер | PARTIALLY DONE | E.164 OTP, уникальный телефон, JWT, rate limit | Нужна реальная SMS-проверка после настройки провайдера |
+| Email/Gmail sign in и регистрация | DONE (code/config) | Email OTP при регистрации, email+password login, JWT, rate limit; phone OTP оставлен только для legacy/optional profile linking | Нужна runtime smoke-проверка SMTP и email OTP |
 | Одна активная бронь | DONE (после миграции) | Partial unique index + транзакционные проверки | Применить миграцию PostgreSQL |
 | Group booking 1–4 persons | DONE (после миграции) | `groupBooking.js`, person/service tables, idempotency, aggregate queue trigger waits for every person to reach terminal state | Нужен integration test на реальной БД |
 | 1–3 услуги и лимит 180 минут | DONE | Backend validation + platform settings | Нужен integration test |
@@ -24,7 +24,7 @@
 | Notifications inbox | DONE (после миграции) | Read/unread API and Flutter screen | Push provider credentials required |
 | Push delivery | PARTIALLY DONE | Outbox dispatcher + optional webhook adapter, Asia/Tashkent quiet-hours policy for marketing types, atomic outbox claim/retry and delivery deduplication; Flutter FCM/APNs token bridge posts to `/compliance/push-tokens`; queue trigger emits bounded `ALMOST_YOUR_TURN` notifications for positions 1–2; Verifix shift start/break end emits deduplicated `BARBER_READY` notifications; successful cashback earn emits deduplicated `CASHBACK_EARNED`; marketplace-scoped promo creation targets `PROMO_FROM_SHOP` only to clients with a shop origin | Add Firebase platform files/credentials and run device delivery smoke test |
 | Security / rate limiting / audit | PARTIALLY DONE | JWT, account-aware limits, failed-login audit, request audit, request-id and baseline security headers (`nosniff`, frame/referrer/permissions policies, HSTS in production), explicit `TRUST_PROXY` gate, threat model; single marketplace bookings through the shared kiosk endpoint now also write `marketplace_audit_logs` with request id | Need external security review and DB audit verification |
-| Flutter screens | PARTIALLY DONE | Phone auth, live active booking (including bookings created at kiosk), API-backed barbershop list with search, referrals with sharing, notifications, cancel/review, cashback wallet, status-points loyalty display, localization, native token bridge, blocked-account booking guard while read-only screens remain available | Maps/native push need device integration verification |
+| Flutter screens | PARTIALLY DONE | Email/Gmail-oriented auth routing with email OTP registration and password login; phone auth is no longer exposed as the sign-in/sign-up entry flow. Live active booking (including bookings created at kiosk), API-backed barbershop list with search, referrals with sharing, notifications, cancel/review, cashback wallet, status-points loyalty display, localization, native token bridge, blocked-account booking guard while read-only screens remain available | Maps/native push need device integration verification |
 | Automated tests | PARTIALLY DONE | Flutter 52 tests; API 22 tests, including settings, security headers, compliance module loading and migration contract invariants; added `npm run test:integration` real-PostgreSQL schema/lock smoke suite | Integration suite is intentionally skipped until `MARKETPLACE_INTEGRATION=1` and valid database credentials; full concurrency/e2e run remains pending |
 
 ## Deployment gate
