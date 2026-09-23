@@ -571,7 +571,9 @@ class Kiosk {
             }
             const { data: mpClient, error: mpError } = await db
                 .from('marketplace_clients')
-                .select('id, phone, is_active, blocked_until, no_show_streak')
+                // Keep booking creation compatible with databases that have
+                // not applied the optional marketplace compliance columns yet.
+                .select('id, phone, is_active')
                 .eq('id', actorId)
                 .maybeSingle();
             if (mpError) return res.status(500).json({ error: mpError.message });
