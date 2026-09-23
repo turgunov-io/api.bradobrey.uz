@@ -12,7 +12,8 @@ const MARKETPLACE_ROLE = 'marketplace';
 
 const DEFAULT_AVATAR_URL_TEMPLATE =
   process.env.DEFAULT_AVATAR_URL_TEMPLATE ||
-  'https://api.dicebear.com/7.x/identicon/svg?seed={seed}';
+  // Android's native decoder does not support SVG responses reliably.
+  'https://api.dicebear.com/7.x/identicon/png?seed={seed}';
 
 const getBearerToken = (req) => {
   const authHeader = req.headers.authorization || '';

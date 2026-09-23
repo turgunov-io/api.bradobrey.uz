@@ -108,12 +108,19 @@ async function notifications(req, res) {
   const clientId = authClient(req, res);
   if (!clientId) return;
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
-  const result = await pool.query(
-    `select id, type, payload, read_at, created_at from marketplace_notifications
-     where marketplace_client_id = $1 order by created_at desc limit $2`,
-    [clientId, limit]
-  );
-  return res.json({ items: result.rows });
+  try {
+    const result = await pool.query(
+      `select id, type, payload, read_at, created_at from marketplace_notifications
+       where marketplace_client_id = $1 order by created_at desc limit $2`,
+      [clientId, limit]
+    );
+    return res.json({ items: result.rows });
+  } catch (error) {
+    if (error?.code === '42P01' || error?.code === '42703') {
+      return res.json({ items: [], available: false });
+    }
+    throw error;
+  }
 }
 
 async function markNotificationRead(req, res) {
