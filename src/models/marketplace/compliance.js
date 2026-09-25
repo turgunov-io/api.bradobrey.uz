@@ -140,9 +140,16 @@ async function registerPushToken(req, res) {
   const clientId = authClient(req, res);
   if (!clientId) return;
   const token = String(req.body?.token || '').trim();
+  const previousToken = String(req.body?.previous_token || '').trim();
   const platform = String(req.body?.platform || '').trim().toUpperCase();
-  if (!token || token.length > 2048 || !['ANDROID', 'IOS', 'WEB'].includes(platform)) {
+  if (!token || token.length > 2048 || previousToken.length > 2048 || !['ANDROID', 'IOS', 'WEB'].includes(platform)) {
     return res.status(400).json({ error: 'token and platform are required' });
+  }
+  if (previousToken && previousToken !== token) {
+    await pool.query(
+      'delete from marketplace_push_tokens where marketplace_client_id = $1 and token = $2',
+      [clientId, previousToken]
+    );
   }
   await pool.query(
     `insert into marketplace_push_tokens (marketplace_client_id, token, platform, last_seen_at)

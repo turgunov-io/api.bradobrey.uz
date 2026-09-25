@@ -1,5 +1,7 @@
 const { pool } = require('../config/postgres');
 const { isMarketingNotification, isQuietHoursAt } = require('../utils/marketplacePushPolicy');
+const { cert, getApps, initializeApp } = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 
 const POLL_INTERVAL_MS = Math.max(5000, Number(process.env.MARKETPLACE_PUSH_POLL_MS || 15000));
 
@@ -76,14 +78,89 @@ const notificationCopy = {
 
 const providerUrl = () => String(process.env.MARKETPLACE_PUSH_WEBHOOK_URL || '').trim();
 
-const sendToProvider = async ({ token, platform, type, payload }) => {
-  const url = providerUrl();
-  if (!url || typeof fetch !== 'function') return false;
+let firebaseMessaging = null;
+let firebaseInitializationAttempted = false;
 
+const firebaseServiceAccount = () => {
+  const raw = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed.project_id || !parsed.client_email || !parsed.private_key) return null;
+    return {
+      projectId: parsed.project_id,
+      clientEmail: parsed.client_email,
+      privateKey: String(parsed.private_key).replace(/\\n/g, '\n'),
+    };
+  } catch (error) {
+    console.error('[marketplace-push] invalid FIREBASE_SERVICE_ACCOUNT_JSON:', error.message);
+    return null;
+  }
+};
+
+const getFirebaseMessaging = () => {
+  if (firebaseMessaging || firebaseInitializationAttempted) return firebaseMessaging;
+  firebaseInitializationAttempted = true;
+  const serviceAccount = firebaseServiceAccount();
+  if (!serviceAccount) return null;
+
+  try {
+    const app = getApps()[0] || initializeApp({ credential: cert(serviceAccount) });
+    firebaseMessaging = getMessaging(app);
+    return firebaseMessaging;
+  } catch (error) {
+    console.error('[marketplace-push] Firebase initialization failed:', error.message);
+    return null;
+  }
+};
+
+const providerConfigured = () => Boolean(getFirebaseMessaging() || providerUrl());
+
+const sendToProvider = async ({
+  token,
+  platform,
+  type,
+  payload,
+  notificationId,
+  title: customTitle,
+  body: customBody,
+}) => {
   const copy = notificationCopy[type] || {
     title: 'BRADOBREY',
     body: 'У вас новое уведомление.',
   };
+  const title = String(customTitle || copy.title).trim();
+  const body = String(customBody || copy.body).trim();
+
+  const messaging = getFirebaseMessaging();
+  if (messaging) {
+    const data = Object.fromEntries(
+      Object.entries({
+        type,
+        notification_id: notificationId,
+        ...(payload || {}),
+      }).map(([key, value]) => [key, String(value ?? '')]),
+    );
+    await messaging.send({
+      token,
+      notification: { title, body },
+      data,
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'queue_reminders_v2',
+          sound: 'default',
+        },
+      },
+      apns: {
+        payload: { aps: { sound: 'default', badge: 1 } },
+      },
+    });
+    return { delivered: true };
+  }
+
+  const url = providerUrl();
+  if (!url || typeof fetch !== 'function') return { delivered: false };
 
   const headers = { 'content-type': 'application/json' };
   if (process.env.MARKETPLACE_PUSH_WEBHOOK_TOKEN) {
@@ -97,17 +174,63 @@ const sendToProvider = async ({ token, platform, type, payload }) => {
       token,
       platform,
       type,
-      title: copy.title,
-      body: copy.body,
+      title,
+      body,
       payload: payload || {},
     }),
   });
 
-  return response.ok;
+  return { delivered: response.ok };
 };
 
+async function sendTestNotificationToClient({ clientId, title, body }) {
+  if (!providerConfigured()) {
+    return { sent: false, reason: 'provider_not_configured', delivered: 0, tokens: 0 };
+  }
+
+  const result = await pool.query(
+    `select marketplace_client_id, token, platform
+       from marketplace_push_tokens
+      where marketplace_client_id = $1`,
+    [clientId],
+  );
+  if (!result.rows.length) {
+    return { sent: false, reason: 'no_tokens', delivered: 0, tokens: 0 };
+  }
+
+  let delivered = 0;
+  for (const token of result.rows) {
+    try {
+      const response = await sendToProvider({
+        token: token.token,
+        platform: token.platform,
+        type: 'TEST_NOTIFICATION',
+        payload: { test: 'true' },
+        title,
+        body,
+      });
+      if (response.delivered) delivered += 1;
+    } catch (error) {
+      console.error('[marketplace-push] test delivery failed', error.message);
+      if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error.code)) {
+        await pool.query(
+          'delete from marketplace_push_tokens where marketplace_client_id = $1 and token = $2',
+          [clientId, token.token],
+        );
+      }
+    }
+  }
+
+  return {
+    sent: delivered > 0,
+    reason: delivered > 0 ? undefined : 'delivery_failed',
+    delivered,
+    tokens: result.rows.length,
+  };
+}
+
 const dispatchNotification = async (notificationId) => {
-  if (!providerUrl()) return { sent: false, reason: 'provider_not_configured' };
+  if (!providerConfigured()) return { sent: false, reason: 'provider_not_configured' };
 
   const result = await pool.query(
     `with claimed as (
@@ -117,7 +240,7 @@ const dispatchNotification = async (notificationId) => {
           and (push_claimed_at is null or push_claimed_at < now() - interval '10 minutes')
         returning id
      )
-     select n.id, n.type, n.payload, t.token, t.platform
+       select n.id, n.marketplace_client_id, n.type, n.payload, t.token, t.platform
        from claimed c
        join marketplace_notifications n on n.id = c.id
        left join marketplace_push_tokens t
@@ -141,14 +264,22 @@ const dispatchNotification = async (notificationId) => {
   let delivered = 0;
   for (const token of tokens) {
     try {
-      if (await sendToProvider({
+      const result = await sendToProvider({
         token: token.token,
         platform: token.platform,
         type: notification.type,
         payload: notification.payload,
-      })) delivered += 1;
+        notificationId: notification.id,
+      });
+      if (result.delivered) delivered += 1;
     } catch (error) {
       console.error('[marketplace-push] delivery failed', error.message);
+      if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error.code)) {
+        await pool.query(
+          'delete from marketplace_push_tokens where marketplace_client_id = $1 and token = $2',
+          [notification.marketplace_client_id, token.token],
+        );
+      }
     }
   }
 
@@ -165,7 +296,7 @@ const dispatchNotification = async (notificationId) => {
 };
 
 const dispatchPending = async () => {
-  if (!providerUrl()) return;
+  if (!providerConfigured()) return;
 
   const result = await pool.query(
     `select id
@@ -198,7 +329,7 @@ const enqueueReferralExpiryNotifications = async () => {
 };
 
 const startMarketplaceNotificationDispatcher = () => {
-  if (!providerUrl()) {
+  if (!providerConfigured()) {
     console.log('[marketplace-push] provider is not configured; inbox notifications remain available');
   }
 
@@ -228,7 +359,7 @@ const startMarketplaceNotificationDispatcher = () => {
   timer.unref?.();
   expiryTimer.unref?.();
   void expiryTick();
-  if (providerUrl()) void tick();
+  if (providerConfigured()) void tick();
 
   return () => {
     clearInterval(timer);
@@ -238,5 +369,6 @@ const startMarketplaceNotificationDispatcher = () => {
 
 module.exports = {
   dispatchNotification,
+  sendTestNotificationToClient,
   startMarketplaceNotificationDispatcher,
 };

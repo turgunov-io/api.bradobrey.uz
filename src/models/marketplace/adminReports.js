@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 
 const { pool } = require('../../config/postgres');
+const { sendTestNotificationToClient } = require('../../services/marketplacePush');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 
@@ -95,4 +96,37 @@ async function listReviews(req, res) {
   }
 }
 
-module.exports = { listMobileUsers, listReviews };
+async function sendTestNotification(req, res) {
+  const administrator = requireAdmin(req, res);
+  if (!administrator) return;
+
+  const clientId = String(req.params?.id || '').trim();
+  const title = String(req.body?.title || 'Тестовое уведомление').trim();
+  const body = String(req.body?.body || 'Push-уведомления работают.').trim();
+  if (!clientId || !title || !body || title.length > 120 || body.length > 500) {
+    return res.status(400).json({ error: 'Valid title and body are required' });
+  }
+
+  const clientResult = await pool.query(
+    'select id from marketplace_clients where id = $1 limit 1',
+    [clientId],
+  );
+  if (!clientResult.rows[0]) return res.status(404).json({ error: 'Marketplace client not found' });
+
+  try {
+    const result = await sendTestNotificationToClient({ clientId, title, body });
+    if (result.reason === 'provider_not_configured') {
+      return res.status(503).json({ error: 'Push provider is not configured' });
+    }
+    if (result.reason === 'no_tokens') {
+      return res.status(409).json({ error: 'This user has no registered mobile device' });
+    }
+    if (!result.sent) return res.status(502).json({ error: 'Push delivery failed' });
+    return res.json({ sent: true, delivered: result.delivered, tokens: result.tokens });
+  } catch (error) {
+    console.error('[marketplace-admin] test notification failed', error);
+    return res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+}
+
+module.exports = { listMobileUsers, listReviews, sendTestNotification };
