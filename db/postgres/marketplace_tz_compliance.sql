@@ -342,6 +342,9 @@ create table if not exists marketplace_push_tokens (
 );
 
 alter table marketplace_clients add column if not exists display_name text;
+alter table marketplace_clients add column if not exists language text not null default 'ru';
+alter table marketplace_clients drop constraint if exists marketplace_clients_language_check;
+alter table marketplace_clients add constraint marketplace_clients_language_check check (language in ('uz', 'ru', 'en'));
 alter table marketplace_clients alter column email drop not null;
 alter table marketplace_clients add column if not exists status_points integer not null default 0;
 alter table marketplace_clients add column if not exists cancel_count_today integer not null default 0;
@@ -365,10 +368,32 @@ insert into platform_settings (key, value, description)
 values
   ('booking_limits', '{"max_persons":4,"max_services_per_person":3,"max_duration_minutes":180,"max_daily_bookings":5}'::jsonb, 'Marketplace booking limits'),
   ('anti_fraud', '{"cancel_cooldown_minutes":15,"cancel_block_threshold":3,"no_show_block_threshold":5,"block_hours":24}'::jsonb, 'Marketplace anti-fraud settings'),
-  ('status_points', '{"completed_service_points":10,"late_cancel_penalty":-10,"no_show_penalty":-20,"daily_positive_limit":100}'::jsonb, 'Marketplace status point rules'),
+  ('status_points', '{"completed_service_points":10,"late_cancel_penalty":-10,"no_show_penalty":-30,"daily_positive_limit":20}'::jsonb, 'Marketplace status point rules'),
   ('loyalty_levels', '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb, 'Marketplace status point levels'),
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
 on conflict (key) do nothing;
+
+-- Correct the previous non-TZ defaults without overwriting administrator changes.
+update platform_settings
+   set value = jsonb_set(jsonb_set(value, '{no_show_penalty}', '-30'::jsonb), '{daily_positive_limit}', '20'::jsonb),
+       updated_at = now()
+ where key = 'status_points'
+   and value ->> 'no_show_penalty' = '-20'
+   and value ->> 'daily_positive_limit' = '100';
+
+alter table marketplace_reviews add column if not exists barber_id uuid references barbers(id) on delete set null;
+alter table marketplace_reviews add column if not exists shop_response text;
+alter table marketplace_reviews add column if not exists shop_responded_at timestamptz;
+
+create table if not exists marketplace_review_alerts (
+  id uuid default gen_random_uuid() primary key,
+  review_id uuid not null unique references marketplace_reviews(id) on delete cascade,
+  barbershop_id uuid references marketplace_barbershops(id) on delete set null,
+  rating smallint not null check (rating between 1 and 2),
+  status text not null default 'OPEN' check (status in ('OPEN', 'RESOLVED')),
+  created_at timestamptz not null default now(),
+  resolved_at timestamptz
+);
 
 create or replace function marketplace_loyalty_level(points integer)
 returns text

@@ -1,14 +1,25 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Pool } = require('pg');
+require('dotenv').config();
 
 const enabled = process.env.MARKETPLACE_INTEGRATION === '1';
 
 test('PostgreSQL marketplace migration is applied and locked safely', { skip: !enabled }, async () => {
   const connectionString = process.env.MARKETPLACE_DATABASE_URL || process.env.DATABASE_URL;
-  assert.ok(connectionString, 'Set MARKETPLACE_DATABASE_URL or DATABASE_URL');
+  const discreteConfig = {
+    host: process.env.PGHOST || process.env.POSTGRES_HOST || 'localhost',
+    port: Number(process.env.PGPORT || process.env.POSTGRES_PORT || 5432),
+    database: process.env.PGDATABASE || process.env.POSTGRES_DB,
+    user: process.env.PGUSER || process.env.POSTGRES_USER,
+    password: process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD,
+  };
+  assert.ok(
+    connectionString || (discreteConfig.database && discreteConfig.user),
+    'Set MARKETPLACE_DATABASE_URL, DATABASE_URL, or PGHOST/PGDATABASE/PGUSER/PGPASSWORD',
+  );
 
-  const pool = new Pool({ connectionString });
+  const pool = new Pool(connectionString ? { connectionString } : discreteConfig);
   const client = await pool.connect();
   try {
     const requiredTables = [
@@ -57,4 +68,3 @@ test('PostgreSQL marketplace migration is applied and locked safely', { skip: !e
     await pool.end();
   }
 });
-

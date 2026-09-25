@@ -215,8 +215,13 @@ class MarketplaceAuth {
   async verifyPhone(req, res) {
     const phone = normalizePhone(req.body?.phone);
     const code = normalizeOtpCode(req.body?.code);
+    const displayName = String(req.body?.display_name || '').trim().slice(0, 120);
+    const language = String(req.body?.language || 'ru').trim().toLowerCase();
     if (!isValidE164(phone) || !/^\d{6}$/.test(code)) {
       return res.status(400).json({ error: 'Valid phone and six-digit code are required' });
+    }
+    if (!['uz', 'ru', 'en'].includes(language)) {
+      return res.status(400).json({ error: 'language must be uz, ru, or en' });
     }
 
     const client = await pool.connect();
@@ -232,12 +237,25 @@ class MarketplaceAuth {
         return res.status(400).json({ error: 'Invalid or expired OTP' });
       }
 
+      const existingAccount = await client.query(
+        'select id, display_name from marketplace_clients where phone = $1 for update',
+        [phone],
+      );
+      if (!existingAccount.rows[0] && displayName.length < 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Name is required for registration' });
+      }
+      const storedDisplayName = displayName || existingAccount.rows[0]?.display_name || 'Client';
+
       const accountResult = await client.query(
-        `insert into marketplace_clients (phone, is_active)
-         values ($1, true)
-         on conflict (phone) where phone is not null do update set last_login_at = now()
-         returning id, phone, is_active, (xmax = 0) as created_new`,
-        [phone]
+        `insert into marketplace_clients (phone, display_name, language, is_active)
+         values ($1, $2, $3, true)
+         on conflict (phone) where phone is not null do update
+           set display_name = case when marketplace_clients.display_name is null or marketplace_clients.display_name = '' then excluded.display_name else marketplace_clients.display_name end,
+               language = excluded.language,
+               last_login_at = now()
+         returning id, phone, display_name, language, is_active, (xmax = 0) as created_new`,
+        [phone, storedDisplayName, language]
       );
       const account = accountResult.rows[0];
       if (!account || account.is_active === false) {
@@ -299,7 +317,8 @@ class MarketplaceAuth {
         client: {
           id: account.id,
           phone: account.phone,
-          display_name: null,
+          display_name: account.display_name,
+          language: account.language,
           is_active: account.is_active,
         },
       });

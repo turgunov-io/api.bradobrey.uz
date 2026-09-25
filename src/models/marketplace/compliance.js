@@ -37,12 +37,12 @@ function authClient(req, res) {
 
 async function getClient(clientId) {
   const result = await pool.query(
-    `select id, phone, is_active
+    `select id, phone, is_active, status_points, blocked_until, cancel_count_today
        from marketplace_clients where id = $1`,
     [clientId]
   );
   return result.rows[0]
-    ? { ...result.rows[0], status_points: 0, blocked_until: null, cancel_count_today: 0 }
+    ? result.rows[0]
     : null;
 }
 
@@ -240,7 +240,7 @@ async function createReview(req, res) {
           // update of the existing review instead of rejecting it because the
           // request id is intentionally stable per booking.
           const existingReview = await dbClient.query(
-            `select r.id, r.booking_id
+            `select r.id, r.booking_id, r.created_at
                from marketplace_reviews r
               where r.marketplace_client_id = $2
                 and (r.booking_id = $1 or exists (
@@ -251,6 +251,10 @@ async function createReview(req, res) {
             [bookingId, clientId],
           );
           if (existingReview.rows[0]) {
+            if (new Date(existingReview.rows[0].created_at).getTime() < Date.now() - 24 * 60 * 60 * 1000) {
+              await dbClient.query('ROLLBACK');
+              return res.status(409).json({ error: 'REVIEW_EDIT_WINDOW_EXPIRED' });
+            }
             const updatedReview = await dbClient.query(
               `update marketplace_reviews
                   set rating = $2, comment = $3, updated_at = now()
@@ -350,11 +354,32 @@ async function createReview(req, res) {
       await dbClient.query('ROLLBACK');
       return res.status(409).json({ error: 'REVIEW_NOT_ALLOWED' });
     }
-    const result = await dbClient.query(
-      `insert into marketplace_reviews (marketplace_client_id, booking_id, rating, comment)
-       values ($1, $2, $3, $4) returning *`,
-      [clientId, resolvedBookingId, rating, comment]
+    const reviewContext = await dbClient.query(
+      `select br.marketplace_barbershop_id as barbershop_id, p.barber_id
+         from marketplace_bookings b
+         left join marketplace_booking_persons p on p.booking_id = b.id
+         left join queue_entries q on q.id = p.queue_entry_id
+         left join branches br on br.id = q.branch_id
+        where b.id = $1
+        order by p.person_index
+        limit 1`,
+      [resolvedBookingId],
     );
+    const barbershopId = reviewContext.rows[0]?.barbershop_id || null;
+    const barberId = reviewContext.rows[0]?.barber_id || null;
+    const result = await dbClient.query(
+      `insert into marketplace_reviews (marketplace_client_id, booking_id, barbershop_id, barber_id, rating, comment)
+       values ($1, $2, $3, $4, $5, $6) returning *`,
+      [clientId, resolvedBookingId, barbershopId, barberId, rating, comment]
+    );
+    if (rating <= 2) {
+      await dbClient.query(
+        `insert into marketplace_review_alerts (review_id, barbershop_id, rating)
+         values ($1, $2, $3)
+         on conflict (review_id) do nothing`,
+        [result.rows[0].id, barbershopId, rating],
+      );
+    }
     await dbClient.query(
       `insert into marketplace_audit_logs (marketplace_client_id, action, entity_type, entity_id, metadata)
        values ($1, 'REVIEW_CREATED', 'marketplace_booking', $2, $3::jsonb)`,

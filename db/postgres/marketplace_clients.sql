@@ -21,6 +21,13 @@ alter table marketplace_clients
   add column if not exists photo_url text;
 
 alter table marketplace_clients
+  add column if not exists display_name text;
+
+alter table marketplace_clients
+  add column if not exists language text not null default 'ru'
+    check (language in ('uz', 'ru', 'en'));
+
+alter table marketplace_clients
   add column if not exists is_active boolean;
 
 alter table marketplace_clients

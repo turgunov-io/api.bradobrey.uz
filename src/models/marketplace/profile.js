@@ -179,7 +179,7 @@ class MarketplaceProfile {
     // profile and cashback screens usable against older databases too.
     const { data: optionalFields } = await db
       .from('marketplace_clients')
-      .select('status_points,blocked_until,referral_bonus_balance')
+      .select('status_points,blocked_until,referral_bonus_balance,display_name,language')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -222,7 +222,8 @@ class MarketplaceProfile {
       return res.json({
         profile: {
           ...formatProfile(auth.client, { cashback_balance }),
-          display_name: null,
+          display_name: auth.client.display_name || null,
+          language: auth.client.language || 'ru',
           status_points: Number(auth.client.status_points || 0),
           referral_bonus_balance: Number(auth.client.referral_bonus_balance || 0),
           blocked_until: auth.client.blocked_until || null,
