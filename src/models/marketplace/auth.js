@@ -179,7 +179,9 @@ class MarketplaceAuth {
         return res.status(400).json({ error: 'phone must be in E.164 format' });
       }
 
-      const code = generateOtpCode();
+      // Use the configured/fallback code while SMS delivery is unavailable.
+      // This keeps the code stored in the database aligned with verifyPhone.
+      const code = generateMarketplaceOtpCode();
       const referralCode = String(req.body?.referral_code || '').trim().toUpperCase() || null;
       const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
       const { error: invalidateError } = await db.from('otp_codes')
