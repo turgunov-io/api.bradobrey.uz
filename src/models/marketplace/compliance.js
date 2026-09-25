@@ -187,7 +187,12 @@ async function referral(req, res) {
       [clientId, code]
     );
     const balance = await pool.query(
-      `select referral_bonus_balance from marketplace_clients where id = $1`, [clientId]
+      `select coalesce(w.balance, 0) as cashback_balance,
+              coalesce(mc.referral_bonus_balance, 0) as referral_bonus_balance
+         from marketplace_clients mc
+         left join clients c on c.phone = mc.phone
+         left join cashback_wallets w on w.client_id = c.id
+        where mc.id = $1`, [clientId]
     );
     const invited = await pool.query(
       `select r.id, r.expires_at, r.activated_at, r.created_at,
@@ -200,7 +205,14 @@ async function referral(req, res) {
         group by r.id, mc.email, mc.phone
         order by r.created_at desc`, [clientId]
     );
-    return res.json({ referral_code: result.rows[0].referral_code, bonus_balance: Number(balance.rows[0]?.referral_bonus_balance || 0), invited: invited.rows });
+    return res.json({
+      referral_code: result.rows[0].referral_code,
+      // Referral rewards are spendable from the same cashback wallet.
+      bonus_balance: Number(balance.rows[0]?.cashback_balance || 0),
+      cashback_balance: Number(balance.rows[0]?.cashback_balance || 0),
+      total_referral_earned: Number(balance.rows[0]?.referral_bonus_balance || 0),
+      invited: invited.rows,
+    });
   } catch (error) {
     // The compliance migration may not yet be applied on an older database.
     // Keep the mobile screen usable and expose an explicit unavailable state.
