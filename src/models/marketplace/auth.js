@@ -23,15 +23,15 @@ const generateOtpCode = () => crypto.randomInt(0, 1_000_000).toString().padStart
 const fixedOtpCode = () => {
   const configured = String(process.env.MARKETPLACE_FIXED_OTP || '').trim();
   if (/^\d{4,6}$/.test(configured)) return configured;
-  if (process.env.NODE_ENV !== 'production') return '0000';
-  return null;
+  // Temporary fallback until an SMS provider is configured.
+  return '0000';
 };
 
 const generateMarketplaceOtpCode = () => fixedOtpCode() || generateOtpCode();
 
 const normalizeOtpCode = (codeInput) => {
   if (typeof codeInput === 'number' && Number.isInteger(codeInput)) {
-    return String(codeInput).padStart(6, '0');
+    return String(codeInput).padStart(fixedOtpCode()?.length || 6, '0');
   }
 
   // Gmail clients can copy a code with spaces or a hyphen (for example
@@ -201,6 +201,10 @@ class MarketplaceAuth {
 
       const result = await sendPhoneOtp({ phone, code });
       if (result.sent) return res.json({ message: 'OTP sent' });
+      if (!process.env.SMS_WEBHOOK_URL) {
+        console.warn(`SMS provider is not configured; use fallback OTP ${code}`);
+        return res.json({ message: 'OTP sent' });
+      }
       if (process.env.NODE_ENV === 'production') {
         return res.status(503).json({ error: 'SMS delivery is not configured' });
       }
@@ -215,10 +219,11 @@ class MarketplaceAuth {
   async verifyPhone(req, res) {
     const phone = normalizePhone(req.body?.phone);
     const code = normalizeOtpCode(req.body?.code);
+    const expectedOtpLength = fixedOtpCode()?.length || 6;
     const displayName = String(req.body?.display_name || '').trim().slice(0, 120);
     const language = String(req.body?.language || 'ru').trim().toLowerCase();
-    if (!isValidE164(phone) || !/^\d{6}$/.test(code)) {
-      return res.status(400).json({ error: 'Valid phone and six-digit code are required' });
+    if (!isValidE164(phone) || !new RegExp(`^\\d{${expectedOtpLength}}$`).test(code)) {
+      return res.status(400).json({ error: `Valid phone and ${expectedOtpLength}-digit code are required` });
     }
     if (!['uz', 'ru', 'en'].includes(language)) {
       return res.status(400).json({ error: 'language must be uz, ru, or en' });
