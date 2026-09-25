@@ -1,5 +1,68 @@
 const { pool } = require('../config/postgres');
 
+async function creditReferralToCashbackWallet(client, { referralTransactionId, referrerClientId, amount, bookingId }) {
+  const referrer = await client.query(
+    `select phone, coalesce(nullif(display_name, ''), 'Client') as display_name
+       from marketplace_clients
+      where id = $1
+      for update`,
+    [referrerClientId],
+  );
+  const phone = referrer.rows[0]?.phone;
+  if (!phone) throw new Error('Referrer phone is required for cashback wallet');
+
+  const legacyClient = await client.query(
+    `insert into clients (name, phone)
+     values ($1, $2)
+     on conflict (phone) do update set name = coalesce(nullif(clients.name, ''), excluded.name)
+     returning id`,
+    [referrer.rows[0].display_name, phone],
+  );
+  const legacyClientId = legacyClient.rows[0]?.id;
+  if (!legacyClientId) throw new Error('Unable to resolve referrer cashback wallet');
+
+  const requestId = `referral_bonus:${referralTransactionId}`;
+  const walletTransaction = await client.query(
+    `insert into cashback_transactions
+      (client_id, kind, amount, meta, request_id)
+     values ($1, 'adjust', $2, $3::jsonb, $4)
+     on conflict (request_id) do nothing
+     returning id`,
+    [legacyClientId, amount, JSON.stringify({ source: 'referral', booking_id: bookingId, referral_transaction_id: referralTransactionId }), requestId],
+  );
+  if (!walletTransaction.rows[0]) return false;
+
+  await client.query(
+    `insert into cashback_wallets (client_id, balance)
+     values ($1, $2)
+     on conflict (client_id) do update
+       set balance = round((cashback_wallets.balance + excluded.balance)::numeric, 2), updated_at = now()`,
+    [legacyClientId, amount],
+  );
+  return true;
+}
+
+async function backfillReferralWallets(client, { limit = 100 } = {}) {
+  const result = await client.query(
+    `select rt.id as referral_transaction_id, rt.booking_id, rt.amount,
+            r.referrer_client_id
+       from referral_transactions rt
+       join referrals r on r.id = rt.referral_id
+      where not exists (
+        select 1 from cashback_transactions ct
+         where ct.request_id = 'referral_bonus:' || rt.id::text
+      )
+      order by rt.created_at asc
+      limit $1`,
+    [Math.min(Math.max(Number(limit) || 100, 1), 500)],
+  );
+  let credited = 0;
+  for (const row of result.rows) {
+    if (await creditReferralToCashbackWallet(client, row)) credited += 1;
+  }
+  return credited;
+}
+
 async function settlePendingReferralBonuses({ limit = 100, referrerClientId = null } = {}) {
   const client = await pool.connect();
   let settled = 0;
@@ -62,7 +125,8 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
         [row.booking_id],
       );
       const paidMoney = Number(row.paid_money || 0);
-      const bonus = Number((paidMoney * Number(row.bonus_percent || 1) / 100).toFixed(2));
+      // Referral rewards are whole cashback points: 1 point equals 1 sum.
+      const bonus = Math.floor(paidMoney * Number(row.bonus_percent || 1) / 100);
       if (paidMoney <= 0 || bonus <= 0) continue;
 
       const inserted = await client.query(
@@ -86,8 +150,15 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
          values ($1, 'REFERRAL_BONUS', $2::jsonb)`,
         [row.referrer_client_id, JSON.stringify({ amount: bonus, booking_id: row.booking_id })],
       );
+      await creditReferralToCashbackWallet(client, {
+        referralTransactionId: inserted.rows[0].id,
+        referrerClientId: row.referrer_client_id,
+        amount: bonus,
+        bookingId: row.booking_id,
+      });
       settled += 1;
     }
+    await backfillReferralWallets(client, { limit: 100 });
     await client.query('COMMIT');
     return { settled };
   } catch (error) {
