@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../../config/postgres');
+const { settlePendingReferralBonuses } = require('../../services/referralBonus');
 
 const MARKETPLACE_ROLE = 'marketplace';
 
@@ -171,6 +172,13 @@ async function referral(req, res) {
   const clientId = authClient(req, res);
   if (!clientId) return;
   try {
+    // Reconcile this user's pending referral rewards immediately. The
+    // background scheduler remains as a fallback for users who are offline.
+    try {
+      await settlePendingReferralBonuses({ referrerClientId: clientId, limit: 100 });
+    } catch (settlementError) {
+      console.error('[marketplace-referral] immediate settlement failed:', settlementError.message);
+    }
     const code = `BR${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
     const result = await pool.query(
       `insert into referral_accounts (marketplace_client_id, referral_code) values ($1, $2)

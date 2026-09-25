@@ -1,10 +1,15 @@
 const { pool } = require('../config/postgres');
 
-async function settlePendingReferralBonuses({ limit = 100 } = {}) {
+async function settlePendingReferralBonuses({ limit = 100, referrerClientId = null } = {}) {
   const client = await pool.connect();
   let settled = 0;
   try {
     await client.query('BEGIN');
+    const params = [Math.min(Math.max(Number(limit) || 100, 1), 500)];
+    const referrerFilter = referrerClientId
+      ? 'and r.referrer_client_id = $2'
+      : '';
+    if (referrerClientId) params.push(referrerClientId);
     const candidates = await client.query(
       `select r.id as referral_id, r.referrer_client_id, b.id as booking_id,
               round(sum(pay.amount)::numeric, 2) as paid_money,
@@ -17,6 +22,7 @@ async function settlePendingReferralBonuses({ limit = 100 } = {}) {
          join payments pay on pay.queue_entry_id = q.id and pay.method in ('cash', 'card')
         where r.expires_at > now()
           and b.status = 'COMPLETED'
+          ${referrerFilter}
           and not exists (
             select 1 from referral_transactions rt
              where rt.referral_id = r.id and rt.booking_id = b.id
@@ -24,7 +30,7 @@ async function settlePendingReferralBonuses({ limit = 100 } = {}) {
         group by r.id, r.referrer_client_id, b.id
         order by b.updated_at asc
         limit $1`,
-      [Math.min(Math.max(Number(limit) || 100, 1), 500)],
+      params,
     );
 
     for (const row of candidates.rows) {
