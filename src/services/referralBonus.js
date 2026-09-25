@@ -12,14 +12,28 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
     if (referrerClientId) params.push(referrerClientId);
     const candidates = await client.query(
       `select r.id as referral_id, r.referrer_client_id, b.id as booking_id,
-              round(sum(pay.amount)::numeric, 2) as paid_money,
+              round((
+                coalesce(sum(pay.amount) filter (where pay.method in ('cash', 'card')), 0)
+                + coalesce(sum(
+                    case
+                      when pay.queue_entry_id is null and q.payment_method in ('cash', 'card') then
+                        coalesce(
+                          q.price_override,
+                          (select sum(s.base_price) from services s where s.id = any(q.service_ids)),
+                          (select s.base_price from services s where s.id = q.service_id),
+                          0
+                        )
+                      else 0
+                    end
+                  ), 0)
+              )::numeric, 2) as paid_money,
               coalesce((select (value ->> 'bonus_percent')::numeric
                           from platform_settings where key = 'referral'), 1) as bonus_percent
          from referrals r
          join marketplace_bookings b on b.marketplace_client_id = r.referred_client_id
          join marketplace_booking_persons bp on bp.booking_id = b.id
          join queue_entries q on q.id = bp.queue_entry_id and q.status = 'completed'
-         join payments pay on pay.queue_entry_id = q.id and pay.method in ('cash', 'card')
+         left join payments pay on pay.queue_entry_id = q.id
         where r.expires_at > now()
           and b.status in ('ACTIVE', 'COMPLETED')
           ${referrerFilter}
