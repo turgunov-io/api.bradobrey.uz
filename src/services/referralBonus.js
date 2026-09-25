@@ -21,11 +21,18 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
          join queue_entries q on q.id = bp.queue_entry_id and q.status = 'completed'
          join payments pay on pay.queue_entry_id = q.id and pay.method in ('cash', 'card')
         where r.expires_at > now()
-          and b.status = 'COMPLETED'
+          and b.status in ('ACTIVE', 'COMPLETED')
           ${referrerFilter}
           and not exists (
             select 1 from referral_transactions rt
              where rt.referral_id = r.id and rt.booking_id = b.id
+          )
+          and not exists (
+            select 1
+              from marketplace_booking_persons pending_bp
+              join queue_entries pending_q on pending_q.id = pending_bp.queue_entry_id
+             where pending_bp.booking_id = b.id
+               and pending_q.status <> 'completed'
           )
         group by r.id, r.referrer_client_id, b.id
         order by b.updated_at asc
@@ -34,6 +41,12 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
     );
 
     for (const row of candidates.rows) {
+      await client.query(
+        `update marketplace_bookings
+            set status = 'COMPLETED', updated_at = now()
+          where id = $1 and status = 'ACTIVE'`,
+        [row.booking_id],
+      );
       const paidMoney = Number(row.paid_money || 0);
       const bonus = Number((paidMoney * Number(row.bonus_percent || 1) / 100).toFixed(2));
       if (paidMoney <= 0 || bonus <= 0) continue;

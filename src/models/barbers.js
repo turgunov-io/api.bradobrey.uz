@@ -26,6 +26,37 @@ const EMPLOYEE_ARCHIVE_FILTERS = new Set(['active', 'only', 'all']);
 const CALL_LATE_MINUTES = 10;
 const STALE_QUEUE_HOURS = 9;
 
+async function syncMarketplaceBookingCompletion(queueEntryId) {
+    const { data: persons, error: personsError } = await db
+        .from('marketplace_booking_persons')
+        .select('booking_id, queue_entry_id')
+        .eq('queue_entry_id', queueEntryId);
+    if (personsError || !persons?.length) return;
+
+    for (const person of persons) {
+        const { data: bookingPersons, error: bookingPersonsError } = await db
+            .from('marketplace_booking_persons')
+            .select('queue_entry_id')
+            .eq('booking_id', person.booking_id);
+        if (bookingPersonsError || !bookingPersons?.length) continue;
+
+        const queueIds = bookingPersons.map((item) => item.queue_entry_id).filter(Boolean);
+        if (!queueIds.length) continue;
+        const { data: queueEntries, error: queueEntriesError } = await db
+            .from('queue_entries')
+            .select('id, status')
+            .in('id', queueIds);
+        if (queueEntriesError || queueEntries.length !== queueIds.length) continue;
+        if (!queueEntries.every((entry) => entry.status === 'completed')) continue;
+
+        await db
+            .from('marketplace_bookings')
+            .update({ status: 'COMPLETED', updated_at: new Date().toISOString() })
+            .eq('id', person.booking_id)
+            .eq('status', 'ACTIVE');
+    }
+}
+
 async function endBreak(barberId, branchId, io) {
     await db
         .from('barbers')
@@ -2573,6 +2604,7 @@ class Barbers {
 
         const cashback = await awardCashbackForCompletedQueueEntry(updated);
         try {
+            await syncMarketplaceBookingCompletion(id);
             await settlePendingReferralBonuses({ limit: 20 });
         } catch (referralError) {
             // Referral settlement has a scheduled recovery path and must not
