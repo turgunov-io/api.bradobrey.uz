@@ -2571,6 +2571,15 @@ class Barbers {
             });
         }
 
+        // Mobile clients may send only payment_method. Keep the payments
+        // ledger complete so revenue, cashback and referral bonuses can use
+        // the actual paid amount consistently.
+        const recordedPaymentParts = paymentParts.length
+            ? paymentParts
+            : (orderAmount > 0 && ['cash', 'card'].includes(finalPaymentMethod)
+                ? [{ amount: orderAmount, method: finalPaymentMethod }]
+                : []);
+
         clearCallTimer(id);
 
         const updatePayload = {
@@ -2595,7 +2604,7 @@ class Barbers {
 
         try {
             payments = await replaceQueueEntryPayments({
-                payments: paymentParts,
+                payments: recordedPaymentParts,
                 queueEntryId: id,
             });
         } catch (error) {
