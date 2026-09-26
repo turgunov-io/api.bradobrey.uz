@@ -458,6 +458,7 @@ const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durati
 
   const scheduleStart = zonedDateTimeToUtc({ dateStr: localDate, timeStr: startHHMM, timeZone: timezone });
   let scheduleEnd = zonedDateTimeToUtc({ dateStr: localDate, timeStr: endHHMM, timeZone: timezone });
+  let effectiveScheduleStart = scheduleStart;
   if (!scheduleStart || !scheduleEnd) {
     const err = new Error('Invalid work schedule time');
     err.statusCode = 500;
@@ -469,10 +470,32 @@ const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durati
       timeStr: endHHMM,
       timeZone: timezone,
     });
+
+    // A window such as 10:00–09:00 spans midnight. During the continuation
+    // after midnight, the active window started on the previous local date.
+    // Without this adjustment, 00:16 is incorrectly rejected as before the
+    // opening time.
+    const continuationStart = zonedDateTimeToUtc({
+      dateStr: localDate,
+      timeStr: '00:00',
+      timeZone: timezone,
+    });
+    if (start >= continuationStart && start < scheduleEnd && start < scheduleStart) {
+      effectiveScheduleStart = zonedDateTimeToUtc({
+        dateStr: addDaysToDateString(localDate, -1),
+        timeStr: startHHMM,
+        timeZone: timezone,
+      });
+      scheduleEnd = zonedDateTimeToUtc({
+        dateStr: localDate,
+        timeStr: endHHMM,
+        timeZone: timezone,
+      });
+    }
   }
 
   const end = new Date(start.getTime() + Math.max(1, Number(durationMinutes || 0)) * 60 * 1000);
-  if (start < scheduleStart || end > scheduleEnd) {
+  if (start < effectiveScheduleStart || end > scheduleEnd) {
     const err = new Error('SERVICE_NOT_AVAILABLE_TODAY');
     err.statusCode = 400;
     err.code = 'SERVICE_NOT_AVAILABLE_TODAY';
@@ -555,11 +578,21 @@ const listAvailability = async ({ branchId, barberId, serviceIds, date }) => {
   const dayStartUtc = zonedDateTimeToUtc({ dateStr: requestedDate, timeStr: '00:00', timeZone: timezone });
   const dayEndUtc = zonedDateTimeToUtc({ dateStr: nextDate, timeStr: '00:00', timeZone: timezone });
 
-  const scheduleStartUtc = zonedDateTimeToUtc({ dateStr: requestedDate, timeStr: startHHMM, timeZone: timezone });
-  let scheduleEndUtc = zonedDateTimeToUtc({ dateStr: requestedDate, timeStr: endHHMM, timeZone: timezone });
-  if (scheduleStartUtc && scheduleEndUtc && scheduleEndUtc <= scheduleStartUtc) {
-    scheduleEndUtc = zonedDateTimeToUtc({ dateStr: nextDate, timeStr: endHHMM, timeZone: timezone });
-  }
+   let scheduleStartUtc = zonedDateTimeToUtc({ dateStr: requestedDate, timeStr: startHHMM, timeZone: timezone });
+   let scheduleEndUtc = zonedDateTimeToUtc({ dateStr: requestedDate, timeStr: endHHMM, timeZone: timezone });
+   if (scheduleStartUtc && scheduleEndUtc && scheduleEndUtc <= scheduleStartUtc) {
+     const todayEndUtc = scheduleEndUtc;
+     const nowIsInContinuation = now.getTime() < todayEndUtc.getTime();
+     if (nowIsInContinuation) {
+       scheduleStartUtc = zonedDateTimeToUtc({
+         dateStr: addDaysToDateString(requestedDate, -1),
+         timeStr: startHHMM,
+         timeZone: timezone,
+       });
+     } else {
+       scheduleEndUtc = zonedDateTimeToUtc({ dateStr: nextDate, timeStr: endHHMM, timeZone: timezone });
+     }
+   }
 
   if (!dayStartUtc || !dayEndUtc || !scheduleStartUtc || !scheduleEndUtc) {
     const err = new Error('Failed to build availability window');
