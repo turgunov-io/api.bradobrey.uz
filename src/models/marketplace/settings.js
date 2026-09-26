@@ -64,8 +64,11 @@ class MarketplaceSettings {
       );
       await client.query(
         `insert into marketplace_audit_logs (action, entity_type, entity_id, metadata)
-         values ($1, 'platform_setting', $2, $3::jsonb)`,
-        ['PLATFORM_SETTING_UPDATED', key, JSON.stringify({ actor, role: administrator.role })],
+         values ($1, 'platform_setting', null, $2::jsonb)`,
+        [
+          'PLATFORM_SETTING_UPDATED',
+          JSON.stringify({ actor, role: administrator.role, key }),
+        ],
       );
       await client.query('COMMIT');
       return res.json({ setting: result.rows[0] });
