@@ -157,11 +157,15 @@ async function spendCashback({ clientId, queueEntryId, amount, meta }) {
       return { spent: false, amount: 0, balance, reason: 'insufficient_balance', transaction: null };
     }
     const transaction = await client.query(
-      `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta)
-       values ($1, $2, 'spend', $3, $4::jsonb)
-       on conflict (queue_entry_id, kind) do nothing
+      `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta, request_id)
+       values ($1, $2, 'spend', $3, $4::jsonb, $5)
+       on conflict (request_id) do nothing
        returning id, client_id, queue_entry_id, kind, amount, created_at`,
-      [clientId, queueEntryId, amt, JSON.stringify(meta || null)]
+      [clientId, queueEntryId, amt, JSON.stringify({
+        source: 'cashback_spend',
+        description: 'Использование бонусов при оплате заказа',
+        ...(meta || {}),
+      }), `cashback_spend:${queueEntryId}`]
     );
     if (!transaction.rows[0]) {
       await client.query('ROLLBACK');
@@ -214,11 +218,15 @@ async function refundCashbackSpend({ clientId, queueEntryId, amount, transaction
       return { refunded: false, balance: await getWalletBalance(clientId), reason: 'invalid_refund_amount' };
     }
     const reversal = await client.query(
-      `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, reversal_of, meta)
-       values ($1, $2, 'adjust', $3, $4, $5::jsonb)
+      `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, reversal_of, meta, request_id)
+       values ($1, $2, 'adjust', $3, $4, $5::jsonb, $6)
        on conflict (reversal_of, kind) where reversal_of is not null do nothing
        returning id`,
-      [clientId, queueEntryId || null, refundAmount, original.rows[0].id, JSON.stringify({ type: 'spend_reversal' })]
+      [clientId, queueEntryId || null, refundAmount, original.rows[0].id, JSON.stringify({
+        type: 'spend_reversal',
+        source: 'cashback_refund',
+        description: 'Возврат списанных бонусов',
+      }), `cashback_refund:${original.rows[0].id}`]
     );
     if (!reversal.rows[0]) {
       await client.query('ROLLBACK');
@@ -252,10 +260,6 @@ async function getCashbackSpendForOrder(orderId) {
     .maybeSingle();
 
   if (error) {
-    const msg = String(error.message || '');
-    if (msg.includes("Could not find the 'cashback_transactions'") || msg.includes('cashback_transactions')) {
-      return 0;
-    }
     throw error;
   }
 
@@ -273,10 +277,6 @@ async function getWalletBalance(clientId) {
     .maybeSingle();
 
   if (error) {
-    const msg = String(error.message || '');
-    if (msg.includes("Could not find the 'cashback_wallets'") || msg.includes('cashback_wallets')) {
-      return 0;
-    }
     throw error;
   }
 
@@ -478,10 +478,6 @@ async function insertCashbackTransaction({ clientId, queueEntryId, kind, amount,
     if (error.code === '23505') {
       return { inserted: false, transaction: null };
     }
-    const msg = String(error.message || '');
-    if (msg.includes("Could not find the 'cashback_transactions'") || msg.includes('cashback_transactions')) {
-      return { inserted: false, transaction: null };
-    }
     throw error;
   }
 
@@ -523,13 +519,19 @@ async function spendCashbackForQueueEntry(entry, amountInput) {
     return { spent: false, amount: 0, balance: await getWalletBalance(entry.client_id), reason: 'zero_total' };
   }
 
-  if (amount > discountedTotal) {
+  let maxRedeemShare = 1;
+  const { data: policy } = await db.from('platform_settings').select('value').eq('key', 'cashback_policy').maybeSingle();
+  const configuredShare = Number(policy?.value?.max_redeem_share ?? policy?.value?.maxRedeemShare);
+  if (Number.isFinite(configuredShare)) maxRedeemShare = Math.min(1, Math.max(0, configuredShare));
+  const maxSpend = roundMoney(discountedTotal * maxRedeemShare);
+  if (amount > maxSpend) {
     return {
       spent: false,
       amount: 0,
       balance: await getWalletBalance(entry.client_id),
       reason: 'exceeds_order_total',
-      max: discountedTotal,
+      max: maxSpend,
+      max_share: maxRedeemShare,
     };
   }
 
@@ -563,6 +565,9 @@ async function spendCashbackForQueueEntry(entry, amountInput) {
 
 async function awardCashbackForCompletedQueueEntry(entry) {
   if (!entry?.id || !entry?.client_id) return { awarded: false, balance: null };
+  if (String(entry.status || '').toLowerCase() !== 'completed') {
+    return { awarded: false, balance: null, reason: 'order_not_completed' };
+  }
 
   const percent = await getCashbackPercentForEntry(entry);
   if (!percent) return { awarded: false, balance: null };
@@ -597,6 +602,11 @@ async function awardCashbackForCompletedQueueEntry(entry) {
     if (!cashbackEarned) return { awarded: false, balance: await getWalletBalance(entry.client_id), earned: 0 };
 
     const ledgerMeta = {
+      source: 'cashback_order',
+      description: 'Кэшбэк за заказ',
+      order_total: total,
+      paid_amount: netPaid,
+      cashback_percent: percent,
       percent,
       total,
       discounted_total: discountedTotal,
@@ -609,10 +619,10 @@ async function awardCashbackForCompletedQueueEntry(entry) {
     try {
       await client.query('BEGIN');
       const transaction = await client.query(
-        `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta)
-         values ($1, $2, 'earn', $3, $4::jsonb)
-         on conflict (queue_entry_id, kind) do nothing returning id`,
-        [entry.client_id, entry.id, cashbackEarned, JSON.stringify(ledgerMeta)]
+        `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta, request_id)
+         values ($1, $2, 'earn', $3, $4::jsonb, $5)
+         on conflict (request_id) do nothing returning id`,
+        [entry.client_id, entry.id, cashbackEarned, JSON.stringify(ledgerMeta), `cashback_order:${entry.id}`]
       );
       if (!transaction.rows[0]) {
         await client.query('ROLLBACK');
@@ -676,7 +686,7 @@ async function awardCashbackForCompletedQueueEntry(entry) {
     }
   } catch (e) {
     console.error('Cashback award failed:', e?.message || e);
-    return { awarded: false, balance: null };
+    throw e;
   }
 }
 

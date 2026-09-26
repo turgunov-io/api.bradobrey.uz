@@ -18,6 +18,9 @@ const REQUIRED_TABLES = [
   'marketplace_fraud_alerts',
   'cashback_settlements',
   'cashback_reconciliation_alerts',
+  'cashback_wallets',
+  'cashback_transactions',
+  'referral_transactions',
 ];
 
 const REQUIRED_INDEXES = [
@@ -26,6 +29,8 @@ const REQUIRED_INDEXES = [
   'status_point_queue_kind_uidx',
   'referral_transactions_referral_id_booking_id_key',
   'cashback_reconciliation_open_client_uidx',
+  'idx_cashback_transactions_request_id',
+  'idx_cashback_transactions_reversal_kind',
 ];
 
 async function verify(client) {

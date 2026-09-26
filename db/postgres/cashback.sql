@@ -8,6 +8,13 @@ create table if not exists cashback_wallets (
   updated_at timestamptz not null default now()
 );
 
+do $$
+begin
+  alter table cashback_wallets
+    add constraint cashback_wallets_nonnegative_balance check (balance >= 0) not valid;
+exception when duplicate_object then null;
+end $$;
+
 create table if not exists cashback_transactions (
   id uuid default gen_random_uuid() primary key,
   client_id uuid not null references clients(id) on delete cascade,
@@ -31,6 +38,8 @@ create index if not exists idx_cashback_transactions_client_created_at
 
 create index if not exists idx_cashback_transactions_queue_entry_id
   on cashback_transactions (queue_entry_id);
+create index if not exists idx_cashback_transactions_created_at
+  on cashback_transactions (created_at desc);
 
 alter table cashback_transactions add column if not exists request_id text;
 alter table cashback_transactions add column if not exists reversal_of uuid references cashback_transactions(id) on delete restrict;

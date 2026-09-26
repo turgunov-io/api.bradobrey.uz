@@ -179,7 +179,7 @@ class MarketplaceProfile {
     // profile and cashback screens usable against older databases too.
     const { data: optionalFields } = await db
       .from('marketplace_clients')
-      .select('status_points,blocked_until,referral_bonus_balance,display_name,language')
+      .select('status_points,blocked_until,display_name,language')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -225,7 +225,6 @@ class MarketplaceProfile {
           display_name: auth.client.display_name || null,
           language: auth.client.language || 'ru',
           status_points: Number(auth.client.status_points || 0),
-          referral_bonus_balance: Number(auth.client.referral_bonus_balance || 0),
           blocked_until: auth.client.blocked_until || null,
           loyalty,
           status_loyalty: statusLoyalty,
@@ -640,7 +639,7 @@ class MarketplaceProfile {
         const meta = row.meta && typeof row.meta === 'object' ? row.meta : {};
         const type = String(meta.type || '').trim().toLowerCase();
         let source = 'adjustment';
-        if (String(meta.source || '').trim().toLowerCase() === 'referral') {
+        if (['referral', 'referral_bonus'].includes(String(meta.source || '').trim().toLowerCase())) {
           source = 'referral_bonus';
         } else if (row.kind === 'earn') {
           source = 'cashback_order';
@@ -650,12 +649,17 @@ class MarketplaceProfile {
           source = 'cashback_refund';
         }
 
+        const signedAmount = row.kind === 'spend'
+          || (row.kind === 'adjust' && type === 'debit')
+          ? -Number(row.amount || 0)
+          : Number(row.amount || 0);
         return {
           id: row.id,
           client_id: row.client_id,
           queue_entry_id: row.queue_entry_id,
           kind: row.kind,
           amount: Number(row.amount || 0),
+          signed_amount: signedAmount,
           balance_after: Number(row.balance_after || 0),
           source,
           description: String(meta.description || '').trim() || null,

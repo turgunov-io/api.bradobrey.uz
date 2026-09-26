@@ -435,6 +435,14 @@ create unique index if not exists idx_cashback_transactions_request_id
   on cashback_transactions (request_id) where request_id is not null;
 create unique index if not exists idx_cashback_transactions_reversal_kind
   on cashback_transactions (reversal_of, kind) where reversal_of is not null;
+create index if not exists idx_cashback_transactions_created_at
+  on cashback_transactions (created_at desc);
+do $$
+begin
+  alter table cashback_wallets
+    add constraint cashback_wallets_nonnegative_balance check (balance >= 0) not valid;
+exception when duplicate_object then null;
+end $$;
 
 -- One-time migration of referral balances accumulated by the old separate
 -- field into the shared cashback ledger. The request id makes this safe to
@@ -739,7 +747,7 @@ begin
         'adjust',
         bonus_amount,
         jsonb_build_object(
-          'source', 'referral',
+          'source', 'referral_bonus',
           'booking_id', referral_row.booking_id,
           'referral_transaction_id', referral_transaction_id,
           'description', 'Referral bonus'

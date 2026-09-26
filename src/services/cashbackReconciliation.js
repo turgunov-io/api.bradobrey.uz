@@ -7,23 +7,22 @@ async function reconcileCashbackBalances({ actor = 'scheduler' } = {}) {
   try {
     await client.query('BEGIN');
     const result = await client.query(
-      `select w.client_id,
-              round(w.balance::numeric, 2) as wallet_balance,
-              round(coalesce(sum(case
-                when t.kind = 'earn' then t.amount
-                when t.kind = 'spend' then -t.amount
-                when t.kind = 'adjust' then t.amount
-                else 0
-              end), 0)::numeric, 2) as ledger_balance
+      `with ledger as (
+         select client_id,
+                round(coalesce(sum(case
+                  when kind = 'spend' then -amount
+                  when kind = 'adjust' and coalesce(meta->>'direction', '') = 'debit' then -amount
+                  else amount
+                end), 0)::numeric, 2) as ledger_balance
+           from cashback_transactions
+          group by client_id
+       )
+       select coalesce(w.client_id, l.client_id) as client_id,
+              round(coalesce(w.balance, 0)::numeric, 2) as wallet_balance,
+              round(coalesce(l.ledger_balance, 0)::numeric, 2) as ledger_balance
          from cashback_wallets w
-         left join cashback_transactions t on t.client_id = w.client_id
-        group by w.client_id, w.balance
-       having abs(round(w.balance::numeric, 2) - round(coalesce(sum(case
-                when t.kind = 'earn' then t.amount
-                when t.kind = 'spend' then -t.amount
-                when t.kind = 'adjust' then t.amount
-                else 0
-              end), 0)::numeric, 2)) > $1`,
+         full join ledger l on l.client_id = w.client_id
+        where abs(round(coalesce(w.balance, 0)::numeric, 2) - round(coalesce(l.ledger_balance, 0)::numeric, 2)) > $1`,
       [RECONCILIATION_TOLERANCE],
     );
 
@@ -43,6 +42,13 @@ async function reconcileCashbackBalances({ actor = 'scheduler' } = {}) {
            metadata = excluded.metadata`,
         [row.client_id, walletBalance, ledgerBalance, difference, JSON.stringify({ actor })],
       );
+      await client.query(
+        `insert into cashback_wallets (client_id, balance, updated_at)
+         values ($1, $2, now())
+         on conflict (client_id) do update
+           set balance = excluded.balance, updated_at = now()`,
+        [row.client_id, ledgerBalance],
+      );
     }
 
     const resolved = await client.query(
@@ -54,11 +60,10 @@ async function reconcileCashbackBalances({ actor = 'scheduler' } = {}) {
             left join cashback_transactions t on t.client_id = w.client_id
            where w.client_id = a.client_id
            group by w.client_id, w.balance
-          having abs(round(w.balance::numeric, 2) - round(coalesce(sum(case
-                    when t.kind = 'earn' then t.amount
+           having abs(round(w.balance::numeric, 2) - round(coalesce(sum(case
                     when t.kind = 'spend' then -t.amount
-                    when t.kind = 'adjust' then t.amount
-                    else 0
+                    when t.kind = 'adjust' and coalesce(t.meta->>'direction', '') = 'debit' then -t.amount
+                    else t.amount
                   end), 0)::numeric, 2)) > $1
           )
         returning id`,

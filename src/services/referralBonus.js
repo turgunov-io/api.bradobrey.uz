@@ -25,10 +25,10 @@ async function creditReferralToCashbackWallet(client, { referralTransactionId, r
   const walletTransaction = await client.query(
     `insert into cashback_transactions
       (client_id, kind, amount, meta, request_id)
-     values ($1, 'adjust', $2, $3::jsonb, $4)
+      values ($1, 'adjust', $2, $3::jsonb, $4)
      on conflict (request_id) do nothing
      returning id`,
-    [legacyClientId, amount, JSON.stringify({ source: 'referral', booking_id: bookingId, referral_transaction_id: referralTransactionId }), requestId],
+    [legacyClientId, amount, JSON.stringify({ source: 'referral_bonus', description: 'Реферальный бонус', booking_id: bookingId, referral_transaction_id: referralTransactionId }), requestId],
   );
   if (!walletTransaction.rows[0]) return false;
 
