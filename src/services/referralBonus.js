@@ -87,7 +87,7 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
     const candidates = await client.query(
       `select r.id as referral_id, r.referrer_client_id, b.id as booking_id,
               round((
-                coalesce(sum(pay.amount) filter (where pay.method in ('cash', 'card')), 0)
+                coalesce(sum(pay.amount) filter (where pay.method in ('payme', 'click', 'cash', 'card')), 0)
                 + coalesce(sum(
                     case
                       when pay.queue_entry_id is null and q.payment_method in ('payme', 'click', 'cash', 'card') then
