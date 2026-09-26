@@ -44,10 +44,19 @@ async function syncMarketplaceBookingCompletion(queueEntryId) {
         if (!queueIds.length) continue;
         const { data: queueEntries, error: queueEntriesError } = await db
             .from('queue_entries')
-            .select('id, status')
+            .select('id, status, client_id, service_id, service_ids, payment_method, price_override, branch_id')
             .in('id', queueIds);
         if (queueEntriesError || queueEntries.length !== queueIds.length) continue;
         if (!queueEntries.every((entry) => entry.status === 'completed')) continue;
+
+        // A marketplace booking is an aggregate over one or more queue entries.
+        // Award each completed entry here as an idempotent recovery path too.
+        // This covers older completion flows that updated the queue status but
+        // did not call the cashback awarder. The request_id/unique indexes in
+        // cashback.js make this safe when the normal path already awarded it.
+        for (const queueEntry of queueEntries) {
+            await awardCashbackForCompletedQueueEntry(queueEntry);
+        }
 
         await db
             .from('marketplace_bookings')
@@ -2053,6 +2062,7 @@ class Barbers {
         let cashback = null;
         if (status === 'completed' && entry.status !== 'completed') {
             cashback = await awardCashbackForCompletedQueueEntry(updated);
+            await syncMarketplaceBookingCompletion(id);
             try {
                 await createSuspiciousOrderNotifications(updated);
             } catch (notificationError) {

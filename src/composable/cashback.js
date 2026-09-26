@@ -587,22 +587,23 @@ async function spendCashbackForQueueEntry(entry, amountInput) {
 }
 
 async function awardCashbackForCompletedQueueEntry(entry) {
-  if (!entry?.id || !entry?.client_id) return { awarded: false, balance: null };
+  if (!entry?.id) return { awarded: false, balance: null, reason: 'missing_queue_entry_id' };
+  if (!entry?.client_id) return { awarded: false, balance: null, reason: 'missing_client_id' };
   if (String(entry.status || '').toLowerCase() !== 'completed') {
     return { awarded: false, balance: null, reason: 'order_not_completed' };
   }
 
   const percent = await getCashbackPercentForEntry(entry);
-  if (!percent) return { awarded: false, balance: null };
+  if (!percent) return { awarded: false, balance: null, reason: 'cashback_percent_zero' };
 
   const usedCertificate =
     entry.payment_method === 'certificate' || Boolean(entry.certificate_id);
 
-  if (usedCertificate) return { awarded: false, balance: null };
+  if (usedCertificate) return { awarded: false, balance: null, reason: 'certificate_payment' };
 
   try {
     const { total, discountedTotal, promo } = await computeCashbackTotalsForQueueEntry(entry);
-    if (total <= 0) return { awarded: false, balance: null };
+    if (total <= 0) return { awarded: false, balance: null, reason: 'zero_order_total' };
 
     const spent = await getCashbackSpendForOrder(entry.id);
     const recordedPayments = await getPaidMoneyForQueueEntry(entry.id);
@@ -619,10 +620,24 @@ async function awardCashbackForCompletedQueueEntry(entry) {
       : legacyMoneyMethod
         ? calculatedNetPaid
         : 0;
-    if (netPaid <= 0) return { awarded: false, balance: await getWalletBalance(entry.client_id), earned: 0 };
+    if (netPaid <= 0) {
+      return {
+        awarded: false,
+        balance: await getWalletBalance(entry.client_id),
+        earned: 0,
+        reason: recordedPayments.hasRecords ? 'zero_eligible_paid_amount' : 'missing_payment_records',
+      };
+    }
 
     const cashbackEarned = roundMoney((netPaid * percent) / 100);
-    if (!cashbackEarned) return { awarded: false, balance: await getWalletBalance(entry.client_id), earned: 0 };
+    if (!cashbackEarned) {
+      return {
+        awarded: false,
+        balance: await getWalletBalance(entry.client_id),
+        earned: 0,
+        reason: 'cashback_amount_rounds_to_zero',
+      };
+    }
 
     const ledgerMeta = {
       source: 'cashback_order',
