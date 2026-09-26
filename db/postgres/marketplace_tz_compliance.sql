@@ -613,6 +613,10 @@ declare
   paid_money numeric(12,2);
   bonus_percent numeric;
   bonus_amount numeric(12,2);
+  referral_transaction_id uuid;
+  referrer_phone text;
+  referrer_name text;
+  cashback_client_id uuid;
 begin
   if coalesce(new.source, '') <> 'site' or new.status <> 'completed' or (tg_op = 'UPDATE' and old.status = new.status) then
     return new;
@@ -646,10 +650,48 @@ begin
 
   insert into referral_transactions (referral_id, booking_id, amount, paid_with_money)
   values (referral_row.id, referral_row.booking_id, bonus_amount, paid_money)
-  on conflict (referral_id, booking_id) do nothing;
+  on conflict (referral_id, booking_id) do nothing
+  returning id into referral_transaction_id;
   if found then
-    update marketplace_clients set referral_bonus_balance = referral_bonus_balance + bonus_amount
+    select phone, coalesce(nullif(display_name, ''), 'Client')
+      into referrer_phone, referrer_name
+      from marketplace_clients
      where id = referral_row.referrer_client_id;
+
+    if referrer_phone is not null and referrer_phone <> '' then
+      insert into clients (name, phone)
+      values (referrer_name, referrer_phone)
+      on conflict (phone) do update
+        set name = coalesce(nullif(clients.name, ''), excluded.name)
+      returning id into cashback_client_id;
+
+      insert into cashback_wallets (client_id, balance)
+      values (cashback_client_id, 0)
+      on conflict (client_id) do nothing;
+
+      insert into cashback_transactions
+        (client_id, kind, amount, meta, request_id)
+      values (
+        cashback_client_id,
+        'adjust',
+        bonus_amount,
+        jsonb_build_object(
+          'source', 'referral',
+          'booking_id', referral_row.booking_id,
+          'referral_transaction_id', referral_transaction_id,
+          'description', 'Referral bonus'
+        ),
+        'referral_bonus:' || referral_transaction_id::text
+      )
+      on conflict (request_id) do nothing;
+
+      if found then
+        update cashback_wallets
+           set balance = round((balance + bonus_amount)::numeric, 2), updated_at = now()
+         where client_id = cashback_client_id;
+      end if;
+    end if;
+
     insert into marketplace_notifications (marketplace_client_id, type, payload)
     values (referral_row.referrer_client_id, 'REFERRAL_BONUS', jsonb_build_object('amount', bonus_amount, 'booking_id', referral_row.booking_id));
   end if;

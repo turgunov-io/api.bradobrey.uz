@@ -195,7 +195,10 @@ async function referral(req, res) {
     );
     const balance = await pool.query(
       `select coalesce(w.balance, 0) as cashback_balance,
-              coalesce(mc.referral_bonus_balance, 0) as referral_bonus_balance
+              coalesce((select sum(rt.amount)
+                          from referral_transactions rt
+                          join referrals rr on rr.id = rt.referral_id
+                         where rr.referrer_client_id = mc.id), 0) as referral_bonus_earned
          from marketplace_clients mc
          left join clients c on c.phone = mc.phone
          left join cashback_wallets w on w.client_id = c.id
@@ -217,7 +220,7 @@ async function referral(req, res) {
       // Referral rewards are spendable from the same cashback wallet.
       bonus_balance: Number(balance.rows[0]?.cashback_balance || 0),
       cashback_balance: Number(balance.rows[0]?.cashback_balance || 0),
-      total_referral_earned: Number(balance.rows[0]?.referral_bonus_balance || 0),
+      total_referral_earned: Number(balance.rows[0]?.referral_bonus_earned || 0),
       invited: invited.rows,
     });
   } catch (error) {

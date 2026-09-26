@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-const { db } = require('../../config/postgres');
+const { db, pool } = require('../../config/postgres');
 const { getWalletBalance } = require('../../composable/cashback');
 const { enrichQueueEntriesWithBenefits } = require('../../composable/enrichQueueBenefits');
 const {
@@ -554,6 +554,101 @@ class MarketplaceProfile {
         phone,
         statuses: finalStatuses,
         cashback_balance,
+      });
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ error: error.message || 'Internal server error' });
+    }
+  }
+
+  async cashback(req, res) {
+    try {
+      const auth = await this._auth(req, res);
+      if (!auth) return;
+
+      const phone = normalizePhone(auth.client.phone);
+      if (!phone) {
+        return res.status(428).json({
+          error: 'Phone number is required to access cashback wallet',
+          code: 'PHONE_REQUIRED',
+        });
+      }
+
+      const clientResult = await pool.query(
+        'select id from clients where phone = $1 limit 1',
+        [phone],
+      );
+      const clientId = clientResult.rows[0]?.id;
+      if (!clientId) {
+        return res.json({
+          wallet: {
+            client_id: null,
+            balance: 0,
+            available_to_spend: 0,
+            currency: 'UZS',
+            is_spend_enabled: false,
+          },
+          transactions: [],
+        });
+      }
+
+      const limit = Math.min(Math.max(Number(req.query?.limit) || 100, 1), 500);
+      const result = await pool.query(
+        `select t.id, t.client_id, t.queue_entry_id, t.kind, t.amount,
+                t.meta, t.created_at,
+                sum(
+                  case
+                    when t.kind = 'spend' then -t.amount
+                    when t.kind = 'adjust' and coalesce(t.meta->>'type', '') = 'spend_reversal' then t.amount
+                    when t.kind = 'adjust' and coalesce(t.meta->>'direction', '') = 'debit' then -t.amount
+                    else t.amount
+                  end
+                ) over (order by t.created_at asc, t.id asc)::numeric as balance_after
+           from cashback_transactions t
+          where t.client_id = $1
+          order by t.created_at desc, t.id desc
+          limit $2`,
+        [clientId, limit],
+      );
+
+      const balance = await getWalletBalance(clientId);
+      const transactions = result.rows.map((row) => {
+        const meta = row.meta && typeof row.meta === 'object' ? row.meta : {};
+        const type = String(meta.type || '').trim().toLowerCase();
+        let source = 'adjustment';
+        if (String(meta.source || '').trim().toLowerCase() === 'referral') {
+          source = 'referral_bonus';
+        } else if (row.kind === 'earn') {
+          source = 'cashback_order';
+        } else if (row.kind === 'spend') {
+          source = 'cashback_spend';
+        } else if (type === 'spend_reversal') {
+          source = 'cashback_refund';
+        }
+
+        return {
+          id: row.id,
+          client_id: row.client_id,
+          queue_entry_id: row.queue_entry_id,
+          kind: row.kind,
+          amount: Number(row.amount || 0),
+          balance_after: Number(row.balance_after || 0),
+          source,
+          description: String(meta.description || '').trim() || null,
+          created_at: row.created_at,
+          meta,
+        };
+      });
+
+      return res.json({
+        wallet: {
+          client_id: clientId,
+          balance,
+          available_to_spend: balance,
+          currency: 'UZS',
+          is_spend_enabled: balance > 0,
+        },
+        transactions,
       });
     } catch (error) {
       console.error(error);

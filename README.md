@@ -80,6 +80,7 @@ Marketplace TЗ compliance migration:
 - Apply `db/postgres/marketplace_tz_compliance.sql` after the existing marketplace SQL files.
 - Phone auth: `POST /api/marketplace/auth/phone/request-otp`, `POST /api/marketplace/auth/phone/verify`.
 - Compliance endpoints: `GET /api/marketplace/compliance/active`, `POST /api/marketplace/compliance/:id/cancel`, `GET /api/marketplace/compliance/loyalty`, `GET /api/marketplace/compliance/referral`, `POST /api/marketplace/compliance/reviews`.
+- Unified wallet endpoint: `GET /api/marketplace/profile/cashback` returns the shared cashback/referral wallet and a source-labeled transaction history.
 - Client notifications: `GET /api/marketplace/compliance/notifications`, `POST /api/marketplace/compliance/notifications/:id/read`, `POST /api/marketplace/compliance/push-tokens`.
 
 ## Notes

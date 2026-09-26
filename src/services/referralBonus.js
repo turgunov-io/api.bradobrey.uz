@@ -140,12 +140,6 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
       if (!inserted.rows[0]) continue;
 
       await client.query(
-        `update marketplace_clients
-            set referral_bonus_balance = referral_bonus_balance + $2
-          where id = $1`,
-        [row.referrer_client_id, bonus],
-      );
-      await client.query(
         `insert into marketplace_notifications (marketplace_client_id, type, payload)
          values ($1, 'REFERRAL_BONUS', $2::jsonb)`,
         [row.referrer_client_id, JSON.stringify({ amount: bonus, booking_id: row.booking_id })],
