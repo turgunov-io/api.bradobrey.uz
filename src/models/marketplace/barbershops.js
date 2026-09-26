@@ -92,6 +92,19 @@ const isMissingColumnError = (error, column) => {
   );
 };
 
+const syncLinkedBranchSchedule = async (barbershopId, { work_hours, timezone } = {}) => {
+  const payload = {};
+  if (work_hours !== undefined) payload.work_hours = work_hours;
+  if (timezone !== undefined) payload.timezone = timezone;
+  if (!Object.keys(payload).length) return;
+
+  const { error } = await db
+    .from('branches')
+    .update(payload)
+    .eq('marketplace_barbershop_id', barbershopId);
+  if (error) throw error;
+};
+
 class MarketplaceBarbershops {
   async list(req, res) {
     try {
@@ -196,6 +209,7 @@ class MarketplaceBarbershops {
 
       try {
         await syncBranches(data.id, parsedBranchIds);
+        await syncLinkedBranchSchedule(data.id, payload);
       } catch (branchError) {
         return res.status(500).json({ error: branchError.message });
       }
@@ -294,6 +308,7 @@ class MarketplaceBarbershops {
 
       try {
         await syncBranches(id, parsedBranchIds);
+        await syncLinkedBranchSchedule(id, update);
       } catch (branchError) {
         return res.status(500).json({ error: branchError.message });
       }

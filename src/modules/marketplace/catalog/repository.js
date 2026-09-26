@@ -8,6 +8,23 @@ const {
 
 const STALE_QUEUE_HOURS = 9;
 
+// Marketplace work hours are configured on the marketplace barbershop in the
+// dashboard. Keep branch endpoints backward-compatible, but return the
+// parent schedule as the effective schedule for linked marketplace branches.
+const BRANCH_SELECT = 'id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )';
+
+const applyEffectiveMarketplaceSchedule = (row) => {
+  if (!row) return row;
+  const parent = row.marketplace_barbershop;
+  const result = { ...row };
+  delete result.marketplace_barbershop;
+  if (parent && typeof parent === 'object') {
+    if (parent.work_hours !== undefined && parent.work_hours !== null) result.work_hours = parent.work_hours;
+    if (parent.timezone) result.timezone = parent.timezone;
+  }
+  return result;
+};
+
 const serviceIdsForEntry = (entry = {}) => (
   Array.isArray(entry.service_ids) && entry.service_ids.length
     ? entry.service_ids.filter(Boolean)
@@ -17,7 +34,7 @@ const serviceIdsForEntry = (entry = {}) => (
 const getBranch = async (branchId) => {
   let { data, error } = await db
     .from('branches')
-    .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id')
+    .select(BRANCH_SELECT)
     .eq('id', branchId)
     .maybeSingle();
 
@@ -31,7 +48,7 @@ const getBranch = async (branchId) => {
     if (data) data.marketplace_barbershop_id = null;
   }
 
-  return { data, error };
+  return { data: applyEffectiveMarketplaceSchedule(data), error };
 };
 
 const getActiveServices = async () => {
@@ -195,13 +212,13 @@ const getMarketplaceBarbershopById = async (id) => db
 const listBranchesForBarbershop = async (barbershopId, { active } = {}) => {
   let query = db
     .from('branches')
-    .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id')
+    .select(BRANCH_SELECT)
     .eq('marketplace_barbershop_id', barbershopId);
 
   if (active !== null && active !== undefined) query = query.eq('is_active', active);
 
   const { data, error } = await query.order('name', { ascending: true });
-  return { data, error };
+  return { data: (data || []).map(applyEffectiveMarketplaceSchedule), error };
 };
 
 const listAllBranchesMarketplaceLinks = async () => db
@@ -257,15 +274,17 @@ const fetchBarberUserRole = async (barberId) => db
   .maybeSingle();
 
 const fetchBranchScheduleForDay = async ({ branchId, dayOfWeek, barberId, localDate }) => {
-  // Fetch both personal (barber_id) and branch default (barber_id is null),
-  // then pick the best match in JS to keep the SQL filter simple.
+  // Marketplace branch work_hours is the canonical branch schedule. A
+  // barber-specific Verifix schedule may further restrict that schedule, but
+  // the generic barber_work_schedules row must not override admin branch
+  // hours; otherwise the mobile app and booking validation diverge.
   const { data: rows, error } = await db
     .from('barber_work_schedules')
     .select('id, branch_id, barber_id, day_of_week, start_time, end_time, grace_minutes, is_active, valid_from, valid_to')
     .eq('branch_id', branchId)
     .eq('day_of_week', dayOfWeek)
     .eq('is_active', true)
-    .or(`barber_id.eq.${barberId},barber_id.is.null`)
+    .eq('barber_id', barberId)
     .order('valid_from', { ascending: false });
 
   if (error && isMissingRelationError(error, 'barber_work_schedules')) {
@@ -286,9 +305,6 @@ const fetchBranchScheduleForDay = async ({ branchId, dayOfWeek, barberId, localD
   const candidates = (rows || []).filter(isValidForDate);
   const personal = candidates.find((row) => String(row?.barber_id || '') === String(barberId));
   if (personal) return { data: personal, error: null };
-
-  const branchDefault = candidates.find((row) => row?.barber_id === null);
-  if (branchDefault) return { data: branchDefault, error: null };
 
   return { data: null, error: null };
 };
