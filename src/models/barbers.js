@@ -2553,9 +2553,7 @@ class Barbers {
             return res.status(404).json({ error: 'Queue entry not found' });
         }
 
-        if (entry.status === 'completed') {
-            return res.status(400).json({ error: 'Queue entry is already completed' });
-        }
+        const wasAlreadyCompleted = entry.status === 'completed';
 
         let orderAmount = 0;
         let finalPaymentMethod = null;
@@ -2586,37 +2584,60 @@ class Barbers {
         // the actual paid amount consistently.
         const recordedPaymentParts = paymentParts.length
             ? paymentParts
-            : (orderAmount > 0 && ['cash', 'card'].includes(finalPaymentMethod)
+            : (orderAmount > 0 && ['payme', 'click', 'cash', 'card'].includes(finalPaymentMethod)
                 ? [{ amount: orderAmount, method: finalPaymentMethod }]
                 : []);
 
         clearCallTimer(id);
 
-        const updatePayload = {
-            status: 'completed',
-            finished_at: new Date().toISOString(),
-            ...(finalPaymentMethod ? { payment_method: finalPaymentMethod } : {}),
-        };
+        let updated = entry;
+        if (!wasAlreadyCompleted) {
+            const updatePayload = {
+                status: 'completed',
+                finished_at: new Date().toISOString(),
+                ...(finalPaymentMethod ? { payment_method: finalPaymentMethod } : {}),
+            };
 
-        const { data: updated, error: updateError } = await db
-            .from('queue_entries')
-            .update(updatePayload)
-            .eq('id', id)
-            .eq('barber_id', barberId)
-            .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id, price_override, price_override_reason')
-            .maybeSingle();
+            const { data, error: updateError } = await db
+                .from('queue_entries')
+                .update(updatePayload)
+                .eq('id', id)
+                .eq('barber_id', barberId)
+                .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id, price_override, price_override_reason')
+                .maybeSingle();
 
-        if (updateError) {
-            return res.status(500).json({ error: updateError.message });
+            if (updateError) {
+                return res.status(500).json({ error: updateError.message });
+            }
+            updated = data;
         }
 
         let payments = [];
 
         try {
-            payments = await replaceQueueEntryPayments({
-                payments: recordedPaymentParts,
-                queueEntryId: id,
-            });
+            if (wasAlreadyCompleted) {
+                const { data: existingPayments, error: paymentsLookupError } = await db
+                    .from('payments')
+                    .select('id, queue_entry_id, amount, method, created_at')
+                    .eq('queue_entry_id', id);
+                if (paymentsLookupError) throw new Error(paymentsLookupError.message);
+
+                // A retry after a partial completion only repairs an absent
+                // payment ledger. It never replaces payment rows already
+                // committed for this completed visit.
+                payments = existingPayments || [];
+                if (!payments.length && recordedPaymentParts.length) {
+                    payments = await replaceQueueEntryPayments({
+                        payments: recordedPaymentParts,
+                        queueEntryId: id,
+                    });
+                }
+            } else {
+                payments = await replaceQueueEntryPayments({
+                    payments: recordedPaymentParts,
+                    queueEntryId: id,
+                });
+            }
         } catch (error) {
             return res.status(500).json({ error: error.message });
         }

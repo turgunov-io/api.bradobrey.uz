@@ -293,18 +293,23 @@ async function getCashbackSpendForOrder(orderId) {
 async function getWalletBalance(clientId) {
   if (!clientId) return 0;
 
-  const { data, error } = await db
-    .from('cashback_wallets')
-    .select('client_id,balance')
-    .eq('client_id', clientId)
-    .maybeSingle();
+  // The ledger is shared by cashback and referral rewards; the wallet row is
+  // a materialized snapshot and may be absent or stale on older deployments.
+  const result = await pool.query(
+    `select coalesce(sum(
+       case
+         when kind = 'spend' then -amount
+         when kind = 'adjust' and coalesce(meta->>'type', '') = 'spend_reversal' then amount
+         when kind = 'adjust' and coalesce(meta->>'direction', '') = 'debit' then -amount
+         else amount
+       end
+     ), 0)::numeric as balance
+       from cashback_transactions
+      where client_id = $1`,
+    [clientId],
+  );
 
-  if (error) {
-    throw error;
-  }
-
-  const balance = Number(data?.balance);
-  return Number.isFinite(balance) ? roundMoney(balance) : 0;
+  return roundMoney(result.rows[0]?.balance);
 }
 
 async function ensureWallet(clientId) {

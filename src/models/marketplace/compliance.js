@@ -194,14 +194,22 @@ async function referral(req, res) {
       [clientId, code]
     );
     const balance = await pool.query(
-      `select coalesce(w.balance, 0) as cashback_balance,
+      `select coalesce((
+                select sum(case
+                  when ct.kind = 'spend' then -ct.amount
+                  when ct.kind = 'adjust' and coalesce(ct.meta->>'type', '') = 'spend_reversal' then ct.amount
+                  when ct.kind = 'adjust' and coalesce(ct.meta->>'direction', '') = 'debit' then -ct.amount
+                  else ct.amount
+                end)
+                  from cashback_transactions ct
+                 where ct.client_id = c.id
+              ), 0) as cashback_balance,
               coalesce((select sum(rt.amount)
                           from referral_transactions rt
                           join referrals rr on rr.id = rt.referral_id
                          where rr.referrer_client_id = mc.id), 0) as referral_bonus_earned
          from marketplace_clients mc
          left join clients c on c.phone = mc.phone
-         left join cashback_wallets w on w.client_id = c.id
         where mc.id = $1`, [clientId]
     );
     const invited = await pool.query(
