@@ -11,14 +11,25 @@ async function creditReferralToCashbackWallet(client, { referralTransactionId, r
   const phone = referrer.rows[0]?.phone;
   if (!phone) throw new Error('Referrer phone is required for cashback wallet');
 
-  const legacyClient = await client.query(
-    `insert into clients (name, phone)
-     values ($1, $2)
-     on conflict (phone) do update set name = coalesce(nullif(clients.name, ''), excluded.name)
-     returning id`,
-    [referrer.rows[0].display_name, phone],
+  const existingLegacyClient = await client.query(
+    `select id
+       from clients
+      where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
+            regexp_replace($1, '[^0-9]', '', 'g')
+      order by (phone = $1) desc, id
+      limit 1
+      for update`,
+    [phone],
   );
-  const legacyClientId = legacyClient.rows[0]?.id;
+  const legacyClientId = existingLegacyClient.rows[0]?.id || (
+    await client.query(
+      `insert into clients (name, phone)
+       values ($1, $2)
+       on conflict (phone) do update set name = coalesce(nullif(clients.name, ''), excluded.name)
+       returning id`,
+      [referrer.rows[0].display_name, phone],
+    )
+  ).rows[0]?.id;
   if (!legacyClientId) throw new Error('Unable to resolve referrer cashback wallet');
 
   const requestId = `referral_bonus:${referralTransactionId}`;
@@ -26,7 +37,7 @@ async function creditReferralToCashbackWallet(client, { referralTransactionId, r
     `insert into cashback_transactions
       (client_id, kind, amount, meta, request_id)
       values ($1, 'adjust', $2, $3::jsonb, $4)
-     on conflict (request_id) do nothing
+     on conflict (request_id) where request_id is not null do nothing
      returning id`,
     [legacyClientId, amount, JSON.stringify({ source: 'referral_bonus', description: 'Реферальный бонус', booking_id: bookingId, referral_transaction_id: referralTransactionId }), requestId],
   );

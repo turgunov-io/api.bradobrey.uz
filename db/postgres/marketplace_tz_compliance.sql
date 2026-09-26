@@ -240,7 +240,9 @@ begin
 
   select mc.id into marketplace_id
     from marketplace_clients mc
-    join clients c on c.phone = mc.phone
+    join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+                    and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
    where c.id = new.client_id
    limit 1;
   if marketplace_id is null then return new; end if;
@@ -304,7 +306,9 @@ begin
     loop
       select mc.id into affected_marketplace_id
         from marketplace_clients mc
-        join clients c on c.phone = mc.phone
+        join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                          regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+                        and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
        where c.id = affected.client_id
        limit 1;
       if affected_marketplace_id is not null and
@@ -457,7 +461,14 @@ begin
     select mc.id as marketplace_client_id, c.id as client_id,
            mc.referral_bonus_balance as amount
       from marketplace_clients mc
-      join clients c on c.phone = mc.phone
+      join clients c on c.id = (
+        select legacy.id from clients legacy
+         where regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
+               regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+           and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
+         order by (legacy.phone = mc.phone) desc, legacy.id
+         limit 1
+      )
      where coalesce(mc.referral_bonus_balance, 0) > 0
   loop
     insert into cashback_transactions (client_id, kind, amount, meta, request_id)
@@ -469,7 +480,7 @@ begin
                          'description', 'Referral bonus migrated to shared wallet'),
       'referral_legacy_balance:' || legacy.marketplace_client_id::text
     )
-    on conflict (request_id) do nothing
+    on conflict (request_id) where request_id is not null do nothing
     returning id into inserted_id;
 
     if inserted_id is not null then
@@ -590,7 +601,9 @@ begin
 
   select mc.id into marketplace_id
     from marketplace_clients mc
-    join clients c on c.phone = mc.phone
+    join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+                    and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
    where c.id = new.client_id limit 1;
   if marketplace_id is null then return new; end if;
 
@@ -688,7 +701,9 @@ begin
 
   select mc.id into referred_marketplace_id
     from marketplace_clients mc
-    join clients c on c.phone = mc.phone
+    join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+                    and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
    where c.id = new.client_id limit 1;
   if referred_marketplace_id is null then return new; end if;
 
@@ -731,11 +746,19 @@ begin
      where id = referral_row.referrer_client_id;
 
     if referrer_phone is not null and referrer_phone <> '' then
-      insert into clients (name, phone)
-      values (referrer_name, referrer_phone)
-      on conflict (phone) do update
-        set name = coalesce(nullif(clients.name, ''), excluded.name)
-      returning id into cashback_client_id;
+      select id into cashback_client_id
+        from clients
+       where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
+             regexp_replace(referrer_phone, '[^0-9]', '', 'g')
+       order by (phone = referrer_phone) desc, id
+       limit 1;
+      if cashback_client_id is null then
+        insert into clients (name, phone)
+        values (referrer_name, referrer_phone)
+        on conflict (phone) do update
+          set name = coalesce(nullif(clients.name, ''), excluded.name)
+        returning id into cashback_client_id;
+      end if;
 
       insert into cashback_wallets (client_id, balance)
       values (cashback_client_id, 0)
@@ -755,7 +778,7 @@ begin
         ),
         'referral_bonus:' || referral_transaction_id::text
       )
-      on conflict (request_id) do nothing;
+      on conflict (request_id) where request_id is not null do nothing;
 
       if found then
         update cashback_wallets

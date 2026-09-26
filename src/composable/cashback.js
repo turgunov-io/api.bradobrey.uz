@@ -44,8 +44,10 @@ async function getCashbackPercentForEntry(entry) {
     const marketplaceClient = await pool.query(
       `select mc.status_points
          from marketplace_clients mc
-         join clients c on c.phone = mc.phone
+         join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                           regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
         where c.id = $1
+          and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
         limit 1`,
       [entry.client_id],
     );
@@ -182,7 +184,7 @@ async function spendCashback({ clientId, queueEntryId, amount, meta }) {
     const transaction = await client.query(
       `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta, request_id)
        values ($1, $2, 'spend', $3, $4::jsonb, $5)
-       on conflict (request_id) do nothing
+       on conflict (request_id) where request_id is not null do nothing
        returning id, client_id, queue_entry_id, kind, amount, created_at`,
       [clientId, queueEntryId, amt, JSON.stringify({
         source: 'cashback_spend',
@@ -664,7 +666,7 @@ async function awardCashbackForCompletedQueueEntry(entry) {
       const transaction = await client.query(
         `insert into cashback_transactions (client_id, queue_entry_id, kind, amount, meta, request_id)
          values ($1, $2, 'earn', $3, $4::jsonb, $5)
-         on conflict (request_id) do nothing returning id`,
+         on conflict (request_id) where request_id is not null do nothing returning id`,
         [entry.client_id, entry.id, cashbackEarned, JSON.stringify(ledgerMeta), `cashback_order:${entry.id}`]
       );
       if (!transaction.rows[0]) {
@@ -700,8 +702,10 @@ async function awardCashbackForCompletedQueueEntry(entry) {
           `insert into marketplace_notifications (marketplace_client_id, type, payload)
            select mc.id, 'CASHBACK_EARNED', $2::jsonb
              from marketplace_clients mc
-             join clients c on c.phone = mc.phone
+             join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                               regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
             where c.id = $1
+              and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
               and not exists (
                 select 1 from marketplace_notifications n
                  where n.marketplace_client_id = mc.id

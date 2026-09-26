@@ -62,9 +62,14 @@ async function create(req, res) {
     await dbClient.query('BEGIN');
     const clientResult = await dbClient.query(
       `select mc.id, mc.phone, mc.email, mc.is_active,
-              c.id as legacy_client_id
+              (select legacy.id
+                 from clients legacy
+                where regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
+                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+                  and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
+                order by (legacy.phone = mc.phone) desc, legacy.id
+                limit 1) as legacy_client_id
          from marketplace_clients mc
-         left join clients c on c.phone = mc.phone
         where mc.id = $1 for update`,
       [marketplaceClientId]
     );

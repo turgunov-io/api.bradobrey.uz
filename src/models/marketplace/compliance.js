@@ -209,7 +209,15 @@ async function referral(req, res) {
                           join referrals rr on rr.id = rt.referral_id
                          where rr.referrer_client_id = mc.id), 0) as referral_bonus_earned
          from marketplace_clients mc
-         left join clients c on c.phone = mc.phone
+         left join lateral (
+           select legacy.id
+             from clients legacy
+            where regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
+                  regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+              and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
+            order by (legacy.phone = mc.phone) desc, legacy.id
+            limit 1
+         ) c on true
         where mc.id = $1`, [clientId]
     );
     const invited = await pool.query(

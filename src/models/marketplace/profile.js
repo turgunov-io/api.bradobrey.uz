@@ -37,6 +37,22 @@ const normalizePhone = (phoneInput) => {
   return cleaned || null;
 };
 
+async function findLegacyClientByPhone(phoneInput) {
+  const phone = normalizePhone(phoneInput);
+  const digits = phone?.replace(/\D/g, '') || '';
+  if (!digits) return null;
+
+  const result = await pool.query(
+    `select id, name, phone, rank, completed_visits
+       from clients
+      where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = $1
+      order by (phone = $2) desc, id
+      limit 1`,
+    [digits, phone],
+  );
+  return result.rows[0] || null;
+}
+
 const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');
 
 const buildDefaultAvatarUrl = (seedInput) => {
@@ -197,15 +213,7 @@ class MarketplaceProfile {
       let cashback_balance = null;
       let loyalty = null;
       if (auth.client.phone) {
-        const { data: linked, error: linkError } = await db
-          .from('clients')
-          .select('id, rank, completed_visits')
-          .eq('phone', auth.client.phone)
-          .maybeSingle();
-
-        if (linkError) {
-          return res.status(500).json({ error: linkError.message });
-        }
+        const linked = await findLegacyClientByPhone(auth.client.phone);
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
         if (linked?.id) {
@@ -352,15 +360,7 @@ class MarketplaceProfile {
       let cashback_balance = null;
       let loyalty = null;
       if (updated?.phone) {
-        const { data: linked, error: linkError } = await db
-          .from('clients')
-          .select('id, rank, completed_visits')
-          .eq('phone', updated.phone)
-          .maybeSingle();
-
-        if (linkError) {
-          return res.status(500).json({ error: linkError.message });
-        }
+        const linked = await findLegacyClientByPhone(updated.phone);
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
         if (linked?.id) {
@@ -421,15 +421,7 @@ class MarketplaceProfile {
       const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
       const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
 
-      const { data: clientRow, error: clientErr } = await db
-        .from('clients')
-        .select('id,name,phone')
-        .eq('phone', phone)
-        .maybeSingle();
-
-      if (clientErr) {
-        return res.status(500).json({ error: clientErr.message });
-      }
+      const clientRow = await findLegacyClientByPhone(phone);
 
       if (!clientRow?.id) {
         return res.json({
@@ -573,11 +565,8 @@ class MarketplaceProfile {
         });
       }
 
-      const clientResult = await pool.query(
-        'select id from clients where phone = $1 limit 1',
-        [phone],
-      );
-      const clientId = clientResult.rows[0]?.id;
+      const clientRow = await findLegacyClientByPhone(phone);
+      const clientId = clientRow?.id;
       if (!clientId) {
         return res.json({
           wallet: {
@@ -687,14 +676,7 @@ class MarketplaceProfile {
   async _ensureClientRecordForPhone(phone, email) {
     if (!phone) return;
 
-    const { data: existing, error } = await db
-      .from('clients')
-      .select('id')
-      .eq('phone', phone)
-      .maybeSingle();
-
-    if (error) return;
-    if (existing?.id) return;
+    if (await findLegacyClientByPhone(phone)) return;
 
     const fallbackName = String(email || 'Marketplace Client').split('@')[0] || 'Marketplace Client';
 
