@@ -370,6 +370,7 @@ values
   ('anti_fraud', '{"cancel_cooldown_minutes":15,"cancel_block_threshold":3,"no_show_block_threshold":5,"block_hours":24}'::jsonb, 'Marketplace anti-fraud settings'),
   ('status_points', '{"completed_service_points":10,"late_cancel_penalty":-10,"no_show_penalty":-30,"daily_positive_limit":20}'::jsonb, 'Marketplace status point rules'),
   ('loyalty_levels', '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb, 'Marketplace status point levels'),
+  ('cashback_policy', '{"max_redeem_share":1}'::jsonb, 'Maximum share of payable service total redeemable from cashback'),
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
 on conflict (key) do nothing;
 
@@ -412,11 +413,65 @@ $$;
 -- The cashback ledger is shared with kiosk and must be available before
 -- marketplace completion/referral triggers run.
 alter table cashback_transactions add column if not exists request_id text;
+
+-- Marketplace online payment methods. Keep the legacy cash/card/certificate
+-- methods intact while allowing Payme and Click to travel through the same
+-- booking and completion ledger.
+do $$
+begin
+  if to_regclass('public.queue_entries') is not null then
+    alter table queue_entries drop constraint if exists queue_entries_payment_method_check;
+    alter table queue_entries add constraint queue_entries_payment_method_check
+      check (payment_method is null or payment_method in ('payme', 'click', 'cash', 'card', 'certificate', 'mixed'));
+  end if;
+  if to_regclass('public.payments') is not null then
+    alter table payments drop constraint if exists payments_method_check;
+    alter table payments add constraint payments_method_check
+      check (method in ('payme', 'click', 'cash', 'card', 'certificate'));
+  end if;
+end $$;
 alter table cashback_transactions add column if not exists reversal_of uuid references cashback_transactions(id) on delete restrict;
 create unique index if not exists idx_cashback_transactions_request_id
   on cashback_transactions (request_id) where request_id is not null;
 create unique index if not exists idx_cashback_transactions_reversal_kind
   on cashback_transactions (reversal_of, kind) where reversal_of is not null;
+
+-- One-time migration of referral balances accumulated by the old separate
+-- field into the shared cashback ledger. The request id makes this safe to
+-- run repeatedly during deployment.
+do $$
+declare
+  legacy record;
+  inserted_id uuid;
+begin
+  for legacy in
+    select mc.id as marketplace_client_id, c.id as client_id,
+           mc.referral_bonus_balance as amount
+      from marketplace_clients mc
+      join clients c on c.phone = mc.phone
+     where coalesce(mc.referral_bonus_balance, 0) > 0
+  loop
+    insert into cashback_transactions (client_id, kind, amount, meta, request_id)
+    values (
+      legacy.client_id,
+      'adjust',
+      legacy.amount,
+      jsonb_build_object('source', 'referral', 'legacy_migration', true,
+                         'description', 'Referral bonus migrated to shared wallet'),
+      'referral_legacy_balance:' || legacy.marketplace_client_id::text
+    )
+    on conflict (request_id) do nothing
+    returning id into inserted_id;
+
+    if inserted_id is not null then
+      insert into cashback_wallets (client_id, balance)
+      values (legacy.client_id, legacy.amount)
+      on conflict (client_id) do update
+        set balance = round((cashback_wallets.balance + excluded.balance)::numeric, 2),
+            updated_at = now();
+    end if;
+  end loop;
+end $$;
 
 create table if not exists cashback_settlements (
   id uuid default gen_random_uuid() primary key,
@@ -639,10 +694,18 @@ begin
    order by b.created_at desc limit 1;
   if referral_row.id is null then return new; end if;
 
-  select coalesce(sum(pay.amount), 0) into paid_money
+  select round((
+      coalesce(sum(pay.amount) filter (where pay.method in ('payme', 'click', 'cash', 'card')), 0)
+      + coalesce(sum(case when pay.id is null and q.payment_method in ('payme', 'click', 'cash', 'card') then
+          coalesce(q.price_override,
+            (select sum(s.base_price) from services s where s.id = any(q.service_ids)),
+            (select s.base_price from services s where s.id = q.service_id), 0)
+        else 0 end), 0)
+    )::numeric, 2) into paid_money
     from marketplace_booking_persons bp
-    join payments pay on pay.queue_entry_id = bp.queue_entry_id
-   where bp.booking_id = referral_row.booking_id and pay.method in ('cash', 'card');
+    join queue_entries q on q.id = bp.queue_entry_id
+    left join payments pay on pay.queue_entry_id = bp.queue_entry_id
+   where bp.booking_id = referral_row.booking_id;
   if paid_money <= 0 then return new; end if;
   bonus_percent := coalesce((select (value ->> 'bonus_percent')::numeric from platform_settings where key = 'referral'), 1);
   bonus_amount := round(paid_money * bonus_percent / 100, 2);

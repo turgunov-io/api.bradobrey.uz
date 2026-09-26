@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../../config/postgres');
 const catalogService = require('../../modules/marketplace/catalog/service');
+const { PAYMENT_METHODS } = require('../../modules/marketplace/catalog/constants');
 
 function getClientId(req, res) {
   const header = String(req.headers.authorization || '');
@@ -27,12 +28,19 @@ async function create(req, res) {
   const body = req.body || {};
   const branchId = String(body.branch_id || '').trim();
   const persons = Array.isArray(body.persons) ? body.persons : [];
+  const paymentMethod = String(body.payment_method || 'cash').trim().toLowerCase();
   const requestId = String(body.request_id || req.get('Idempotency-Key') || '').trim() || null;
   if (persons.length > 4) {
     return res.status(400).json({ error: 'TOO_MANY_PERSONS' });
   }
   if (!branchId || persons.length < 1) {
     return res.status(400).json({ error: 'branch_id and 1 to 4 persons are required' });
+  }
+  if (!PAYMENT_METHODS.some((method) => method.value === paymentMethod)) {
+    return res.status(400).json({ error: 'payment_method must be payme, click, cash, card, or certificate' });
+  }
+  if (paymentMethod === 'certificate') {
+    return res.status(400).json({ error: 'Group bookings do not support certificate payment' });
   }
 
   const normalizedPersons = persons.map((person, index) => ({
@@ -186,9 +194,9 @@ async function create(req, res) {
       const person = normalizedPersons[index];
       const serviceIds = person.serviceIds;
       const entryResult = await dbClient.query(
-        `insert into queue_entries (client_id, branch_id, barber_id, service_id, service_ids, source, status)
-         values ($1, $2, $3, $4, $5::uuid[], 'site', 'waiting') returning id, status, created_at`,
-        [legacyClientId, branchId, person.barberId, serviceIds[0], serviceIds]
+        `insert into queue_entries (client_id, branch_id, barber_id, service_id, service_ids, source, status, payment_method)
+         values ($1, $2, $3, $4, $5::uuid[], 'site', 'waiting', $6) returning id, status, created_at`,
+        [legacyClientId, branchId, person.barberId, serviceIds[0], serviceIds, paymentMethod]
       );
       const entry = entryResult.rows[0];
       const personResult = await dbClient.query(
@@ -203,7 +211,7 @@ async function create(req, res) {
       );
       createdPersons.push({ ...personResult.rows[0], service_ids: serviceIds, queue_entry: entry });
     }
-    const response = { booking: { ...booking, persons: createdPersons } };
+    const response = { booking: { ...booking, payment_method: paymentMethod, persons: createdPersons } };
     if (requestId) {
       await dbClient.query(
         `update marketplace_idempotency_requests set status = 201, response = $2::jsonb, completed_at = now() where request_id = $1`,

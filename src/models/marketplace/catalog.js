@@ -6,6 +6,8 @@ const DEFAULT_SERVICE_CATEGORY = 'Uncategorized';
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber', 'manager'];
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const PAYMENT_METHODS = [
+  { value: 'payme', label: 'Payme' },
+  { value: 'click', label: 'Click' },
   { value: 'cash', label: 'Наличные' },
   { value: 'card', label: 'Карта' },
   { value: 'certificate', label: 'Сертификат' },
@@ -632,7 +634,7 @@ class MarketplaceCatalog {
 
       const normalizedPaymentMethod = normalizeText(payment_method);
       if (normalizedPaymentMethod && !PAYMENT_METHODS.some((method) => method.value === normalizedPaymentMethod)) {
-        return res.status(400).json({ error: 'payment_method must be cash, card, or certificate' });
+        return res.status(400).json({ error: 'payment_method must be payme, click, cash, card, or certificate' });
       }
 
       const wantsCertificate = normalizedPaymentMethod === 'certificate' || Boolean(certificate_code);

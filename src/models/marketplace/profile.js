@@ -596,14 +596,14 @@ class MarketplaceProfile {
       const result = await pool.query(
         `select t.id, t.client_id, t.queue_entry_id, t.kind, t.amount,
                 t.meta, t.created_at,
-                sum(
+                (sum(
                   case
                     when t.kind = 'spend' then -t.amount
                     when t.kind = 'adjust' and coalesce(t.meta->>'type', '') = 'spend_reversal' then t.amount
                     when t.kind = 'adjust' and coalesce(t.meta->>'direction', '') = 'debit' then -t.amount
                     else t.amount
                   end
-                ) over (order by t.created_at asc, t.id asc)::numeric as balance_after
+                ) over (order by t.created_at asc, t.id asc))::numeric as balance_after
            from cashback_transactions t
           where t.client_id = $1
           order by t.created_at desc, t.id desc
@@ -611,7 +611,31 @@ class MarketplaceProfile {
         [clientId, limit],
       );
 
-      const balance = await getWalletBalance(clientId);
+      // The ledger is authoritative. Older deployments may have a missing or
+      // stale cashback_wallets row after referral migration, so rebuild the
+      // visible shared balance from all earn/spend/adjust transactions and
+      // repair the snapshot row before returning it.
+      const ledgerResult = await pool.query(
+        `select coalesce(sum(
+           case
+             when kind = 'spend' then -amount
+             when kind = 'adjust' and coalesce(meta->>'type', '') = 'spend_reversal' then amount
+             when kind = 'adjust' and coalesce(meta->>'direction', '') = 'debit' then -amount
+             else amount
+           end
+         ), 0)::numeric as balance
+           from cashback_transactions
+          where client_id = $1`,
+        [clientId],
+      );
+      const balance = Number(ledgerResult.rows[0]?.balance || 0);
+      await pool.query(
+        `insert into cashback_wallets (client_id, balance, updated_at)
+         values ($1, $2, now())
+         on conflict (client_id) do update
+           set balance = excluded.balance, updated_at = now()`,
+        [clientId, balance],
+      );
       const transactions = result.rows.map((row) => {
         const meta = row.meta && typeof row.meta === 'object' ? row.meta : {};
         const type = String(meta.type || '').trim().toLowerCase();

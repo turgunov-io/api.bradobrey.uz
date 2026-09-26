@@ -364,7 +364,7 @@ const quoteBooking = async (payload) => {
 
   const normalizedPaymentMethod = normalizeText(payload?.payment_method);
   if (normalizedPaymentMethod && !PAYMENT_METHODS.some((method) => method.value === normalizedPaymentMethod)) {
-    const err = new Error('payment_method must be cash, card, or certificate');
+    const err = new Error('payment_method must be payme, click, cash, card, or certificate');
     err.statusCode = 400;
     throw err;
   }

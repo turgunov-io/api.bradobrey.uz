@@ -19,8 +19,8 @@ const LEGACY_LOGIN_ROLES = new Set([...ADMIN_ROLES, ...BARBER_WORKSPACE_ROLES]);
 const EMPLOYEE_ROLES = new Set(['admin', 'manager', 'barber', 'super-barber', 'super-manager']);
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
-const PAYMENT_PART_METHODS = new Set(['cash', 'card', 'certificate']);
-const QUEUE_PAYMENT_METHODS = new Set(['cash', 'card', 'certificate', 'mixed']);
+const PAYMENT_PART_METHODS = new Set(['payme', 'click', 'cash', 'card', 'certificate']);
+const QUEUE_PAYMENT_METHODS = new Set(['payme', 'click', 'cash', 'card', 'certificate', 'mixed']);
 const EMPLOYEE_ARCHIVE_FILTERS = new Set(['active', 'only', 'all']);
 
 const CALL_LATE_MINUTES = 10;
@@ -626,7 +626,7 @@ const normalizePaymentParts = (value) => {
 
     for (const item of payments) {
         if (!PAYMENT_PART_METHODS.has(item.method)) {
-            const error = new Error('payment method must be cash, card, or certificate');
+            const error = new Error('payment method must be payme, click, cash, card, or certificate');
             error.statusCode = 400;
             throw error;
         }
@@ -657,7 +657,7 @@ const getFinalPaymentMethod = ({ currentMethod, paymentMethod, payments }) => {
     }
 
     if (!QUEUE_PAYMENT_METHODS.has(normalized)) {
-        const error = new Error('payment_method must be cash, card, certificate, or mixed');
+        const error = new Error('payment_method must be payme, click, cash, card, certificate, or mixed');
         error.statusCode = 400;
         throw error;
     }

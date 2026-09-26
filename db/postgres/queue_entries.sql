@@ -11,7 +11,7 @@ create table if not exists queue_entries (
   started_at timestamptz,
   finished_at timestamptz,
   swapped_flag boolean default false,
-  payment_method text check (payment_method in ('cash', 'card', 'certificate', 'mixed')),
+  payment_method text check (payment_method in ('payme', 'click', 'cash', 'card', 'certificate', 'mixed')),
   certificate_id uuid,
   price_override numeric(12,2) check (price_override is null or price_override >= 0),
   price_override_reason text,
@@ -63,7 +63,7 @@ begin
 
   alter table queue_entries
     add constraint queue_entries_payment_method_check
-    check (payment_method is null or payment_method in ('cash', 'card', 'certificate', 'mixed'));
+    check (payment_method is null or payment_method in ('payme', 'click', 'cash', 'card', 'certificate', 'mixed'));
 end $$;
 
 create index if not exists idx_queue_entries_certificate_id on queue_entries (certificate_id);

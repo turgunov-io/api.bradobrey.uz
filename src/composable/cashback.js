@@ -46,7 +46,7 @@ async function getCashbackPercentForEntry(entry) {
 
 async function getPaidMoneyForQueueEntry(queueEntryId) {
   const result = await pool.query(
-    `select coalesce(sum(amount) filter (where method in ('cash', 'card')), 0)::numeric as paid_money,
+    `select coalesce(sum(amount) filter (where method in ('payme', 'click', 'cash', 'card')), 0)::numeric as paid_money,
             count(*)::int as payment_count
        from payments
       where queue_entry_id = $1`,
@@ -583,7 +583,7 @@ async function awardCashbackForCompletedQueueEntry(entry) {
     // certificate (including mixed payment) portion from earning cashback.
     // The fallback preserves legacy kiosk installations that completed old
     // entries without writing payment rows.
-    const legacyMoneyMethod = ['cash', 'card'].includes(
+    const legacyMoneyMethod = ['payme', 'click', 'cash', 'card'].includes(
       String(entry.payment_method || '').toLowerCase(),
     );
     const netPaid = recordedPayments.hasRecords

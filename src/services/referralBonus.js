@@ -79,7 +79,7 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
                 coalesce(sum(pay.amount) filter (where pay.method in ('cash', 'card')), 0)
                 + coalesce(sum(
                     case
-                      when pay.queue_entry_id is null and q.payment_method in ('cash', 'card') then
+                      when pay.queue_entry_id is null and q.payment_method in ('payme', 'click', 'cash', 'card') then
                         coalesce(
                           q.price_override,
                           (select sum(s.base_price) from services s where s.id = any(q.service_ids)),

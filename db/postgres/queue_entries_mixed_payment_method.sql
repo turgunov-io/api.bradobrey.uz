@@ -7,5 +7,5 @@ begin
 
   alter table queue_entries
     add constraint queue_entries_payment_method_check
-    check (payment_method is null or payment_method in ('cash', 'card', 'certificate', 'mixed'));
+    check (payment_method is null or payment_method in ('payme', 'click', 'cash', 'card', 'certificate', 'mixed'));
 end $$;

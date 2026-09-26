@@ -863,10 +863,26 @@ class Kiosk {
             cashbackWalletBalance = await getWalletBalance(clientId);
             const explicitSpendAmount = requestedCashback.provided ? requestedCashback.amount : null;
 
-            if (explicitSpendAmount !== null && explicitSpendAmount > discountedTotal) {
+            // The TZ rule is percentage-based. Default is 100% of the payable
+            // service total; there is no fixed 50,000 UZS threshold.
+            let maxCashbackShare = 1;
+            const { data: cashbackPolicy } = await db
+                .from('platform_settings')
+                .select('value')
+                .eq('key', 'cashback_policy')
+                .maybeSingle();
+            const configuredShare = Number(
+                cashbackPolicy?.value?.max_redeem_share ?? cashbackPolicy?.value?.maxRedeemShare,
+            );
+            if (Number.isFinite(configuredShare)) {
+                maxCashbackShare = Math.min(1, Math.max(0, configuredShare));
+            }
+            const maxCashbackAmount = roundMoney(discountedTotal * maxCashbackShare);
+            if (explicitSpendAmount !== null && explicitSpendAmount > maxCashbackAmount) {
                 return res.status(400).json({
                     error: 'cashback_amount cannot exceed order total',
-                    max: discountedTotal,
+                    max: maxCashbackAmount,
+                    max_share: maxCashbackShare,
                 });
             }
 
