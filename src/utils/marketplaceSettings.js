@@ -4,6 +4,7 @@ const ALLOWED_KEYS = new Set([
   'status_points',
   'loyalty_levels',
   'referral',
+  'cashback',
 ]);
 
 function validateValue(key, value) {
@@ -25,6 +26,30 @@ function validateValue(key, value) {
   if (key === 'referral') {
     if (Number(value.expiry_days) <= 0 || Number(value.daily_limit) <= 0 || Number(value.bonus_percent) < 0) {
       return 'referral values are invalid';
+    }
+  }
+  if (key === 'cashback') {
+    const percent = Number(value.default_percent);
+    const promotionPercent = value.promotion_percent === null || value.promotion_percent === undefined
+      ? null
+      : Number(value.promotion_percent);
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+      return 'default_percent must be between 0 and 100';
+    }
+    if (promotionPercent !== null && (!Number.isFinite(promotionPercent) || promotionPercent < 0 || promotionPercent > 100)) {
+      return 'promotion_percent must be between 0 and 100';
+    }
+    const start = value.promotion_start_date || null;
+    const end = value.promotion_end_date || null;
+    if ((start && !datePattern.test(String(start))) || (end && !datePattern.test(String(end)))) {
+      return 'promotion dates must use YYYY-MM-DD';
+    }
+    if ((start && !end) || (!start && end)) {
+      return 'promotion_start_date and promotion_end_date must be provided together';
+    }
+    if (start && end && String(start) > String(end)) {
+      return 'promotion_end_date must be on or after promotion_start_date';
     }
   }
   if (key === 'loyalty_levels' && Object.keys(value).length === 0) {

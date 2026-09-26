@@ -371,6 +371,7 @@ values
   ('status_points', '{"completed_service_points":10,"late_cancel_penalty":-10,"no_show_penalty":-30,"daily_positive_limit":20}'::jsonb, 'Marketplace status point rules'),
   ('loyalty_levels', '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb, 'Marketplace status point levels'),
   ('cashback_policy', '{"max_redeem_share":1}'::jsonb, 'Maximum share of payable service total redeemable from cashback'),
+  ('cashback', '{"default_percent":1,"promotion_percent":null,"promotion_start_date":null,"promotion_end_date":null,"timezone":"Asia/Tashkent"}'::jsonb, 'Marketplace cashback percentage and temporary promotion'),
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
 on conflict (key) do nothing;
 

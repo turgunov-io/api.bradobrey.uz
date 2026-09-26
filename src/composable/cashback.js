@@ -1,6 +1,14 @@
 const { db, pool } = require('../config/postgres');
 const { resolveLoyaltyCashbackPercent } = require('../utils/loyalty');
 
+const DEFAULT_CASHBACK_CONFIG = {
+  default_percent: 1,
+  promotion_percent: null,
+  promotion_start_date: null,
+  promotion_end_date: null,
+  timezone: 'Asia/Tashkent',
+};
+
 const roundMoney = (value) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
@@ -18,6 +26,21 @@ async function getCashbackPercentForEntry(entry) {
   if (!entry?.client_id) return fallback;
 
   try {
+    const configuredCashback = await pool.query(
+      `select value from platform_settings where key = 'cashback'`,
+    );
+    if (configuredCashback.rows[0]?.value && typeof configuredCashback.rows[0].value === 'object') {
+      const config = { ...DEFAULT_CASHBACK_CONFIG, ...configuredCashback.rows[0].value };
+      const timezone = String(config.timezone || 'Asia/Tashkent');
+      const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(new Date());
+      const promotionIsActive = config.promotion_percent !== null
+        && config.promotion_start_date
+        && config.promotion_end_date
+        && localDate >= String(config.promotion_start_date)
+        && localDate <= String(config.promotion_end_date);
+      return parsePercent(promotionIsActive ? config.promotion_percent : config.default_percent);
+    }
+
     const marketplaceClient = await pool.query(
       `select mc.status_points
          from marketplace_clients mc

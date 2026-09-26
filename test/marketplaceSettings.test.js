@@ -7,6 +7,7 @@ test('marketplace settings expose only supported platform keys', () => {
   assert.deepEqual([...ALLOWED_KEYS].sort(), [
     'anti_fraud',
     'booking_limits',
+    'cashback',
     'loyalty_levels',
     'referral',
     'status_points',
@@ -39,4 +40,20 @@ test('marketplace settings reject invalid referral and non-object values', () =>
     daily_limit: 10,
     bonus_percent: 1,
   }), /invalid/);
+});
+
+test('marketplace settings validate cashback promotions', () => {
+  assert.equal(validateValue('cashback', {
+    default_percent: 1,
+    promotion_percent: 2,
+    promotion_start_date: '2026-09-27',
+    promotion_end_date: '2026-10-03',
+    timezone: 'Asia/Tashkent',
+  }), null);
+  assert.match(validateValue('cashback', {
+    default_percent: 1,
+    promotion_percent: 2,
+    promotion_start_date: '2026-10-03',
+    promotion_end_date: '2026-09-27',
+  }), /on or after/);
 });
