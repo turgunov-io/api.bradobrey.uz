@@ -477,11 +477,11 @@ begin
            mc.referral_bonus_balance as amount
       from marketplace_clients mc
       join clients c on c.id = (
-        select legacy.id from clients legacy
-         where regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
+        select legacy_client.id from clients legacy_client
+         where regexp_replace(coalesce(legacy_client.phone, ''), '[^0-9]', '', 'g') =
                regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
            and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
-         order by (legacy.phone = mc.phone) desc, legacy.id
+         order by (legacy_client.phone = mc.phone) desc, legacy_client.id
          limit 1
       )
      where coalesce(mc.referral_bonus_balance, 0) > 0

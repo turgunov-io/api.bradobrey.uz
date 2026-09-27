@@ -18,6 +18,8 @@ test('marketplace migration preserves the active-booking and idempotency invaria
   assert.match(migration, /marketplace_bookings_request_uidx/);
   assert.match(migration, /marketplace_idempotency_requests/);
   assert.match(migration, /unique \(referral_id, booking_id\)/);
+  assert.doesNotMatch(migration, /select legacy\.id from clients legacy/);
+  assert.match(migration, /select legacy_client\.id from clients legacy_client/);
 });
 
 test('marketplace migration keeps wallet and status-point ledgers separate', () => {
