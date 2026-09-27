@@ -142,11 +142,60 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
   return awarded;
 }
 
+// Older email registrations could store referral_code on the used OTP but
+// fail before creating referrals. Recover those immutable registration links
+// before settling bonuses so completed historical orders are not lost.
+async function backfillMissingReferralBindings(client, { limit = 500 } = {}) {
+  await client.query(
+    `insert into referrals
+      (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
+     select candidate.referrer_client_id,
+            candidate.referred_client_id,
+            candidate.referral_code,
+            candidate.registered_at + (candidate.expiry_days::text || ' days')::interval,
+            candidate.source_ip,
+            candidate.device_id
+       from (
+         select distinct on (mc.id)
+                ra.marketplace_client_id as referrer_client_id,
+                mc.id as referred_client_id,
+                ra.referral_code,
+                coalesce(mc.created_at, otp.created_at) as registered_at,
+                coalesce((settings.value ->> 'expiry_days')::integer, 365) as expiry_days,
+                otp.request_ip as source_ip,
+                otp.device_id
+           from otp_codes otp
+           join marketplace_clients mc
+             on (otp.email is not null and lower(mc.email) = lower(otp.email))
+             or (otp.phone is not null and
+                 regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') =
+                 regexp_replace(otp.phone, '[^0-9]', '', 'g'))
+           join referral_accounts ra
+             on upper(ra.referral_code) = upper(trim(otp.referral_code))
+          left join lateral (
+            select value from platform_settings where key = 'referral' limit 1
+          ) settings on true
+          where otp.used = true
+            and nullif(trim(otp.referral_code), '') is not null
+            and ra.marketplace_client_id <> mc.id
+            and not exists (
+              select 1 from referrals existing
+               where existing.referred_client_id = mc.id
+            )
+          order by mc.id, otp.created_at asc
+          limit $1
+       ) candidate
+      on conflict (referred_client_id) do nothing`,
+    [Math.min(Math.max(Number(limit) || 500, 1), 5000)],
+  );
+}
+
 async function settlePendingReferralBonuses({ limit = 100, referrerClientId = null } = {}) {
   const client = await pool.connect();
   let settled = 0;
   try {
     await client.query('BEGIN');
+    await backfillMissingReferralBindings(client, { limit: 5000 });
     const params = [Math.min(Math.max(Number(limit) || 100, 1), 500)];
     const referrerFilter = referrerClientId
       ? 'and r.referrer_client_id = $2'
@@ -258,6 +307,9 @@ function startReferralBonusScheduler() {
       running = false;
     }
   };
+  // Recover pending referral rewards immediately after API startup instead of
+  // waiting for the first polling interval.
+  void run();
   const timer = setInterval(run, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);

@@ -429,7 +429,7 @@ class MarketplaceAuth {
 
       const { data: otp, error: otpError } = await db
         .from('otp_codes')
-        .select('id,referral_code')
+        .select('id,referral_code,request_ip,device_id')
         .eq('email', email)
         .eq('code', code)
         .eq('used', false)
@@ -554,8 +554,17 @@ class MarketplaceAuth {
             [referrerId, client.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId],
           );
         } catch (referralError) {
-          if (!['42P01', '42703'].includes(String(referralError?.code || ''))) {
+          const referralErrorCode = String(referralError?.code || '');
+          const referralErrorMessage = String(referralError?.message || '');
+          if (referralErrorMessage === 'Invalid referral code') {
+            return res.status(400).json({ error: 'Invalid referral code' });
+          }
+          if (referralErrorMessage === 'REFERRAL_DAILY_LIMIT_REACHED') {
+            return res.status(429).json({ error: 'REFERRAL_DAILY_LIMIT_REACHED' });
+          }
+          if (!['42P01', '42703'].includes(referralErrorCode)) {
             console.error('[marketplace-auth] referral binding failed:', referralError.message);
+            return res.status(500).json({ error: 'Failed to bind referral code' });
           }
         }
       }
