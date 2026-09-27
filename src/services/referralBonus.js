@@ -68,8 +68,20 @@ async function backfillReferralWallets(client, { limit = 100 } = {}) {
     [Math.min(Math.max(Number(limit) || 100, 1), 500)],
   );
   let credited = 0;
-  for (const row of result.rows) {
-    if (await creditReferralToCashbackWallet(client, row)) credited += 1;
+  for (const [index, row] of result.rows.entries()) {
+    const savepoint = `referral_wallet_backfill_${index}`;
+    await client.query(`savepoint ${savepoint}`);
+    try {
+      if (await creditReferralToCashbackWallet(client, row)) credited += 1;
+      await client.query(`release savepoint ${savepoint}`);
+    } catch (error) {
+      await client.query(`rollback to savepoint ${savepoint}`);
+      await client.query(`release savepoint ${savepoint}`);
+      console.error('[referral-bonus] wallet backfill skipped:', {
+        referralTransactionId: row.referral_transaction_id,
+        error: error.message,
+      });
+    }
   }
   return credited;
 }
@@ -251,35 +263,51 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
       params,
     );
 
-    for (const row of candidates.rows) {
+    for (const [index, row] of candidates.rows.entries()) {
       const paidMoney = Number(row.paid_money || 0);
       // Referral rewards are whole cashback points: 1 point equals 1 sum.
       const bonus = Math.floor(paidMoney * Number(row.bonus_percent || 1) / 100);
       if (paidMoney <= 0 || bonus <= 0) continue;
 
-      const inserted = await client.query(
-        `insert into referral_transactions
-          (referral_id, booking_id, queue_entry_id, amount, paid_with_money)
-         values ($1, $2, $3, $4, $5)
-         on conflict (referral_id, queue_entry_id) where queue_entry_id is not null do nothing
-         returning id`,
-        [row.referral_id, row.booking_id, row.queue_entry_id, bonus, paidMoney],
-      );
-      if (!inserted.rows[0]) continue;
+      const savepoint = `referral_award_${index}`;
+      await client.query(`savepoint ${savepoint}`);
+      try {
+        const inserted = await client.query(
+          `insert into referral_transactions
+            (referral_id, booking_id, queue_entry_id, amount, paid_with_money)
+           values ($1, $2, $3, $4, $5)
+           on conflict (referral_id, queue_entry_id) where queue_entry_id is not null do nothing
+           returning id`,
+          [row.referral_id, row.booking_id, row.queue_entry_id, bonus, paidMoney],
+        );
+        if (!inserted.rows[0]) {
+          await client.query(`release savepoint ${savepoint}`);
+          continue;
+        }
 
-      await client.query(
-        `insert into marketplace_notifications (marketplace_client_id, type, payload)
-         values ($1, 'REFERRAL_BONUS', $2::jsonb)`,
-        [row.referrer_client_id, JSON.stringify({ amount: bonus, booking_id: row.booking_id })],
-      );
-      await creditReferralToCashbackWallet(client, {
-        referralTransactionId: inserted.rows[0].id,
-        referrerClientId: row.referrer_client_id,
-        amount: bonus,
-        bookingId: row.booking_id,
-        queueEntryId: row.queue_entry_id,
-      });
-      settled += 1;
+        await client.query(
+          `insert into marketplace_notifications (marketplace_client_id, type, payload)
+           values ($1, 'REFERRAL_BONUS', $2::jsonb)`,
+          [row.referrer_client_id, JSON.stringify({ amount: bonus, booking_id: row.booking_id })],
+        );
+        await creditReferralToCashbackWallet(client, {
+          referralTransactionId: inserted.rows[0].id,
+          referrerClientId: row.referrer_client_id,
+          amount: bonus,
+          bookingId: row.booking_id,
+          queueEntryId: row.queue_entry_id,
+        });
+        await client.query(`release savepoint ${savepoint}`);
+        settled += 1;
+      } catch (error) {
+        await client.query(`rollback to savepoint ${savepoint}`);
+        await client.query(`release savepoint ${savepoint}`);
+        console.error('[referral-bonus] award skipped:', {
+          referralId: row.referral_id,
+          queueEntryId: row.queue_entry_id,
+          error: error.message,
+        });
+      }
     }
     const referralPointsAwarded = await awardFirstVisitReferralPoints(client, { limit });
     await backfillReferralWallets(client, { limit: 100 });

@@ -18,6 +18,8 @@ test('referral settlement uses completed queue entries and money payments', () =
   assert.match(referralService, /Math\.floor\(paidMoney \* Number\(row\.bonus_percent \|\| 1\) \/ 100\)/);
   assert.match(referralService, /where r\.expires_at > now\(\)/);
   assert.match(referralService, /on conflict \(referral_id, queue_entry_id\)/);
+  assert.match(referralService, /referral_award_\$\{index\}/);
+  assert.match(referralService, /\[referral-bonus\] award skipped/);
 });
 
 test('referral settlement writes to the shared cashback ledger', () => {
@@ -25,6 +27,7 @@ test('referral settlement writes to the shared cashback ledger', () => {
   assert.match(referralService, /insert into cashback_transactions/);
   assert.match(referralService, /referral_bonus:\$\{referralTransactionId\}/);
   assert.match(referralService, /insert into cashback_wallets/);
+  assert.match(referralService, /\[referral-bonus\] wallet backfill skipped/);
 });
 
 test('cashback endpoint exposes referral transactions and repairs the shared balance', () => {
