@@ -7,6 +7,10 @@ const migration = fs.readFileSync(
   path.resolve(__dirname, '..', 'db', 'postgres', 'marketplace_tz_compliance.sql'),
   'utf8',
 );
+const migrationRunner = fs.readFileSync(
+  path.resolve(__dirname, '..', 'scripts', 'apply-marketplace-migration.js'),
+  'utf8',
+);
 
 test('marketplace migration preserves the active-booking and idempotency invariants', () => {
   assert.match(migration, /marketplace_bookings_active_client_uidx/);
@@ -30,6 +34,8 @@ test('referral rewards are idempotent per completed visit and configure first-vi
   assert.match(migration, /drop trigger if exists marketplace_referral_bonus_queue_sync/);
   assert.match(migration, /create trigger referral_bonus_completed_queue_trigger/);
   assert.match(migration, /create or replace function apply_referral_bonus_from_completed_queue/);
+  assert.match(migrationRunner, /'referral_transactions_referral_queue_uidx'/);
+  assert.doesNotMatch(migrationRunner, /'referral_transactions_referral_id_booking_id_key'/);
 });
 
 test('marketplace migration configures queue synchronization and platform limits', () => {

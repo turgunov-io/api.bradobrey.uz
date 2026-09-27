@@ -27,7 +27,7 @@ const REQUIRED_INDEXES = [
   'marketplace_bookings_active_client_uidx',
   'marketplace_bookings_request_uidx',
   'status_point_queue_kind_uidx',
-  'referral_transactions_referral_id_booking_id_key',
+  'referral_transactions_referral_queue_uidx',
   'cashback_reconciliation_open_client_uidx',
   'idx_cashback_transactions_request_id',
   'idx_cashback_transactions_reversal_kind',
