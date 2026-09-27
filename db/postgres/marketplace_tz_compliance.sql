@@ -813,3 +813,160 @@ drop trigger if exists marketplace_referral_bonus_queue_sync on queue_entries;
 -- Referral cashback is settled by referralBonus.js per completed queue entry.
 -- The former booking-wide trigger could award too early/late and was not
 -- compatible with the per-visit idempotency key.
+
+-- Final authoritative referral settlement trigger.
+-- Application code still performs recovery settlement for historical rows,
+-- but every future transition to completed is settled in the same database
+-- transaction as the queue update. This also covers kiosk/admin/barber flows
+-- and orders made at a different barbershop.
+create or replace function apply_referral_bonus_from_completed_queue()
+returns trigger
+language plpgsql
+as $$
+declare
+  referral_row record;
+  paid_money numeric(12,2) := 0;
+  payment_rows integer := 0;
+  bonus_percent numeric := 1;
+  bonus_amount numeric(12,2) := 0;
+  referral_transaction_id uuid;
+  referrer_phone text;
+  referrer_name text;
+  cashback_client_id uuid;
+begin
+  if new.status <> 'completed'
+     or (tg_op = 'UPDATE' and old.status = new.status)
+     or new.client_id is null then
+    return new;
+  end if;
+
+  -- Resolve the marketplace account from the shared legacy client identity.
+  -- Do not require marketplace_bookings: queue entries from any branch/source
+  -- are eligible while the referral is active.
+  select r.id,
+         r.referrer_client_id,
+         r.expires_at,
+         linked_booking.booking_id
+    into referral_row
+    from referrals r
+    join marketplace_clients referred_mc
+      on referred_mc.id = r.referred_client_id
+    join clients referred_c
+      on regexp_replace(coalesce(referred_c.phone, ''), '[^0-9]', '', 'g') =
+         regexp_replace(coalesce(referred_mc.phone, ''), '[^0-9]', '', 'g')
+     and regexp_replace(coalesce(referred_mc.phone, ''), '[^0-9]', '', 'g') <> ''
+    left join lateral (
+      select bp.booking_id
+        from marketplace_booking_persons bp
+       where bp.queue_entry_id = new.id
+       order by bp.booking_id
+       limit 1
+    ) linked_booking on true
+   where r.referred_client_id = referred_mc.id
+     and referred_c.id = new.client_id
+     and r.expires_at > now()
+   order by r.created_at asc
+   limit 1;
+
+  if referral_row.id is null then
+    return new;
+  end if;
+
+  select coalesce(sum(p.amount) filter (where p.method in ('payme', 'click', 'cash', 'card')), 0),
+         count(*) filter (where p.id is not null)
+    into paid_money, payment_rows
+    from payments p
+   where p.queue_entry_id = new.id;
+
+  -- Application settlement handles legacy rows without payment records after
+  -- completion. The trigger must not guess the amount because promo discounts
+  -- and cashback spending may be written immediately after the status update.
+  if payment_rows = 0 or paid_money <= 0 then
+    return new;
+  end if;
+
+  select coalesce((value ->> 'bonus_percent')::numeric, 1)
+    into bonus_percent
+    from platform_settings
+   where key = 'referral';
+  bonus_percent := coalesce(bonus_percent, 1);
+  bonus_amount := floor(paid_money * bonus_percent / 100);
+  if bonus_amount <= 0 then
+    return new;
+  end if;
+
+  insert into referral_transactions
+    (referral_id, booking_id, queue_entry_id, amount, paid_with_money)
+  values
+    (referral_row.id, referral_row.booking_id, new.id, bonus_amount, paid_money)
+  on conflict (referral_id, queue_entry_id) where queue_entry_id is not null
+  do nothing
+  returning id into referral_transaction_id;
+
+  if referral_transaction_id is null then
+    return new;
+  end if;
+
+  select phone, coalesce(nullif(display_name, ''), 'Client')
+    into referrer_phone, referrer_name
+    from marketplace_clients
+   where id = referral_row.referrer_client_id;
+
+  -- A referrer without a phone cannot yet be mapped to the legacy wallet.
+  -- Keep referral_transactions; the application recovery job will credit it
+  -- as soon as the phone is attached.
+  if referrer_phone is null or referrer_phone = '' then
+    return new;
+  end if;
+
+  select id into cashback_client_id
+    from clients
+   where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
+         regexp_replace(referrer_phone, '[^0-9]', '', 'g')
+   order by (phone = referrer_phone) desc, id
+   limit 1;
+
+  if cashback_client_id is null then
+    insert into clients (name, phone)
+    values (referrer_name, referrer_phone)
+    on conflict (phone) do update
+      set name = coalesce(nullif(clients.name, ''), excluded.name)
+    returning id into cashback_client_id;
+  end if;
+
+  insert into cashback_wallets (client_id, balance)
+  values (cashback_client_id, 0)
+  on conflict (client_id) do nothing;
+
+  insert into cashback_transactions
+    (client_id, kind, amount, meta, request_id)
+  values (
+    cashback_client_id,
+    'adjust',
+    bonus_amount,
+    jsonb_build_object(
+      'source', 'referral_bonus',
+      'booking_id', referral_row.booking_id,
+      'queue_entry_id', new.id,
+      'referral_transaction_id', referral_transaction_id,
+      'description', 'Referral bonus'
+    ),
+    'referral_bonus:' || referral_transaction_id::text
+  )
+  on conflict (request_id) where request_id is not null do nothing;
+
+  if found then
+    update cashback_wallets
+       set balance = round((balance + bonus_amount)::numeric, 2),
+           updated_at = now()
+     where client_id = cashback_client_id;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists referral_bonus_completed_queue_trigger on queue_entries;
+create trigger referral_bonus_completed_queue_trigger
+after insert or update of status on queue_entries
+for each row execute function apply_referral_bonus_from_completed_queue();

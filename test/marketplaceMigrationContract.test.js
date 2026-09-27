@@ -28,6 +28,8 @@ test('referral rewards are idempotent per completed visit and configure first-vi
   assert.match(migration, /referral_transactions_referral_queue_uidx/);
   assert.match(migration, /referral_points":15/);
   assert.match(migration, /drop trigger if exists marketplace_referral_bonus_queue_sync/);
+  assert.match(migration, /create trigger referral_bonus_completed_queue_trigger/);
+  assert.match(migration, /create or replace function apply_referral_bonus_from_completed_queue/);
 });
 
 test('marketplace migration configures queue synchronization and platform limits', () => {
