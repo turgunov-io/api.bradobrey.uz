@@ -134,6 +134,17 @@ create table if not exists referral_transactions (
   unique (referral_id, booking_id)
 );
 
+-- Referral cashback is earned per completed service visit, not once for an
+-- entire (possibly multi-person) marketplace booking. Keep historical booking
+-- rows intact while making new queue-entry awards independently idempotent.
+alter table referral_transactions
+  add column if not exists queue_entry_id uuid references queue_entries(id) on delete set null;
+alter table referral_transactions
+  drop constraint if exists referral_transactions_referral_id_booking_id_key;
+create unique index if not exists referral_transactions_referral_queue_uidx
+  on referral_transactions (referral_id, queue_entry_id)
+  where queue_entry_id is not null;
+
 create table if not exists marketplace_reviews (
   id uuid default gen_random_uuid() primary key,
   marketplace_client_id uuid not null references marketplace_clients(id) on delete restrict,
@@ -372,12 +383,16 @@ insert into platform_settings (key, value, description)
 values
   ('booking_limits', '{"max_persons":4,"max_services_per_person":3,"max_duration_minutes":180,"max_daily_bookings":5}'::jsonb, 'Marketplace booking limits'),
   ('anti_fraud', '{"cancel_cooldown_minutes":15,"cancel_block_threshold":3,"no_show_block_threshold":5,"block_hours":24}'::jsonb, 'Marketplace anti-fraud settings'),
-  ('status_points', '{"completed_service_points":10,"late_cancel_penalty":-10,"no_show_penalty":-30,"daily_positive_limit":20}'::jsonb, 'Marketplace status point rules'),
+  ('status_points', '{"completed_service_points":10,"referral_points":15,"late_cancel_penalty":-10,"no_show_penalty":-30,"daily_positive_limit":20}'::jsonb, 'Marketplace status point rules'),
   ('loyalty_levels', '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb, 'Marketplace status point levels'),
   ('cashback_policy', '{"max_redeem_share":1}'::jsonb, 'Maximum share of payable service total redeemable from cashback'),
   ('cashback', '{"default_percent":1,"promotion_percent":null,"promotion_start_date":null,"promotion_end_date":null,"timezone":"Asia/Tashkent"}'::jsonb, 'Marketplace cashback percentage and temporary promotion'),
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
 on conflict (key) do nothing;
+
+update platform_settings
+   set value = jsonb_set(value, '{referral_points}', '15'::jsonb, true), updated_at = now()
+ where key = 'status_points' and not (value ? 'referral_points');
 
 -- Correct the previous non-TZ defaults without overwriting administrator changes.
 update platform_settings
@@ -795,6 +810,6 @@ end;
 $$;
 
 drop trigger if exists marketplace_referral_bonus_queue_sync on queue_entries;
-create trigger marketplace_referral_bonus_queue_sync
-after insert or update of status on queue_entries
-for each row execute function apply_marketplace_referral_bonus_from_queue();
+-- Referral cashback is settled by referralBonus.js per completed queue entry.
+-- The former booking-wide trigger could award too early/late and was not
+-- compatible with the per-visit idempotency key.

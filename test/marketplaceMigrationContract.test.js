@@ -23,6 +23,13 @@ test('marketplace migration keeps wallet and status-point ledgers separate', () 
   assert.match(migration, /status_point_queue_kind_uidx/);
 });
 
+test('referral rewards are idempotent per completed visit and configure first-visit points', () => {
+  assert.match(migration, /add column if not exists queue_entry_id uuid references queue_entries\(id\)/);
+  assert.match(migration, /referral_transactions_referral_queue_uidx/);
+  assert.match(migration, /referral_points":15/);
+  assert.match(migration, /drop trigger if exists marketplace_referral_bonus_queue_sync/);
+});
+
 test('marketplace migration configures queue synchronization and platform limits', () => {
   assert.match(migration, /create or replace function sync_marketplace_booking_from_queue/);
   assert.match(migration, /create or replace function apply_marketplace_status_points_from_queue/);
