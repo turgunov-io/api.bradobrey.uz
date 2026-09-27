@@ -153,7 +153,8 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
       : '';
     if (referrerClientId) params.push(referrerClientId);
     const candidates = await client.query(
-      `select r.id as referral_id, r.referrer_client_id, b.id as booking_id, q.id as queue_entry_id,
+      `select r.id as referral_id, r.referrer_client_id,
+              linked_booking.booking_id, q.id as queue_entry_id,
               round((
                 coalesce(sum(pay.amount) filter (where pay.method in ('payme', 'click', 'cash', 'card')), 0)
                 + coalesce(sum(
@@ -172,9 +173,22 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
               coalesce((select (value ->> 'bonus_percent')::numeric
                           from platform_settings where key = 'referral'), 1) as bonus_percent
          from referrals r
-         join marketplace_bookings b on b.marketplace_client_id = r.referred_client_id
-         join marketplace_booking_persons bp on bp.booking_id = b.id
-         join queue_entries q on q.id = bp.queue_entry_id and q.status = 'completed'
+         join marketplace_clients referred_mc
+           on referred_mc.id = r.referred_client_id
+         join clients referred_c
+           on regexp_replace(coalesce(referred_c.phone, ''), '[^0-9]', '', 'g') =
+              regexp_replace(coalesce(referred_mc.phone, ''), '[^0-9]', '', 'g')
+          and regexp_replace(coalesce(referred_mc.phone, ''), '[^0-9]', '', 'g') <> ''
+         join queue_entries q
+           on q.client_id = referred_c.id
+          and q.status = 'completed'
+         left join lateral (
+           select bp.booking_id
+             from marketplace_booking_persons bp
+            where bp.queue_entry_id = q.id
+            order by bp.booking_id
+            limit 1
+         ) linked_booking on true
          left join payments pay on pay.queue_entry_id = q.id
         where r.expires_at > now()
           ${referrerFilter}
@@ -182,7 +196,7 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
             select 1 from referral_transactions rt
              where rt.referral_id = r.id and rt.queue_entry_id = q.id
           )
-        group by r.id, r.referrer_client_id, b.id, q.id
+        group by r.id, r.referrer_client_id, linked_booking.booking_id, q.id
         order by q.updated_at asc
         limit $1`,
       params,

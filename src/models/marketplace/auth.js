@@ -365,7 +365,7 @@ class MarketplaceAuth {
       const { data: insertedOtp, error: insertError } = await db
         .from('otp_codes')
         .insert(otpPayload)
-        .select('id,referral_code')
+        .select('id,referral_code,request_ip,device_id')
         .single();
 
       if (insertError || !insertedOtp) {
@@ -494,27 +494,65 @@ class MarketplaceAuth {
         return res.status(500).json({ error: 'Failed to save client' });
       }
 
-      if (otp.referral_code) {
+      // Referral binding is registration-only. An existing email account must
+      // never acquire a referrer by logging in with a code later.
+      if (otp.referral_code && !existingClient?.id) {
         try {
           const referral = await pool.query(
-            `select marketplace_client_id from referral_accounts
+            `select marketplace_client_id, referral_code from referral_accounts
               where referral_code = $1 and marketplace_client_id <> $2
-              limit 1`,
+              limit 1
+              for update`,
             [String(otp.referral_code).trim().toUpperCase(), client.id],
           );
-          if (referral.rows[0]?.marketplace_client_id) {
+          if (!referral.rows[0]) {
+            throw new Error('Invalid referral code');
+          }
+
+          const settings = await pool.query(
+            `select value from platform_settings where key = 'referral'`,
+          );
+          const referralSettings = settings.rows[0]?.value || {};
+          const dailyLimit = Math.max(1, Number(referralSettings.daily_limit || 10));
+          const expiryDays = Math.max(1, Number(referralSettings.expiry_days || 365));
+          const referrerId = referral.rows[0].marketplace_client_id;
+          const dailyCount = await pool.query(
+            `select count(*)::int as count from referrals
+              where referrer_client_id = $1
+                and (created_at at time zone 'Asia/Tashkent')::date =
+                    (now() at time zone 'Asia/Tashkent')::date`,
+            [referrerId],
+          );
+          if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
+            throw new Error('REFERRAL_DAILY_LIMIT_REACHED');
+          }
+
+          const sourceIp = otp.request_ip || null;
+          const deviceId = otp.device_id || null;
+          const sourceCount = await pool.query(
+            `select count(*)::int as count from referrals
+              where (created_at at time zone 'Asia/Tashkent')::date =
+                    (now() at time zone 'Asia/Tashkent')::date
+                and (($1::inet is not null and source_ip = $1::inet)
+                  or ($2::text is not null and device_id = $2::text))`,
+            [sourceIp, deviceId],
+          );
+          if (Number(sourceCount.rows[0]?.count || 0) >= dailyLimit) {
             await pool.query(
-              `insert into referrals
-                (referrer_client_id, referred_client_id, referral_code, expires_at)
-               values ($1, $2, $3, now() + interval '365 days')
-               on conflict (referred_client_id) do nothing`,
-              [
-                referral.rows[0].marketplace_client_id,
-                client.id,
-                String(otp.referral_code).trim().toUpperCase(),
-              ],
+              `insert into marketplace_fraud_alerts
+                (marketplace_client_id, kind, source_ip, device_id, metadata)
+               values ($1, 'REFERRAL_VELOCITY', $2::inet, $3, $4::jsonb)`,
+              [referrerId, sourceIp, deviceId, JSON.stringify({ daily_limit: dailyLimit })],
             );
           }
+
+          await pool.query(
+            `insert into referrals
+              (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
+             values ($1, $2, $3, now() + ($4::text || ' days')::interval, $5::inet, $6)
+             on conflict (referred_client_id) do nothing`,
+            [referrerId, client.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId],
+          );
         } catch (referralError) {
           if (!['42P01', '42703'].includes(String(referralError?.code || ''))) {
             console.error('[marketplace-auth] referral binding failed:', referralError.message);
