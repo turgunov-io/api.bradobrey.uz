@@ -2064,6 +2064,17 @@ class Barbers {
             cashback = await awardCashbackForCompletedQueueEntry(updated);
             await syncMarketplaceBookingCompletion(id);
             try {
+                // The generic queue update endpoint is also a completion
+                // path. Referral rewards must be settled here immediately,
+                // otherwise they only appear after the background poller or
+                // opening the referral screen.
+                await settlePendingReferralBonuses({ limit: 20 });
+            } catch (referralError) {
+                // Do not fail a completed service because referral settlement
+                // is recoverable by the scheduler.
+                console.error('Failed to settle referral bonus:', referralError.message);
+            }
+            try {
                 await createSuspiciousOrderNotifications(updated);
             } catch (notificationError) {
                 console.error('Failed to create suspicious-order notification:', notificationError.message);
