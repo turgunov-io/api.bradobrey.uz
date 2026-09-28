@@ -228,6 +228,10 @@ const branchItem = (row) => ({
   id: row?.id,
   is_active: row?.is_active ?? null,
   marketplace_barbershop_id: row?.marketplace_barbershop_id || null,
+  latitude: row?.latitude == null ? null : Number(row.latitude),
+  longitude: row?.longitude == null ? null : Number(row.longitude),
+  rating: row?.rating == null ? null : Number(row.rating),
+  average_wait_minutes: row?.average_wait_minutes == null ? null : Number(row.average_wait_minutes),
   name: row?.name || null,
   timezone: row?.timezone || null,
   work_hours: row?.work_hours || null,
@@ -295,6 +299,14 @@ const branchPayload = (body = {}, { partial = false, barbershopId }) => {
 
   for (const key of ['address', 'city', 'timezone']) {
     if (body[key] !== undefined) payload[key] = normalizeText(body[key]);
+  }
+
+  for (const key of ['latitude', 'longitude']) {
+    if (body[key] === undefined || body[key] === null || body[key] === '') continue;
+    const value = Number(body[key]);
+    const valid = key === 'latitude' ? value >= -90 && value <= 90 : value >= -180 && value <= 180;
+    if (!Number.isFinite(value) || !valid) return { error: `${key} must be a valid coordinate` };
+    payload[key] = value;
   }
 
   if (body.work_hours !== undefined) {
@@ -627,7 +639,7 @@ class Merchant {
 
     try {
       const result = await db.query(
-        `select id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id
+        `select id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes
          from branches
          where marketplace_barbershop_id = $1
          order by name asc`,
@@ -651,9 +663,9 @@ class Merchant {
 
     try {
       const result = await db.query(
-        `insert into branches (name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id)
-         values ($1, $2, $3, $4, $5, $6, $7)
-         returning id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id`,
+        `insert into branches (name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         returning id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes`,
         [
           payload.name,
           payload.address || null,
@@ -662,6 +674,8 @@ class Merchant {
           payload.timezone || null,
           payload.is_active,
           access.barbershopId,
+          payload.latitude ?? null,
+          payload.longitude ?? null,
         ]
       );
       return res.status(201).json({ item: branchItem(result.rows[0]) });
@@ -692,7 +706,7 @@ class Merchant {
         `update branches
          set ${setSql}
          where id = $${keys.length + 1} and marketplace_barbershop_id = $${keys.length + 2}
-         returning id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id`,
+         returning id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes`,
         [...values, id, access.barbershopId]
       );
 

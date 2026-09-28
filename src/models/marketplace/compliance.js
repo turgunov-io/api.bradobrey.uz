@@ -264,6 +264,7 @@ async function createReview(req, res) {
   if (!clientId) return;
   const requestId = String(req.body?.request_id || req.get('Idempotency-Key') || '').trim() || null;
   const bookingId = String(req.body?.booking_id || '').trim();
+  const serviceId = String(req.body?.service_id || '').trim() || null;
   const rating = Number(req.body?.rating);
   const comment = req.body?.comment == null ? null : String(req.body.comment).trim();
   if (!bookingId || !Number.isInteger(rating) || rating < 1 || rating > 5) {
@@ -376,10 +377,24 @@ async function createReview(req, res) {
     );
     const barbershopId = reviewContext.rows[0]?.barbershop_id || null;
     const barberId = reviewContext.rows[0]?.barber_id || null;
+    if (serviceId) {
+      const serviceCheck = await dbClient.query(
+        `select 1
+           from marketplace_booking_persons bp
+           join marketplace_booking_person_services ps on ps.person_id = bp.id
+          where bp.booking_id = $1 and ps.service_id = $2
+          limit 1`,
+        [resolvedBookingId, serviceId],
+      );
+      if (!serviceCheck.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(400).json({ error: 'SERVICE_NOT_IN_BOOKING' });
+      }
+    }
     const result = await dbClient.query(
-      `insert into marketplace_reviews (marketplace_client_id, booking_id, barbershop_id, barber_id, rating, comment)
-       values ($1, $2, $3, $4, $5, $6) returning *`,
-      [clientId, resolvedBookingId, barbershopId, barberId, rating, comment]
+      `insert into marketplace_reviews (marketplace_client_id, booking_id, service_id, barbershop_id, barber_id, rating, comment)
+       values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+      [clientId, resolvedBookingId, serviceId, barbershopId, barberId, rating, comment]
     );
     if (rating <= 2) {
       await dbClient.query(
@@ -568,6 +583,7 @@ async function cancelBooking(req, res) {
     );
     const lateCancel = booking.scheduled_start_at &&
       new Date(booking.scheduled_start_at).getTime() - now.getTime() <= 30 * 60000;
+    let lateCancelPenalty = 0;
     if (lateCancel) {
       const pointsConfig = await dbClient.query(
         `select value from platform_settings where key = 'status_points'`
@@ -579,6 +595,7 @@ async function cancelBooking(req, res) {
       );
       const oldLevel = oldLevelResult.rows[0]?.level || null;
       const penalty = Math.min(-1, Number(pointsConfig.rows[0]?.value?.late_cancel_penalty ?? -10));
+      lateCancelPenalty = penalty;
       const insertedPenalty = await dbClient.query(
         `insert into status_point_transactions (marketplace_client_id, booking_id, kind, amount, reason)
          values ($1, $2, 'PENALTY', $3, 'LATE_CANCEL') on conflict (booking_id, kind) where booking_id is not null do nothing returning id`,
@@ -629,6 +646,10 @@ async function cancelBooking(req, res) {
       booking_id: resolvedBookingId,
       cooldown_until: cooldownUntil.toISOString(),
       blocked_until: blockedUntil?.toISOString() || null,
+      cancel_count_today: cancelCount,
+      cancellations_remaining: Math.max(0, Number(settings.cancel_block_threshold || 3) - cancelCount),
+      block_reason: blockedUntil ? 'CANCEL_LIMIT' : null,
+      late_cancel_penalty: lateCancelPenalty,
       cashback_refunded: Number(cashbackRefunded.toFixed(2)),
     };
     if (requestId) {
@@ -662,11 +683,38 @@ async function cancelBooking(req, res) {
   }
 }
 
+async function updateReview(req, res) {
+  const clientId = authClient(req, res);
+  if (!clientId) return;
+  const reviewId = String(req.params.id || '').trim();
+  const rating = Number(req.body?.rating);
+  const comment = req.body?.comment == null ? null : String(req.body.comment).trim();
+  if (!reviewId || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'review id and rating from 1 to 5 are required' });
+  }
+  const result = await pool.query(
+    `update marketplace_reviews
+        set rating = $1, comment = $2, updated_at = now()
+      where id = $3 and marketplace_client_id = $4
+        and created_at >= now() - interval '24 hours'
+      returning *`,
+    [rating, comment, reviewId, clientId],
+  );
+  if (!result.rows[0]) return res.status(409).json({ error: 'REVIEW_EDIT_WINDOW_EXPIRED_OR_NOT_FOUND' });
+  await pool.query(
+    `insert into marketplace_audit_logs (marketplace_client_id, action, entity_type, entity_id, metadata)
+     values ($1, 'REVIEW_UPDATED', 'marketplace_review', $2, $3::jsonb)`,
+    [clientId, reviewId, JSON.stringify({ rating })],
+  );
+  return res.json({ review: result.rows[0] });
+}
+
 module.exports = {
   activeBooking,
   loyalty,
   referral,
   createReview,
+  updateReview,
   cancelBooking,
   notifications,
   markNotificationRead,

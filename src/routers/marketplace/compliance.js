@@ -16,5 +16,7 @@ router.post('/:id/cancel', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPre
 router.get('/loyalty', (req, res, next) => compliance.loyalty(req, res).catch(next));
 router.get('/referral', (req, res, next) => compliance.referral(req, res).catch(next));
 router.post('/reviews', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-review' }), (req, res, next) => compliance.createReview(req, res).catch(next));
+router.patch('/reviews/:id', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-review-edit' }), (req, res, next) => compliance.updateReview(req, res).catch(next));
+router.put('/reviews/:id', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-review-edit' }), (req, res, next) => compliance.updateReview(req, res).catch(next));
 
 module.exports = router;

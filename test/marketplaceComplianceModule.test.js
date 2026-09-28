@@ -6,5 +6,6 @@ test('marketplace compliance module loads referral and review handlers', () => {
   const compliance = require('../src/models/marketplace/compliance');
   assert.equal(typeof compliance.referral, 'function');
   assert.equal(typeof compliance.createReview, 'function');
+  assert.equal(typeof compliance.updateReview, 'function');
   assert.equal(typeof compliance.cancelBooking, 'function');
 });

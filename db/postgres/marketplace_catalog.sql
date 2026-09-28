@@ -10,6 +10,10 @@ create table if not exists marketplace_barbershops (
   timezone text,
   is_active boolean not null default true,
   sort_order integer not null default 0,
+  latitude numeric(9,6),
+  longitude numeric(9,6),
+  rating numeric(3,2),
+  average_wait_minutes integer,
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -17,6 +21,10 @@ create table if not exists marketplace_barbershops (
 
 alter table branches
   add column if not exists marketplace_barbershop_id uuid references marketplace_barbershops(id) on delete set null;
+alter table branches add column if not exists latitude numeric(9,6);
+alter table branches add column if not exists longitude numeric(9,6);
+alter table branches add column if not exists rating numeric(3,2);
+alter table branches add column if not exists average_wait_minutes integer;
 
 alter table promo_codes
   add column if not exists marketplace_barbershop_id uuid references marketplace_barbershops(id) on delete set null;

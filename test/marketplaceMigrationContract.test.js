@@ -53,3 +53,14 @@ test('marketplace migration configures queue synchronization and platform limits
   assert.match(migration, /cancel_cooldown_minutes.*15/);
   assert.match(migration, /no_show_block_threshold.*5/);
 });
+
+test('marketplace migration exposes map coordinates and per-service review edits', () => {
+  const catalogMigration = fs.readFileSync(
+    path.resolve(__dirname, '..', 'db', 'postgres', 'marketplace_catalog.sql'),
+    'utf8',
+  );
+  assert.match(catalogMigration, /add column if not exists latitude numeric\(9,6\)/);
+  assert.match(catalogMigration, /add column if not exists longitude numeric\(9,6\)/);
+  assert.match(migration, /add column if not exists service_id uuid references services\(id\)/);
+  assert.match(migration, /marketplace_reviews_booking_service_uidx/);
+});

@@ -21,6 +21,18 @@ const {
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const SLOT_INTERVAL_MINUTES = 15;
 
+const distanceKm = (aLat, aLng, bLat, bLng) => {
+  const values = [aLat, aLng, bLat, bLng].map(Number);
+  if (values.some((value) => !Number.isFinite(value))) return null;
+  const [lat1, lon1, lat2, lon2] = values;
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
+};
+
 const formatBarbershop = (row, branchesCount = 0) => ({
   id: row.id,
   name: row.name,
@@ -33,6 +45,10 @@ const formatBarbershop = (row, branchesCount = 0) => ({
   timezone: row.timezone || null,
   is_active: row.is_active !== false,
   sort_order: Number(row.sort_order || 0),
+  latitude: row.latitude == null ? null : Number(row.latitude),
+  longitude: row.longitude == null ? null : Number(row.longitude),
+  rating: row.rating == null ? null : Number(row.rating),
+  average_wait_minutes: row.average_wait_minutes == null ? null : Number(row.average_wait_minutes),
   branches_count: branchesCount,
   metadata: row.metadata || {},
 });
@@ -191,7 +207,7 @@ const extractWorkHoursForDay = ({ workHours, dayOfWeek }) => {
 
 const overlaps = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && bStart < aEnd;
 
-const listCatalogBarbershops = async ({ active, city } = {}) => {
+const listCatalogBarbershops = async ({ active, city, minRating, maxWaitMinutes, latitude, longitude, radiusKm } = {}) => {
   const { data, error } = await repo.listMarketplaceBarbershops({ active, city });
 
   if (isMissingRelationError(error, 'marketplace_barbershops')) {
@@ -208,9 +224,23 @@ const listCatalogBarbershops = async ({ active, city } = {}) => {
     branchCounts.set(key, (branchCounts.get(key) || 0) + 1);
   }
 
+  const centerLat = Number(latitude);
+  const centerLng = Number(longitude);
+  const radius = Number(radiusKm);
+  const min = Number(minRating);
+  const maxWait = Number(maxWaitMinutes);
   const items = (data || [])
     .filter(isRealMarketplaceBarbershop)
-    .map((row) => formatBarbershop(row, branchCounts.get(String(row.id)) || 0));
+    .map((row) => formatBarbershop(row, branchCounts.get(String(row.id)) || 0))
+    .filter((item) => !Number.isFinite(min) || (item.rating != null && item.rating >= min))
+    .filter((item) => !Number.isFinite(maxWait) || (item.average_wait_minutes != null && item.average_wait_minutes <= maxWait))
+    .map((item) => ({
+      ...item,
+      distance_km: Number.isFinite(centerLat) && Number.isFinite(centerLng)
+        ? distanceKm(centerLat, centerLng, item.latitude, item.longitude)
+        : null,
+    }))
+    .filter((item) => !Number.isFinite(radius) || (item.distance_km != null && item.distance_km <= radius));
 
   return { items, count: items.length };
 };
@@ -241,6 +271,10 @@ const listCatalogBranches = async ({ barbershopId, active }) => {
 
   const items = (data || []).map((branch) => ({
     ...branch,
+    latitude: branch.latitude == null ? null : Number(branch.latitude),
+    longitude: branch.longitude == null ? null : Number(branch.longitude),
+    rating: branch.rating == null ? null : Number(branch.rating),
+    average_wait_minutes: branch.average_wait_minutes == null ? null : Number(branch.average_wait_minutes),
     marketplace_barbershop_id: branch.marketplace_barbershop_id || barbershopId,
   }));
 

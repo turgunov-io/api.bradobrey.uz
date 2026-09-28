@@ -12,7 +12,15 @@ class MarketplaceCatalogController {
     try {
       const active = parseBoolean(req.query?.active, true);
       const city = req.query?.city ?? null;
-      const result = await service.listCatalogBarbershops({ active, city });
+      const result = await service.listCatalogBarbershops({
+        active,
+        city,
+        minRating: req.query?.min_rating,
+        maxWaitMinutes: req.query?.max_wait_minutes,
+        latitude: req.query?.latitude,
+        longitude: req.query?.longitude,
+        radiusKm: req.query?.radius_km,
+      });
       return res.json(result);
     } catch (error) {
       console.error(error);

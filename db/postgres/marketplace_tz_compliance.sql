@@ -156,6 +156,13 @@ create table if not exists marketplace_reviews (
   updated_at timestamptz not null default now()
 );
 
+alter table marketplace_reviews add column if not exists service_id uuid references services(id) on delete set null;
+alter table marketplace_reviews drop constraint if exists marketplace_reviews_booking_id_key;
+create unique index if not exists marketplace_reviews_booking_service_uidx
+  on marketplace_reviews (booking_id, service_id) where service_id is not null;
+create unique index if not exists marketplace_reviews_booking_legacy_uidx
+  on marketplace_reviews (booking_id) where service_id is null;
+
 create table if not exists marketplace_audit_logs (
   id uuid default gen_random_uuid() primary key,
   marketplace_client_id uuid references marketplace_clients(id) on delete set null,

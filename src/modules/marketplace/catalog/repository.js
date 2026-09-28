@@ -11,7 +11,7 @@ const STALE_QUEUE_HOURS = 9;
 // Marketplace work hours are configured on the marketplace barbershop in the
 // dashboard. Keep branch endpoints backward-compatible, but return the
 // parent schedule as the effective schedule for linked marketplace branches.
-const BRANCH_SELECT = 'id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )';
+const BRANCH_SELECT = 'id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )';
 
 const applyEffectiveMarketplaceSchedule = (row) => {
   if (!row) return row;
@@ -127,6 +127,44 @@ const getBranchOperationalBarbers = async (branchId) => {
     ]));
   }
 
+  // Use the last 20 completed services per barber to adjust ETA. A value of
+  // 1.0 means the nominal service duration is accurate; the clamp prevents a
+  // single bad historical record from making the queue unusable.
+  const speedFactorByBarber = new Map();
+  try {
+    const { data: completed } = await db
+      .from('queue_entries')
+      .select('id, barber_id, service_id, service_ids, started_at, finished_at')
+      .in('barber_id', barberIds)
+      .eq('status', 'completed')
+      .order('finished_at', { ascending: false })
+      .limit(Math.max(20, barberIds.length * 20));
+    const historyServiceIds = Array.from(new Set((completed || []).flatMap((entry) => serviceIdsForEntry(entry))));
+    if (historyServiceIds.length) {
+      const { data: historyServices } = await db
+        .from('services')
+        .select('id, duration_minutes')
+        .in('id', historyServiceIds);
+      for (const service of historyServices || []) serviceDurationById.set(String(service.id), Number(service.duration_minutes || 0));
+    }
+    for (const barberId of barberIds) {
+      const rows = (completed || []).filter((entry) => String(entry.barber_id) === String(barberId)).slice(0, 20);
+      const ratios = rows.map((entry) => {
+        const nominal = serviceIdsForEntry(entry).reduce((sum, id) => sum + (serviceDurationById.get(String(id)) || 0), 0);
+        const actual = entry.started_at && entry.finished_at
+          ? (new Date(entry.finished_at).getTime() - new Date(entry.started_at).getTime()) / 60000
+          : 0;
+        return nominal > 0 && Number.isFinite(actual) && actual > 0 ? actual / nominal : null;
+      }).filter((value) => value != null);
+      const factor = ratios.length ? ratios.reduce((sum, value) => sum + value, 0) / ratios.length : 1;
+      speedFactorByBarber.set(String(barberId), Math.min(2, Math.max(0.5, Number(factor.toFixed(3)))));
+    }
+  } catch (error) {
+    // Historical timing is an optional optimization; catalog availability
+    // remains usable on installations that have not added finished_at yet.
+    if (!isMissingColumnError(error, 'finished_at')) throw error;
+  }
+
   const waitingByBarber = new Map();
   const queueCountByBarber = new Map();
 
@@ -156,7 +194,8 @@ const getBranchOperationalBarbers = async (branchId) => {
         is_on_shift: barber.is_on_shift === true,
         is_active: barber.is_active !== false,
         queue_count: queueCountByBarber.get(String(barber.id)) || 0,
-        estimated_waiting_time: waitingByBarber.get(String(barber.id)) || 0,
+        avg_speed_factor: speedFactorByBarber.get(String(barber.id)) || 1,
+        estimated_waiting_time: Math.round((waitingByBarber.get(String(barber.id)) || 0) * (speedFactorByBarber.get(String(barber.id)) || 1)),
         // Same public queue snapshot used by the kiosk. Phone numbers and
         // other private client fields are deliberately excluded.
         clients: barberQueue.map((entry, index) => ({
@@ -186,7 +225,7 @@ const getBranchOperationalBarbers = async (branchId) => {
 const listMarketplaceBarbershops = async ({ active, city } = {}) => {
   let query = db
     .from('marketplace_barbershops')
-    .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata');
+    .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, latitude, longitude, rating, average_wait_minutes, metadata');
 
   if (active !== null && active !== undefined) query = query.eq('is_active', active);
 
@@ -205,7 +244,7 @@ const listMarketplaceBarbershops = async ({ active, city } = {}) => {
 
 const getMarketplaceBarbershopById = async (id) => db
   .from('marketplace_barbershops')
-  .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata')
+  .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, latitude, longitude, rating, average_wait_minutes, metadata')
   .eq('id', id)
   .maybeSingle();
 
