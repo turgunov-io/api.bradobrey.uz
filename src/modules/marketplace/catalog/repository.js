@@ -38,6 +38,14 @@ const getBranch = async (branchId) => {
     .eq('id', branchId)
     .maybeSingle();
 
+  if (isMissingColumnError(error, 'latitude')) {
+    ({ data, error } = await db
+      .from('branches')
+      .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )')
+      .eq('id', branchId)
+      .maybeSingle());
+  }
+
   if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
     ({ data, error } = await db
       .from('branches')
@@ -235,18 +243,41 @@ const listMarketplaceBarbershops = async ({ active, city } = {}) => {
     query = query.ilike('city', normalizedCity);
   }
 
-  const { data, error } = await query
+  let { data, error } = await query
     .order('sort_order', { ascending: true })
     .order('name', { ascending: true });
+
+  // Map columns are additive. Keep older production databases usable until
+  // the marketplace catalog migration is applied.
+  if (isMissingColumnError(error, 'latitude')) {
+    let fallback = db
+      .from('marketplace_barbershops')
+      .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata');
+    if (active !== null && active !== undefined) fallback = fallback.eq('is_active', active);
+    if (normalizedCity) fallback = fallback.ilike('city', normalizedCity);
+    ({ data, error } = await fallback
+      .order('sort_order', { ascending: true })
+      .order('name', { ascending: true }));
+  }
 
   return { data, error };
 };
 
-const getMarketplaceBarbershopById = async (id) => db
-  .from('marketplace_barbershops')
-  .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, latitude, longitude, rating, average_wait_minutes, metadata')
-  .eq('id', id)
-  .maybeSingle();
+const getMarketplaceBarbershopById = async (id) => {
+  let result = await db
+    .from('marketplace_barbershops')
+    .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, latitude, longitude, rating, average_wait_minutes, metadata')
+    .eq('id', id)
+    .maybeSingle();
+  if (isMissingColumnError(result.error, 'latitude')) {
+    result = await db
+      .from('marketplace_barbershops')
+      .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata')
+      .eq('id', id)
+      .maybeSingle();
+  }
+  return result;
+};
 
 const listBranchesForBarbershop = async (barbershopId, { active } = {}) => {
   let query = db
@@ -256,7 +287,15 @@ const listBranchesForBarbershop = async (barbershopId, { active } = {}) => {
 
   if (active !== null && active !== undefined) query = query.eq('is_active', active);
 
-  const { data, error } = await query.order('name', { ascending: true });
+  let { data, error } = await query.order('name', { ascending: true });
+  if (isMissingColumnError(error, 'latitude')) {
+    let fallback = db
+      .from('branches')
+      .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )')
+      .eq('marketplace_barbershop_id', barbershopId);
+    if (active !== null && active !== undefined) fallback = fallback.eq('is_active', active);
+    ({ data, error } = await fallback.order('name', { ascending: true }));
+  }
   return { data: (data || []).map(applyEffectiveMarketplaceSchedule), error };
 };
 
