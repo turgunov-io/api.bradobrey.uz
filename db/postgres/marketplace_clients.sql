@@ -2,6 +2,9 @@ create table if not exists marketplace_clients (
   id uuid default gen_random_uuid() primary key,
   email text unique not null,
   email_added_at timestamptz,
+  first_name text,
+  last_name text,
+  patronymic text,
   password_hash text,
   phone text,
   photo_url text,
@@ -23,6 +26,15 @@ alter table marketplace_clients
 
 alter table marketplace_clients
   add column if not exists display_name text;
+
+alter table marketplace_clients
+  add column if not exists first_name text;
+
+alter table marketplace_clients
+  add column if not exists last_name text;
+
+alter table marketplace_clients
+  add column if not exists patronymic text;
 
 alter table marketplace_clients
   add column if not exists language text not null default 'ru'

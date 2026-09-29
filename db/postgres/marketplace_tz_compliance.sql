@@ -365,6 +365,9 @@ create table if not exists marketplace_push_tokens (
 
 alter table marketplace_clients add column if not exists display_name text;
 alter table marketplace_clients add column if not exists email_added_at timestamptz;
+alter table marketplace_clients add column if not exists first_name text;
+alter table marketplace_clients add column if not exists last_name text;
+alter table marketplace_clients add column if not exists patronymic text;
 alter table marketplace_clients add column if not exists language text not null default 'ru';
 alter table marketplace_clients drop constraint if exists marketplace_clients_language_check;
 alter table marketplace_clients add constraint marketplace_clients_language_check check (language in ('uz', 'ru', 'en'));

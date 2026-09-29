@@ -74,6 +74,10 @@ const formatProfile = (row, options = {}) => {
     id: row?.id,
     email: row?.email,
     email_added_at: row?.email_added_at || null,
+    first_name: row?.first_name || null,
+    last_name: row?.last_name || null,
+    patronymic: row?.patronymic || null,
+    display_name: row?.display_name || null,
     phone: row?.phone || null,
     photo_url: row?.photo_url || buildDefaultAvatarUrl(row?.email || row?.id),
     photo_url_is_default: !hasCustomPhoto,
@@ -204,7 +208,9 @@ class MarketplaceProfile {
     // profile and cashback screens usable against older databases too.
     const { data: optionalFields } = await db
       .from('marketplace_clients')
-      .select('status_points,blocked_until,display_name,language,email_added_at')
+      .select(
+        'status_points,blocked_until,display_name,language,email_added_at,first_name,last_name,patronymic',
+      )
       .eq('id', clientId)
       .maybeSingle();
 
@@ -240,6 +246,9 @@ class MarketplaceProfile {
         profile: {
           ...formatProfile(auth.client, { cashback_balance }),
           display_name: auth.client.display_name || null,
+          first_name: auth.client.first_name || null,
+          last_name: auth.client.last_name || null,
+          patronymic: auth.client.patronymic || null,
           language: auth.client.language || 'ru',
           status_points: Number(auth.client.status_points || 0),
           blocked_until: auth.client.blocked_until || null,
@@ -262,6 +271,10 @@ class MarketplaceProfile {
       const {
         phone,
         email,
+        display_name,
+        first_name,
+        last_name,
+        patronymic,
         photo_url,
         image_base64,
         content_type,
@@ -271,6 +284,10 @@ class MarketplaceProfile {
         'phone',
         'email',
         'email_added_at',
+        'display_name',
+        'first_name',
+        'last_name',
+        'patronymic',
         'photo_url',
         'image_base64',
         'content_type',
@@ -278,20 +295,41 @@ class MarketplaceProfile {
       if (req.body && Object.keys(req.body).some((k) => !allowedKeys.includes(k))) {
         return res.status(400).json({
           error:
-            'Only profile updates are allowed (phone, email, email_added_at, photo_url, image_base64, content_type, or multipart file)',
+            'Only profile updates are allowed (phone, email, display_name, first_name, last_name, patronymic, email_added_at, photo_url, image_base64, content_type, or multipart file)',
         });
       }
 
       const hasPhoneUpdate = phone !== undefined;
       const hasEmailUpdate = email !== undefined;
+      const hasNameUpdate =
+        display_name !== undefined ||
+        first_name !== undefined ||
+        last_name !== undefined ||
+        patronymic !== undefined;
       const hasPhotoUpdate =
         photo_url !== undefined || Boolean(image_base64) || Boolean(req.file);
 
-      if (!hasPhoneUpdate && !hasEmailUpdate && !hasPhotoUpdate) {
+      if (!hasPhoneUpdate && !hasEmailUpdate && !hasNameUpdate && !hasPhotoUpdate) {
         return res.status(400).json({ error: 'Nothing to update' });
       }
 
       const updatePayload = {};
+
+      const supportsNameFields =
+        Object.prototype.hasOwnProperty.call(auth.client, 'first_name') &&
+        Object.prototype.hasOwnProperty.call(auth.client, 'last_name') &&
+        Object.prototype.hasOwnProperty.call(auth.client, 'patronymic');
+      if (hasNameUpdate && supportsNameFields) {
+        const normalizeName = (value) => {
+          if (value === undefined) return undefined;
+          const normalized = String(value || '').trim();
+          return normalized || null;
+        };
+        updatePayload.display_name = normalizeName(display_name);
+        updatePayload.first_name = normalizeName(first_name);
+        updatePayload.last_name = normalizeName(last_name);
+        updatePayload.patronymic = normalizeName(patronymic);
+      }
 
       if (hasEmailUpdate) {
         const nextEmail = normalizeEmail(email);
