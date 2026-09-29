@@ -12,6 +12,17 @@ const STALE_QUEUE_HOURS = 9;
 // dashboard. Keep branch endpoints backward-compatible, but return the
 // parent schedule as the effective schedule for linked marketplace branches.
 const BRANCH_SELECT = 'id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )';
+const MARKETPLACE_CATALOG_OPTIONAL_COLUMNS = [
+  'latitude',
+  'longitude',
+  'rating',
+  'average_wait_minutes',
+];
+
+const isMissingMarketplaceCatalogColumn = (error) =>
+  MARKETPLACE_CATALOG_OPTIONAL_COLUMNS.some((column) =>
+    isMissingColumnError(error, column),
+  );
 
 const applyEffectiveMarketplaceSchedule = (row) => {
   if (!row) return row;
@@ -38,7 +49,7 @@ const getBranch = async (branchId) => {
     .eq('id', branchId)
     .maybeSingle();
 
-  if (isMissingColumnError(error, 'latitude')) {
+  if (isMissingMarketplaceCatalogColumn(error)) {
     ({ data, error } = await db
       .from('branches')
       .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )')
@@ -249,7 +260,7 @@ const listMarketplaceBarbershops = async ({ active, city } = {}) => {
 
   // Map columns are additive. Keep older production databases usable until
   // the marketplace catalog migration is applied.
-  if (isMissingColumnError(error, 'latitude')) {
+  if (isMissingMarketplaceCatalogColumn(error)) {
     let fallback = db
       .from('marketplace_barbershops')
       .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata');
@@ -269,7 +280,7 @@ const getMarketplaceBarbershopById = async (id) => {
     .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, latitude, longitude, rating, average_wait_minutes, metadata')
     .eq('id', id)
     .maybeSingle();
-  if (isMissingColumnError(result.error, 'latitude')) {
+  if (isMissingMarketplaceCatalogColumn(result.error)) {
     result = await db
       .from('marketplace_barbershops')
       .select('id, name, description, logo_url, cover_url, city, address, work_hours, timezone, is_active, sort_order, metadata')
@@ -288,7 +299,7 @@ const listBranchesForBarbershop = async (barbershopId, { active } = {}) => {
   if (active !== null && active !== undefined) query = query.eq('is_active', active);
 
   let { data, error } = await query.order('name', { ascending: true });
-  if (isMissingColumnError(error, 'latitude')) {
+  if (isMissingMarketplaceCatalogColumn(error)) {
     let fallback = db
       .from('branches')
       .select('id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, marketplace_barbershop:marketplace_barbershops ( work_hours, timezone )')
