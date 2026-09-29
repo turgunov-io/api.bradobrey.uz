@@ -181,7 +181,7 @@ class MarketplaceProfile {
 
     const { data: baseClient, error } = await db
       .from('marketplace_clients')
-      .select('id,email,email_added_at,phone,photo_url,is_active,created_at,last_login_at')
+      .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -204,7 +204,7 @@ class MarketplaceProfile {
     // profile and cashback screens usable against older databases too.
     const { data: optionalFields } = await db
       .from('marketplace_clients')
-      .select('status_points,blocked_until,display_name,language')
+      .select('status_points,blocked_until,display_name,language,email_added_at')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -319,7 +319,14 @@ class MarketplaceProfile {
         updatePayload.email = nextEmail;
         // Do not trust a client-provided timestamp. The server owns the
         // audit date and preserves the first date on later profile updates.
-        if (!auth.client.email_added_at) {
+        // Older production databases do not have the audit column yet. Keep
+        // email updates working there and start writing the date as soon as
+        // the additive migration is applied.
+        const supportsEmailAddedAt = Object.prototype.hasOwnProperty.call(
+          auth.client,
+          'email_added_at',
+        );
+        if (supportsEmailAddedAt && !auth.client.email_added_at) {
           updatePayload.email_added_at = new Date().toISOString();
         }
       }
@@ -397,7 +404,7 @@ class MarketplaceProfile {
         .from('marketplace_clients')
         .update(updatePayload)
         .eq('id', auth.client.id)
-            .select('id,email,email_added_at,phone,photo_url,is_active,created_at,last_login_at')
+            .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
         .maybeSingle();
 
       if (updateError) {
