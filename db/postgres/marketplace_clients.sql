@@ -1,6 +1,7 @@
 create table if not exists marketplace_clients (
   id uuid default gen_random_uuid() primary key,
   email text unique not null,
+  email_added_at timestamptz,
   password_hash text,
   phone text,
   photo_url text,

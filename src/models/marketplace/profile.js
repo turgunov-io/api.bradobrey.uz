@@ -55,6 +55,14 @@ async function findLegacyClientByPhone(phoneInput) {
 
 const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');
 
+const normalizeEmail = (emailInput) => {
+  const email = String(emailInput || '').trim().toLowerCase();
+  return email || null;
+};
+
+const isValidEmail = (email) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || '');
+
 const buildDefaultAvatarUrl = (seedInput) => {
   const seed = String(seedInput || 'user');
   return DEFAULT_AVATAR_URL_TEMPLATE.replace('{seed}', encodeURIComponent(seed));
@@ -65,6 +73,7 @@ const formatProfile = (row, options = {}) => {
   return {
     id: row?.id,
     email: row?.email,
+    email_added_at: row?.email_added_at || null,
     phone: row?.phone || null,
     photo_url: row?.photo_url || buildDefaultAvatarUrl(row?.email || row?.id),
     photo_url_is_default: !hasCustomPhoto,
@@ -172,7 +181,7 @@ class MarketplaceProfile {
 
     const { data: baseClient, error } = await db
       .from('marketplace_clients')
-      .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
+      .select('id,email,email_added_at,phone,photo_url,is_active,created_at,last_login_at')
       .eq('id', clientId)
       .maybeSingle();
 
@@ -250,25 +259,70 @@ class MarketplaceProfile {
       const auth = await this._auth(req, res);
       if (!auth) return;
 
-      const { phone, photo_url, image_base64, content_type } = req.body || {};
+      const {
+        phone,
+        email,
+        photo_url,
+        image_base64,
+        content_type,
+      } = req.body || {};
 
-      const allowedKeys = ['phone', 'photo_url', 'image_base64', 'content_type'];
+      const allowedKeys = [
+        'phone',
+        'email',
+        'email_added_at',
+        'photo_url',
+        'image_base64',
+        'content_type',
+      ];
       if (req.body && Object.keys(req.body).some((k) => !allowedKeys.includes(k))) {
         return res.status(400).json({
           error:
-            'Only profile updates are allowed (phone, photo_url, image_base64, content_type, or multipart file)',
+            'Only profile updates are allowed (phone, email, email_added_at, photo_url, image_base64, content_type, or multipart file)',
         });
       }
 
       const hasPhoneUpdate = phone !== undefined;
+      const hasEmailUpdate = email !== undefined;
       const hasPhotoUpdate =
         photo_url !== undefined || Boolean(image_base64) || Boolean(req.file);
 
-      if (!hasPhoneUpdate && !hasPhotoUpdate) {
+      if (!hasPhoneUpdate && !hasEmailUpdate && !hasPhotoUpdate) {
         return res.status(400).json({ error: 'Nothing to update' });
       }
 
       const updatePayload = {};
+
+      if (hasEmailUpdate) {
+        const nextEmail = normalizeEmail(email);
+        if (!nextEmail || !isValidEmail(nextEmail)) {
+          return res.status(400).json({ error: 'Invalid email address' });
+        }
+
+        const { data: existingEmailOwner, error: emailLookupError } = await db
+          .from('marketplace_clients')
+          .select('id')
+          .eq('email', nextEmail)
+          .neq('id', auth.client.id)
+          .maybeSingle();
+
+        if (emailLookupError) {
+          return res.status(500).json({ error: emailLookupError.message });
+        }
+
+        if (existingEmailOwner?.id) {
+          return res
+            .status(409)
+            .json({ error: 'Email address is already attached to another account' });
+        }
+
+        updatePayload.email = nextEmail;
+        // Do not trust a client-provided timestamp. The server owns the
+        // audit date and preserves the first date on later profile updates.
+        if (!auth.client.email_added_at) {
+          updatePayload.email_added_at = new Date().toISOString();
+        }
+      }
 
       let nextPhone = null;
       if (hasPhoneUpdate) {
@@ -343,7 +397,7 @@ class MarketplaceProfile {
         .from('marketplace_clients')
         .update(updatePayload)
         .eq('id', auth.client.id)
-            .select('id,email,phone,photo_url,is_active,created_at,last_login_at')
+            .select('id,email,email_added_at,phone,photo_url,is_active,created_at,last_login_at')
         .maybeSingle();
 
       if (updateError) {
