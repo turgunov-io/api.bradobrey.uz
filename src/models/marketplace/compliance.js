@@ -61,11 +61,11 @@ async function activeBooking(req, res) {
       'barber_id', p.barber_id, 'queue_entry_id', p.queue_entry_id,
       'branch_id', q.branch_id, 'barber_name', br.name,
       'queue_status', q.status,
-      'queue_position', case when q.status in ('waiting', 'called', 'swapped', 'in_progress') then (
+      'queue_position', case when q.status in ('waiting', 'called', 'swapped', 'transfer_pending', 'in_progress') then (
         select count(*)::int + 1
           from queue_entries q2
          where q2.barber_id = q.barber_id
-           and q2.status in ('waiting', 'called', 'swapped', 'in_progress')
+           and q2.status in ('waiting', 'called', 'swapped', 'transfer_pending', 'in_progress')
            and (q2.status = 'in_progress' or q2.created_at >= now() - interval '9 hours')
            and (q2.created_at < q.created_at or (q2.created_at = q.created_at and q2.id <= q.id))
       ) else null end,
@@ -83,7 +83,7 @@ async function activeBooking(req, res) {
              where s.id = any(coalesce(q2.service_ids, array[q2.service_id]::uuid[]))
           ) duration
          where q2.barber_id = q.barber_id
-           and q2.status in ('waiting', 'called', 'swapped', 'in_progress')
+           and q2.status in ('waiting', 'called', 'swapped', 'transfer_pending', 'in_progress')
            and (q2.status = 'in_progress' or q2.created_at >= now() - interval '9 hours')
            and (q2.created_at < q.created_at or (q2.created_at = q.created_at and q2.id < q.id))
       ) else 0 end,
@@ -584,40 +584,47 @@ async function cancelBooking(req, res) {
     const lateCancel = booking.scheduled_start_at &&
       new Date(booking.scheduled_start_at).getTime() - now.getTime() <= 30 * 60000;
     let lateCancelPenalty = 0;
-    if (lateCancel) {
+    {
       const pointsConfig = await dbClient.query(
         `select value from platform_settings where key = 'status_points'`
       );
       const oldLevelResult = await dbClient.query(
-        `select marketplace_loyalty_level(status_points) as level
-           from marketplace_clients where id = $1`,
+        `select marketplace_loyalty_level(status_points) as level, status_points
+           from marketplace_clients where id = $1 for update`,
         [clientId],
       );
       const oldLevel = oldLevelResult.rows[0]?.level || null;
-      const penalty = Math.min(-1, Number(pointsConfig.rows[0]?.value?.late_cancel_penalty ?? -10));
-      lateCancelPenalty = penalty;
-      const insertedPenalty = await dbClient.query(
-        `insert into status_point_transactions (marketplace_client_id, booking_id, kind, amount, reason)
-         values ($1, $2, 'PENALTY', $3, 'LATE_CANCEL') on conflict (booking_id, kind) where booking_id is not null do nothing returning id`,
-        [clientId, resolvedBookingId, penalty]
+      const levelSettings = await dbClient.query(
+        `select value from platform_settings where key = 'loyalty_levels'`
       );
-      if (insertedPenalty.rows[0]) {
-        await dbClient.query(
-          `update marketplace_clients set status_points = greatest(0, status_points + $1) where id = $2`,
-          [penalty, clientId]
+      const rankSettings = levelSettings.rows[0]?.value?.[oldLevel] || {};
+      const penaltyPoints = Math.max(0, Number(rankSettings.cancel_penalty_points ?? Math.abs(Number(pointsConfig.rows[0]?.value?.late_cancel_penalty ?? -10))));
+      const penalty = -penaltyPoints;
+      lateCancelPenalty = penalty;
+      if (penaltyPoints > 0) {
+        const insertedPenalty = await dbClient.query(
+          `insert into status_point_transactions (marketplace_client_id, booking_id, kind, amount, reason)
+           values ($1, $2, 'PENALTY', $3, 'BOOKING_CANCEL') on conflict (booking_id, kind) where booking_id is not null do nothing returning id`,
+          [clientId, resolvedBookingId, penalty]
         );
-        const newLevelResult = await dbClient.query(
-          `select marketplace_loyalty_level(status_points) as level
-             from marketplace_clients where id = $1`,
-          [clientId],
-        );
-        const newLevel = newLevelResult.rows[0]?.level || null;
-        if (oldLevel && newLevel && oldLevel !== newLevel) {
+        if (insertedPenalty.rows[0]) {
           await dbClient.query(
-            `insert into marketplace_notifications (marketplace_client_id, type, payload)
-             values ($1, 'LEVEL_CHANGED', $2::jsonb)`,
-            [clientId, JSON.stringify({ old_level: oldLevel, new_level: newLevel, reason: 'LATE_CANCEL' })],
+            `update marketplace_clients set status_points = greatest(0, status_points + $1) where id = $2`,
+            [penalty, clientId]
           );
+          const newLevelResult = await dbClient.query(
+            `select marketplace_loyalty_level(status_points) as level
+               from marketplace_clients where id = $1`,
+            [clientId],
+          );
+          const newLevel = newLevelResult.rows[0]?.level || null;
+          if (oldLevel && newLevel && oldLevel !== newLevel) {
+            await dbClient.query(
+              `insert into marketplace_notifications (marketplace_client_id, type, payload)
+               values ($1, 'LEVEL_CHANGED', $2::jsonb)`,
+              [clientId, JSON.stringify({ old_level: oldLevel, new_level: newLevel, reason: 'BOOKING_CANCEL' })],
+            );
+          }
         }
       }
     }

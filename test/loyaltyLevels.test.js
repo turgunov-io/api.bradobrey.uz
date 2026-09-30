@@ -28,6 +28,20 @@ test('loyalty settings reject negative, repeated, overlapping, and malformed thr
   assert.match(validateLoyaltyLevels({ ...validBase, silver: { min_points: 200 } }).error, /unique/);
   assert.match(validateLoyaltyLevels({ Guest: { min_points: 0 }, Silver: { min_points: 100.5 } }).error, /integer/);
   assert.match(validateLoyaltyLevels({ Guest: { min_points: 0, cashback_percent: 101 } }).error, /cashback_percent/);
+  assert.match(validateLoyaltyLevels({ Guest: { min_points: 0, cancel_penalty_points: -1 } }).error, /cancel_penalty_points/);
+  assert.match(validateLoyaltyLevels({ Guest: { min_points: 0, no_show_penalty_points: 1.5 } }).error, /no_show_penalty_points/);
+});
+
+test('each rank retains its own non-negative cancellation and no-show deductions', () => {
+  const result = validateLoyaltyLevels({
+    Guest: { min_points: 0, cancel_penalty_points: 5, no_show_penalty_points: 20 },
+    Silver: { min_points: 100, cancel_penalty_points: 15, no_show_penalty_points: 30 },
+    Gold: { min_points: 500, cancel_penalty_points: 25, no_show_penalty_points: 50 },
+  });
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.value.Silver, {
+    min_points: 100, cashback_percent: 0, cancel_penalty_points: 15, no_show_penalty_points: 30,
+  });
 });
 
 test('order point reversals are unique, clamped, and limited to previously earned points', () => {
@@ -44,4 +58,11 @@ test('order point reversals are unique, clamped, and limited to previously earne
   assert.match(migration, /on conflict \(queue_entry_id, kind\).*do nothing/s);
   assert.match(migration, /status_points = greatest\(0, status_points - earned_points\)/);
   assert.match(migration, /marketplace_loyalty_level\(status_points\)/);
+  assert.match(migration, /no_show_penalty_points/);
+  assert.match(migration, /cancel_penalty_points/);
+  assert.match(migration, /where queue_entry_id = new\.id and kind = 'EARN'/);
+  const cancellationHandler = fs.readFileSync(path.resolve(__dirname, '../src/models/marketplace/compliance.js'), 'utf8');
+  assert.match(cancellationHandler, /rankSettings\.cancel_penalty_points/);
+  assert.match(cancellationHandler, /status_points = greatest\(0, status_points \+ \$1\)/);
+  assert.match(cancellationHandler, /on conflict \(booking_id, kind\).*do nothing/s);
 });

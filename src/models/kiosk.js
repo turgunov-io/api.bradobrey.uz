@@ -16,7 +16,7 @@ const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
 // Managers can also work as barbers and must be bookable in the kiosk.
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber', 'manager'];
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
-const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
+const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'transfer_pending', 'in_progress'];
 const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
 const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
 

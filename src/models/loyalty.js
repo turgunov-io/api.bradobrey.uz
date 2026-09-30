@@ -8,6 +8,8 @@ const listLevels = (value) => Object.entries(value || {})
     name,
     min_points: Number(config?.min_points) || 0,
     cashback_percent: Number(config?.cashback_percent) || 0,
+    cancel_penalty_points: Number(config?.cancel_penalty_points ?? 10),
+    no_show_penalty_points: Number(config?.no_show_penalty_points ?? 30),
   }))
   .sort((a, b) => a.min_points - b.min_points);
 
@@ -69,6 +71,8 @@ class Loyalty {
       ? Object.fromEntries(candidate.map((level) => [level?.name, {
         min_points: level?.min_points,
         cashback_percent: level?.cashback_percent ?? 0,
+        cancel_penalty_points: level?.cancel_penalty_points,
+        no_show_penalty_points: level?.no_show_penalty_points,
       }]))
       : candidate;
     const validation = validateLoyaltyLevels(asMap);

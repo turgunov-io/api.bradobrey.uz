@@ -4,6 +4,7 @@ const router = express.Router();
 
 const barbers = require('../models/barbers')
 const verifix = require('../models/verifix')
+const queueTransfers = require('../models/queueTransfers')
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -18,6 +19,9 @@ router.post('/logout', (req, res) => barbers.logout(req, res));
 router.get("/me", (req, res) => barbers.me(req, res));
 router.patch("/me", upload.single('file'), (req, res) => barbers.updateProfile(req, res));
 router.get("/queue", (req, res) => barbers.myQueue(req, res));
+router.get('/queue/transfers/pending', (req, res) => queueTransfers.pending(req, res));
+router.patch('/queue/transfers/:transferId/accept', (req, res) => queueTransfers.accept(req, res));
+router.patch('/queue/transfers/:transferId/reject', (req, res) => queueTransfers.reject(req, res));
 router.get("/queue/:id/reassign-options", (req, res) => barbers.queueReassignOptions(req, res));
 router.patch("/queue/:id/reassign", (req, res) => barbers.reassignQueue(req, res));
 router.get("/queue/:id", (req, res) => barbers.getQueueById(req, res));

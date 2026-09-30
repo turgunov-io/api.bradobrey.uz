@@ -13,7 +13,7 @@ const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
 // Every terminal queue state belongs in history. Rejected orders were
 // previously omitted, which made the dashboard appear empty for branches that
 // mostly close orders through the rejection flow.
-const HISTORY_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
+const HISTORY_STATUSES = ['waiting', 'called', 'swapped', 'transfer_pending', 'in_progress', 'completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
 
 const normalizeHistoryDateBound = (value, endOfDay = false) => {
     if (value === undefined || value === null || value === '') return null;
@@ -171,7 +171,41 @@ const enrichQueueEntriesWithPayments = async (entries) => {
 
 const prepareHistoryEntries = async (entries) => {
     const withAmounts = await enrichQueueEntriesWithAmounts(normalizeQueueEntriesTimestamps(entries || []));
-    return enrichQueueEntriesWithPayments(withAmounts);
+    const withPayments = await enrichQueueEntriesWithPayments(withAmounts);
+    const ids = withPayments.map((entry) => entry?.id).filter(Boolean);
+    if (!ids.length) return withPayments;
+    const { data: transfers, error } = await db.from('queue_transfer_events')
+        .select('id, queue_entry_id, from_barber_id, to_barber_id, status, requested_by, responded_by, requested_at, responded_at, expires_at, reason')
+        .in('queue_entry_id', ids)
+        .order('requested_at', { ascending: true });
+    const { data: statusEvents, error: statusError } = await db.from('queue_status_events')
+        .select('id, queue_entry_id, from_status, to_status, barber_id, occurred_at')
+        .in('queue_entry_id', ids)
+        .order('occurred_at', { ascending: true });
+    // Older installations remain readable until the additive migration is applied.
+    const byOrder = new Map();
+    if (!error) for (const event of transfers || []) {
+        const group = byOrder.get(event.queue_entry_id) || [];
+        group.push(event);
+        byOrder.set(event.queue_entry_id, group);
+    }
+    const statusesByOrder = new Map();
+    if (!statusError) for (const event of statusEvents || []) {
+        const group = statusesByOrder.get(event.queue_entry_id) || [];
+        group.push(event);
+        statusesByOrder.set(event.queue_entry_id, group);
+    }
+    const barberIds = Array.from(new Set([...(transfers || []).flatMap((event) => [event.from_barber_id, event.to_barber_id]), ...(statusEvents || []).map((event) => event.barber_id)].filter(Boolean)));
+    const namesByBarber = new Map();
+    if (barberIds.length) {
+        const { data: barbers } = await db.from('barbers').select('id, name').in('id', barberIds);
+        for (const barber of barbers || []) namesByBarber.set(String(barber.id), barber.name);
+    }
+    return withPayments.map((entry) => ({
+        ...entry,
+        transfer_history: (byOrder.get(entry.id) || []).map((event) => ({ ...event, from_barber_name: namesByBarber.get(String(event.from_barber_id)) || null, to_barber_name: namesByBarber.get(String(event.to_barber_id)) || null })),
+        status_history: (statusesByOrder.get(entry.id) || []).map((event) => ({ ...event, barber_name: namesByBarber.get(String(event.barber_id)) || null })),
+    }));
 };
 
 const getBearerToken = (req) => {
@@ -263,7 +297,7 @@ class History {
             .select(selectWithCertificate, { count: 'exact' })
             .eq('barber_id', barberId)
             .in('status', finalStatuses)
-            .order('finished_at', { ascending: false });
+            .order('created_at', { ascending: false });
 
         if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
@@ -275,7 +309,7 @@ class History {
                 .select(selectWithoutCertificate, { count: 'exact' })
                 .eq('barber_id', barberId)
                 .in('status', finalStatuses)
-                .order('finished_at', { ascending: false });
+                .order('created_at', { ascending: false });
 
             if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
@@ -350,7 +384,7 @@ class History {
             barber:barbers ( id, name )
         `, { count: 'exact' })
             .in('status', statuses.length ? statuses : HISTORY_STATUSES)
-            .order('finished_at', { ascending: false });
+            .order('created_at', { ascending: false });
 
         if (!fetchAll) query = query.range(offset, offset + limit - 1);
 
@@ -429,7 +463,7 @@ class History {
             `)
             .eq('branch_id', id)
             .in('status', HISTORY_STATUSES)
-            .order('finished_at', { ascending: false });
+            .order('created_at', { ascending: false });
 
         if (error) {
             return res.status(500).json({ error: error.message });

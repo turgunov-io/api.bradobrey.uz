@@ -1,8 +1,8 @@
 const DEFAULT_LOYALTY_LEVELS = Object.freeze({
-  NONE: Object.freeze({ min_points: 0, cashback_percent: 0 }),
-  BRONZE: Object.freeze({ min_points: 100, cashback_percent: 1 }),
-  SILVER: Object.freeze({ min_points: 300, cashback_percent: 2 }),
-  GOLD: Object.freeze({ min_points: 1500, cashback_percent: 2.5 }),
+  NONE: Object.freeze({ min_points: 0, cashback_percent: 0, cancel_penalty_points: 10, no_show_penalty_points: 30 }),
+  BRONZE: Object.freeze({ min_points: 100, cashback_percent: 1, cancel_penalty_points: 10, no_show_penalty_points: 30 }),
+  SILVER: Object.freeze({ min_points: 300, cashback_percent: 2, cancel_penalty_points: 10, no_show_penalty_points: 30 }),
+  GOLD: Object.freeze({ min_points: 1500, cashback_percent: 2.5, cancel_penalty_points: 10, no_show_penalty_points: 30 }),
 });
 
 function validateLoyaltyLevels(input) {
@@ -30,7 +30,14 @@ function validateLoyaltyLevels(input) {
     if (typeof cashback !== 'number' || !Number.isFinite(cashback) || cashback < 0 || cashback > 100) {
       return { error: `${name}.cashback_percent must be between 0 and 100` };
     }
-    levels.push({ name, min_points: min, cashback_percent: cashback });
+    const cancelPenalty = value?.cancel_penalty_points ?? 10;
+    const noShowPenalty = value?.no_show_penalty_points ?? 30;
+    for (const [field, penalty] of [['cancel_penalty_points', cancelPenalty], ['no_show_penalty_points', noShowPenalty]]) {
+      if (!Number.isSafeInteger(penalty) || penalty < 0) {
+        return { error: `${name}.${field} must be a non-negative integer` };
+      }
+    }
+    levels.push({ name, min_points: min, cashback_percent: cashback, cancel_penalty_points: cancelPenalty, no_show_penalty_points: noShowPenalty });
   }
 
   levels.sort((a, b) => a.min_points - b.min_points);
@@ -42,9 +49,9 @@ function validateLoyaltyLevels(input) {
   }
 
   return {
-    value: Object.fromEntries(levels.map(({ name, min_points, cashback_percent }) => [
+    value: Object.fromEntries(levels.map(({ name, min_points, cashback_percent, cancel_penalty_points, no_show_penalty_points }) => [
       name,
-      { min_points, cashback_percent },
+      { min_points, cashback_percent, cancel_penalty_points, no_show_penalty_points },
     ])),
   };
 }
@@ -56,6 +63,8 @@ function resolveLoyaltyLevel(points, settings) {
       name,
       min_points: Number(config?.min_points) || 0,
       cashback_percent: Number(config?.cashback_percent) || 0,
+      cancel_penalty_points: Number(config?.cancel_penalty_points) || 0,
+      no_show_penalty_points: Number(config?.no_show_penalty_points) || 0,
     }))
     .sort((a, b) => a.min_points - b.min_points);
   const current = levels.filter((level) => value >= level.min_points).at(-1) || levels[0];

@@ -1,5 +1,6 @@
 ﻿const { db } = require("../config/postgres");
 const bcrypto = require("bcryptjs");
+const queueTransfers = require('./queueTransfers');
 const jwt = require("jsonwebtoken");
 const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
@@ -2095,16 +2096,15 @@ class Barbers {
 
         const branchId = normalizeId(auth.payload?.branchId);
 
-        // Branch-scoped (matches reassignQueue): any barber in the same branch
-        // may view reassign options, not just the entry's current owner.
+        // Only the assigned barber may initiate a transfer, so expose target
+        // options for their own queue entries only.
         const entryQuery = db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, created_at')
-            .eq('id', id);
+            .eq('id', id)
+            .eq('barber_id', auth.barberId);
         if (branchId) {
             entryQuery.eq('branch_id', branchId);
-        } else {
-            entryQuery.eq('barber_id', auth.barberId);
         }
 
         const { data: entry, error: entryError } = await entryQuery.maybeSingle();
@@ -2145,6 +2145,7 @@ class Barbers {
     }
 
     async reassignQueue(req, res) {
+        return queueTransfers.request(req, res);
         const { id } = req.params || {};
         const targetBarberId = normalizeId(req.body?.barber_id);
         const auth = authenticateBarberWorkspace(req, res, 'Only barbers can reassign queue entries');

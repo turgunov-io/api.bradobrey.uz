@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 require('dotenv').config();
 const app = require('./app');
 const { startQueueAutoCloseScheduler, stopQueueAutoCloseScheduler } = require('./jobs/autoCloseQueue');
+const { startExpiryScheduler, stopExpiryScheduler } = require('./models/queueTransfers');
 const { startMarketplaceNotificationDispatcher } = require('./services/marketplacePush');
 const { startCashbackReconciliationScheduler } = require('./services/cashbackReconciliation');
 const { startReferralBonusScheduler } = require('./services/referralBonus');
@@ -19,6 +20,7 @@ const isSafeBranchId = (value) => /^[0-9a-f-]{20,64}$/i.test(String(value || '')
 
 app.set('io', io);
 startQueueAutoCloseScheduler({ io });
+startExpiryScheduler();
 const stopMarketplaceNotificationDispatcher = startMarketplaceNotificationDispatcher();
 const stopCashbackReconciliationScheduler = startCashbackReconciliationScheduler();
 const stopReferralBonusScheduler = startReferralBonusScheduler();
@@ -54,12 +56,14 @@ server.listen(PORT, () => {
 
 process.on('SIGTERM', () => {
   stopQueueAutoCloseScheduler();
+  stopExpiryScheduler();
   stopMarketplaceNotificationDispatcher();
   stopCashbackReconciliationScheduler();
   stopReferralBonusScheduler();
 });
 process.on('SIGINT', () => {
   stopQueueAutoCloseScheduler();
+  stopExpiryScheduler();
   stopMarketplaceNotificationDispatcher();
   stopCashbackReconciliationScheduler();
   stopReferralBonusScheduler();

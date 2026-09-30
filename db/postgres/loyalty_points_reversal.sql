@@ -19,6 +19,22 @@ create unique index if not exists status_point_queue_reversal_uidx
   on status_point_transactions (queue_entry_id, kind)
   where queue_entry_id is not null;
 
+-- Store cancellation and no-show penalties per rank. Existing global values
+-- seed every current rank so deployments keep their configured behavior.
+insert into platform_settings (key, value, description)
+select 'loyalty_levels', coalesce((select value from platform_settings where key = 'loyalty_levels' limit 1), '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb), 'Marketplace status point levels'
+on conflict (key) do nothing;
+
+update platform_settings setting
+   set value = coalesce((select jsonb_object_agg(level.name, level.value || jsonb_build_object(
+       'cancel_penalty_points', greatest(0, coalesce((level.value ->> 'cancel_penalty_points')::integer, abs((points.value ->> 'late_cancel_penalty')::integer), 10)),
+       'no_show_penalty_points', greatest(0, coalesce((level.value ->> 'no_show_penalty_points')::integer, abs((points.value ->> 'no_show_penalty')::integer), 30))
+   )) from jsonb_each(setting.value) as level(name, value)
+      cross join lateral (select coalesce((select value from platform_settings where key = 'status_points'), '{}'::jsonb) as value) points), setting.value)
+ where setting.key = 'loyalty_levels'
+   and exists (select 1 from jsonb_each(setting.value) level(name, value)
+                where not (level.value ? 'cancel_penalty_points') or not (level.value ? 'no_show_penalty_points'));
+
 -- Reverse historical awards for already-cancelled completed queue entries.
 -- The unique queue/kind index makes this backfill safe to retry.
 do $$
@@ -106,6 +122,7 @@ as $$
 declare
   marketplace_id uuid;
   points_config jsonb;
+  level_config jsonb;
   points_amount integer;
   positive_today integer;
   no_show_count integer;
@@ -181,10 +198,17 @@ begin
         end if;
       end if;
     end if;
-  elsif new.status = 'no_show' then
+  end if;
+
+  -- A completed order later corrected to no-show gets both its earned points
+  -- reversed and the rank-specific no-show deduction.
+  if new.status = 'no_show' then
     select marketplace_loyalty_level(status_points) into old_level
       from marketplace_clients where id = marketplace_id for update;
-    points_amount := least(-1, coalesce((points_config ->> 'no_show_penalty')::integer, -20));
+    select value -> old_level into level_config from platform_settings where key = 'loyalty_levels';
+    points_amount := -greatest(0, coalesce(
+      (level_config ->> 'no_show_penalty_points')::integer,
+      abs((points_config ->> 'no_show_penalty')::integer), 30));
     insert into status_point_transactions (marketplace_client_id, queue_entry_id, kind, amount, reason)
     values (marketplace_id, new.id, 'PENALTY', points_amount, 'NO_SHOW')
     on conflict (queue_entry_id, kind) where queue_entry_id is not null do nothing;

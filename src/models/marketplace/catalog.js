@@ -4,7 +4,7 @@ const { applyPromoDiscount, roundMoney } = require('../../composable/cashback');
 
 const DEFAULT_SERVICE_CATEGORY = 'Uncategorized';
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber', 'manager'];
-const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
+const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'transfer_pending', 'in_progress'];
 const PAYMENT_METHODS = [
   { value: 'payme', label: 'Payme' },
   { value: 'click', label: 'Click' },
