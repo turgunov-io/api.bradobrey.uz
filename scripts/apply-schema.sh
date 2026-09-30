@@ -44,6 +44,7 @@ FILES=(
   queue_entries_mixed_payment_method.sql
   queue_entry_price_override.sql
   queue_entry_timestamps_tz.sql
+  queue_transfer_history.sql
   payments.sql
   certificates.sql
   promo_codes.sql

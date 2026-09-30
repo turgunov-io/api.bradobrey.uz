@@ -165,6 +165,10 @@ Apply `db/postgres/finance_snapshots.sql` if the database does not have `finance
 
 ## Barber Reassignment API Workflow
 
+Before enabling this workflow against a database, apply
+`db/postgres/queue_transfer_history.sql`. The deployment helper
+`scripts/apply-schema.sh` includes this migration and is safe to re-run.
+
 1. Fetch candidates: `GET /api/barbers/queue/:id/reassign-options` with `Authorization: Bearer <barber JWT>`.
 2. Backend checks that the queue entry belongs to the current barber and is still reassignable (`waiting`, `called`, or `swapped`).
 3. Response returns `candidates`, sorted by `estimated_waiting_time`, then `current_clients`, then barber name. Current barber is excluded, inactive and off-shift barbers are excluded.
