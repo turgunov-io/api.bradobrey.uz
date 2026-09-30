@@ -4,7 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const { pool } = require('../src/config/postgres');
 
-const migrationPath = path.resolve(__dirname, '..', 'db', 'postgres', 'marketplace_tz_compliance.sql');
+const migrationPaths = [
+  path.resolve(__dirname, '..', 'db', 'postgres', 'marketplace_tz_compliance.sql'),
+  path.resolve(__dirname, '..', 'db', 'postgres', 'loyalty_points_reversal.sql'),
+];
 const lockKey = 'bradobrey-marketplace-tz-compliance-v1';
 
 const REQUIRED_TABLES = [
@@ -27,6 +30,7 @@ const REQUIRED_INDEXES = [
   'marketplace_bookings_active_client_uidx',
   'marketplace_bookings_request_uidx',
   'status_point_queue_kind_uidx',
+  'status_point_queue_reversal_uidx',
   'referral_transactions_referral_queue_uidx',
   'cashback_reconciliation_open_client_uidx',
   'idx_cashback_transactions_request_id',
@@ -61,12 +65,12 @@ async function verify(client) {
 }
 
 async function main() {
-  const sql = fs.readFileSync(migrationPath, 'utf8');
+  const migrations = migrationPaths.map((migrationPath) => fs.readFileSync(migrationPath, 'utf8'));
   const client = await pool.connect();
   try {
     await client.query('begin');
     await client.query('select pg_advisory_xact_lock(hashtext($1))', [lockKey]);
-    await client.query(sql);
+    for (const migration of migrations) await client.query(migration);
     const verified = await verify(client);
     await client.query('commit');
     console.log(`Marketplace migration applied and verified: ${verified.tables} tables, ${verified.indexes} indexes.`);

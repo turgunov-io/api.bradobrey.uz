@@ -3,7 +3,8 @@ const { isMarketingNotification, isQuietHoursAt } = require('../utils/marketplac
 const { cert, getApps, initializeApp } = require('firebase-admin/app');
 const { getMessaging } = require('firebase-admin/messaging');
 
-const POLL_INTERVAL_MS = Math.max(5000, Number(process.env.MARKETPLACE_PUSH_POLL_MS || 15000));
+const PUSH_NOTIFY_CHANNEL = 'marketplace_notification_created';
+const POLL_INTERVAL_MS = Math.max(1000, Number(process.env.MARKETPLACE_PUSH_POLL_MS || 2000));
 
 const notificationCopy = {
   BOOKING_CREATED: {
@@ -80,6 +81,7 @@ const providerUrl = () => String(process.env.MARKETPLACE_PUSH_WEBHOOK_URL || '')
 
 let firebaseMessaging = null;
 let firebaseInitializationAttempted = false;
+let pushListenerClient = null;
 
 const firebaseServiceAccount = () => {
   const raw = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim();
@@ -309,6 +311,28 @@ const dispatchPending = async () => {
   for (const row of result.rows) await dispatchNotification(row.id);
 };
 
+const startPushNotificationListener = async () => {
+  try {
+    const client = await pool.connect();
+    await client.query(`listen ${PUSH_NOTIFY_CHANNEL}`);
+    pushListenerClient = client;
+    client.on('notification', (message) => {
+      const notificationId = String(message.payload || '').trim();
+      if (!notificationId) return;
+      void dispatchNotification(notificationId).catch((error) => {
+        console.error('[marketplace-push] event dispatch failed', error.message);
+      });
+    });
+    client.on('error', (error) => {
+      console.error('[marketplace-push] listener failed; polling fallback remains active:', error.message);
+      if (pushListenerClient === client) pushListenerClient = null;
+      client.release(error);
+    });
+  } catch (error) {
+    console.error('[marketplace-push] listener unavailable; polling fallback remains active:', error.message);
+  }
+};
+
 const enqueueReferralExpiryNotifications = async () => {
   await pool.query(
     `insert into marketplace_notifications (marketplace_client_id, type, payload)
@@ -360,10 +384,15 @@ const startMarketplaceNotificationDispatcher = () => {
   expiryTimer.unref?.();
   void expiryTick();
   if (providerConfigured()) void tick();
+  void startPushNotificationListener();
 
   return () => {
     clearInterval(timer);
     clearInterval(expiryTimer);
+    if (pushListenerClient) {
+      pushListenerClient.release();
+      pushListenerClient = null;
+    }
   };
 };
 

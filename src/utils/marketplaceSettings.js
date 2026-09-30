@@ -6,6 +6,7 @@ const ALLOWED_KEYS = new Set([
   'referral',
   'cashback',
 ]);
+const { validateLoyaltyLevels } = require('./loyaltyLevels');
 
 function validateValue(key, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -52,8 +53,8 @@ function validateValue(key, value) {
       return 'promotion_end_date must be on or after promotion_start_date';
     }
   }
-  if (key === 'loyalty_levels' && Object.keys(value).length === 0) {
-    return 'loyalty_levels must not be empty';
+  if (key === 'loyalty_levels') {
+    return validateLoyaltyLevels(value).error || null;
   }
   return null;
 }

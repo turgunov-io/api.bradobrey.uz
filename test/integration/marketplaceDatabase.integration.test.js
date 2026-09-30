@@ -52,10 +52,18 @@ test('PostgreSQL marketplace migration is applied and locked safely', { skip: !e
         'marketplace_bookings_active_client_uidx',
         'marketplace_bookings_request_uidx',
         'status_point_queue_kind_uidx',
+        'status_point_queue_reversal_uidx',
         'cashback_reconciliation_open_client_uidx',
       ]],
     );
-    assert.equal(indexes.rowCount, 4);
+    assert.equal(indexes.rowCount, 5);
+
+    const loyaltyConstraints = await client.query(
+      `select conname from pg_constraint
+        where conrelid = 'marketplace_clients'::regclass
+          and conname = 'marketplace_clients_status_points_nonnegative'`,
+    );
+    assert.equal(loyaltyConstraints.rowCount, 1);
 
     await client.query('begin');
     const lock = await client.query(

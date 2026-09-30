@@ -153,7 +153,7 @@ async function fetchStatusLoyalty(statusPoints) {
     || levels[0]
     || { name: 'NONE', min_points: 0, cashback_percent: 0 };
   const next = levels.find((level) => level.min_points > points) || null;
-  return { ...current, status_points: points, next_level: next };
+  return { ...current, status_points: points, next_level: next, levels };
 }
 
 class MarketplaceProfile {
@@ -231,15 +231,13 @@ class MarketplaceProfile {
         const linked = await findLegacyClientByPhone(auth.client.phone);
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
-        if (linked?.id) {
-          loyalty = {
-            rank: statusLoyalty.name,
-            completed_visits: Number(linked.completed_visits || 0),
-            status_points: statusPoints,
-            cashback_percent: statusLoyalty.cashback_percent,
-            legacy_rank: linked.rank || 'guest',
-          };
-        }
+        loyalty = {
+          rank: statusLoyalty.name,
+          completed_visits: Number(linked?.completed_visits || 0),
+          status_points: statusPoints,
+          cashback_percent: statusLoyalty.cashback_percent,
+          legacy_rank: linked?.rank || 'guest',
+        };
       }
 
       return res.json({

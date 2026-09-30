@@ -1,141 +1,136 @@
-const jwt = require('jsonwebtoken');
-
 const { db } = require('../config/postgres');
+const { DEFAULT_LOYALTY_LEVELS, validateLoyaltyLevels } = require('../utils/loyaltyLevels');
+const { requireAdmin } = require('../utils/adminAuth');
+const LEGACY_RANK_DEFAULTS = Object.freeze({ bronze_min_visits: 2, silver_min_visits: 5, gold_min_visits: 10 });
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
-
-const getBearerToken = (req) => {
-  const authHeader = req.headers.authorization || '';
-  return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-};
-
-const requireAdmin = (req, res) => {
-  const token = getBearerToken(req);
-  if (!token) {
-    res.status(401).json({ error: 'Authorization token is required' });
-    return null;
-  }
-
-  let payload;
-  try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
-  } catch (_err) {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return null;
-  }
-
-  if (!ADMIN_ROLES.has(payload?.role)) {
-    res.status(403).json({ error: 'Only admins can manage loyalty settings' });
-    return null;
-  }
-
-  return payload;
-};
-
-const toPositiveIntOrNull = (value) => {
-  if (value === undefined) return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
-  return n;
-};
+const listLevels = (value) => Object.entries(value || {})
+  .map(([name, config]) => ({
+    name,
+    min_points: Number(config?.min_points) || 0,
+    cashback_percent: Number(config?.cashback_percent) || 0,
+  }))
+  .sort((a, b) => a.min_points - b.min_points);
 
 class Loyalty {
+  async readLevels() {
+    const { data, error } = await db.from('platform_settings').select('value, updated_at').eq('key', 'loyalty_levels').maybeSingle();
+    if (error) throw new Error(error.message);
+    return {
+      value: data?.value && Object.keys(data.value).length ? data.value : DEFAULT_LOYALTY_LEVELS,
+      updated_at: data?.updated_at || null,
+    };
+  }
+
+  async getPublicRankSettings(_req, res) {
+    try {
+      const levels = await this.readLevels();
+      return res.json({ levels: listLevels(levels.value), updated_at: levels.updated_at });
+    } catch (error) {
+      return res.status(500).json({ error: error.message || 'Failed to read loyalty settings' });
+    }
+  }
+
   async getRankSettings(req, res) {
-    const auth = requireAdmin(req, res);
-    if (!auth) return;
-
-    const { data, error } = await db
-      .from('client_rank_settings')
-      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
-      .eq('id', 1)
-      .maybeSingle();
-
-    if (error) {
-      return res.status(500).json({ error: error.message });
+    if (!requireAdmin(req, res)) return;
+    try {
+      const [levels, legacy] = await Promise.all([
+        this.readLevels(),
+        db.from('client_rank_settings')
+          .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
+          .eq('id', 1).maybeSingle(),
+      ]);
+      if (legacy.error) throw new Error(legacy.error.message);
+      return res.json({
+        settings: {
+          ...LEGACY_RANK_DEFAULTS,
+          ...(legacy.data || {}),
+          levels: listLevels(levels.value),
+          legacy_updated_at: legacy.data?.updated_at || null,
+          updated_at: levels.updated_at,
+        },
+      });
+    } catch (error) {
+      return res.status(500).json({ error: error.message || 'Failed to read loyalty settings' });
     }
-
-    if (data) return res.json({ settings: data });
-
-    const { data: created, error: createError } = await db
-      .from('client_rank_settings')
-      .insert({ id: 1 })
-      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
-      .maybeSingle();
-
-    if (createError) {
-      return res.status(500).json({ error: createError.message });
-    }
-
-    return res.json({ settings: created });
   }
 
   async updateRankSettings(req, res) {
     const auth = requireAdmin(req, res);
     if (!auth) return;
+    const body = req.body || {};
 
-    const { bronze_min_visits, silver_min_visits, gold_min_visits } = req.body || {};
-
-    const bronze = toPositiveIntOrNull(bronze_min_visits);
-    const silver = toPositiveIntOrNull(silver_min_visits);
-    const gold = toPositiveIntOrNull(gold_min_visits);
-
-    if (bronze_min_visits !== undefined && bronze === null) {
-      return res.status(400).json({ error: 'bronze_min_visits must be a positive integer' });
-    }
-    if (silver_min_visits !== undefined && silver === null) {
-      return res.status(400).json({ error: 'silver_min_visits must be a positive integer' });
-    }
-    if (gold_min_visits !== undefined && gold === null) {
-      return res.status(400).json({ error: 'gold_min_visits must be a positive integer' });
+    // Keep accepting the original visit-based payload for older dashboard builds.
+    if (body.levels === undefined && body.loyalty_levels === undefined) {
+      return this.updateLegacyRankSettings(body, res);
     }
 
-    const { data: current, error: currentError } = await db
-      .from('client_rank_settings')
-      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits')
-      .eq('id', 1)
-      .maybeSingle();
+    const candidate = body.levels ?? body.loyalty_levels;
+    const asMap = Array.isArray(candidate)
+      ? Object.fromEntries(candidate.map((level) => [level?.name, {
+        min_points: level?.min_points,
+        cashback_percent: level?.cashback_percent ?? 0,
+      }]))
+      : candidate;
+    const validation = validateLoyaltyLevels(asMap);
+    if (validation.error) return res.status(400).json({ error: validation.error });
 
-    if (currentError) {
-      return res.status(500).json({ error: currentError.message });
+    try {
+      const before = await this.readLevels();
+      const { data, error } = await db.from('platform_settings')
+        .upsert({
+          key: 'loyalty_levels',
+          value: validation.value,
+          description: 'Marketplace status point levels',
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'key' })
+        .select('value, updated_at').eq('key', 'loyalty_levels').maybeSingle();
+      if (error) throw new Error(error.message);
+      const settings = data?.value || validation.value;
+
+      // Existing audit log supports metadata-only setting events.
+      try {
+        await db.query(
+          `insert into marketplace_audit_logs (action, entity_type, metadata)
+           values ('LOYALTY_LEVELS_UPDATED', 'platform_setting', $1::jsonb)`,
+          [JSON.stringify({ admin_id: auth.sub || auth.id || null, admin_role: auth.role, before: before.value, after: settings })],
+        );
+      } catch (auditError) {
+        console.error('Failed to record loyalty settings audit event:', auditError.message);
+      }
+      return res.json({ settings: { levels: listLevels(settings), updated_at: data?.updated_at || null } });
+    } catch (error) {
+      return res.status(500).json({ error: error.message || 'Failed to update loyalty settings' });
     }
+  }
 
-    const next = {
-      bronze_min_visits: bronze ?? current?.bronze_min_visits ?? 2,
-      silver_min_visits: silver ?? current?.silver_min_visits ?? 5,
-      gold_min_visits: gold ?? current?.gold_min_visits ?? 10,
-    };
-
-    if (!(next.silver_min_visits > next.bronze_min_visits)) {
+  async updateLegacyRankSettings(body, res) {
+    const { bronze_min_visits, silver_min_visits, gold_min_visits } = body;
+    const supplied = { bronze_min_visits, silver_min_visits, gold_min_visits };
+    const next = {};
+    for (const [key, value] of Object.entries(supplied)) {
+      if (value === undefined) continue;
+      const number = Number(value);
+      if (!Number.isSafeInteger(number) || number <= 0) {
+        return res.status(400).json({ error: `${key} must be a positive integer` });
+      }
+      next[key] = number;
+    }
+    if (!Object.keys(next).length) return res.status(400).json({ error: 'No fields to update' });
+    const { data: current, error: readError } = await db.from('client_rank_settings')
+      .select('bronze_min_visits, silver_min_visits, gold_min_visits').eq('id', 1).maybeSingle();
+    if (readError) return res.status(500).json({ error: readError.message });
+    const effective = { ...LEGACY_RANK_DEFAULTS, ...(current || {}), ...next };
+    if (!(effective.silver_min_visits > effective.bronze_min_visits)) {
       return res.status(400).json({ error: 'silver_min_visits must be > bronze_min_visits' });
     }
-
-    if (!(next.gold_min_visits > next.silver_min_visits)) {
+    if (!(effective.gold_min_visits > effective.silver_min_visits)) {
       return res.status(400).json({ error: 'gold_min_visits must be > silver_min_visits' });
     }
-
-    const payload = { id: 1 };
-    if (bronze !== null) payload.bronze_min_visits = bronze;
-    if (silver !== null) payload.silver_min_visits = silver;
-    if (gold !== null) payload.gold_min_visits = gold;
-
-    if (Object.keys(payload).length === 1) {
-      return res.status(400).json({ error: 'No fields to update' });
-    }
-
-    const { data: updated, error: updateError } = await db
-      .from('client_rank_settings')
-      .upsert(payload, { onConflict: 'id' })
-      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
-      .eq('id', 1)
-      .maybeSingle();
-
-    if (updateError) {
-      return res.status(500).json({ error: updateError.message });
-    }
-
-    return res.json({ settings: updated });
+    const { data, error } = await db.from('client_rank_settings').upsert({ id: 1, ...next }, { onConflict: 'id' })
+      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at').eq('id', 1).maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ settings: data });
   }
 }
 
 module.exports = new Loyalty();
-

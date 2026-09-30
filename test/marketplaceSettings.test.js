@@ -57,3 +57,18 @@ test('marketplace settings validate cashback promotions', () => {
     promotion_end_date: '2026-09-27',
   }), /on or after/);
 });
+
+test('marketplace settings enforce ordered non-negative loyalty thresholds', () => {
+  assert.equal(validateValue('loyalty_levels', {
+    GUEST: { min_points: 0, cashback_percent: 0 },
+    SILVER: { min_points: 100, cashback_percent: 2 },
+  }), null);
+  assert.match(validateValue('loyalty_levels', {
+    GUEST: { min_points: 0 },
+    SILVER: { min_points: -5 },
+  }), /non-negative/);
+  assert.match(validateValue('loyalty_levels', {
+    GUEST: { min_points: 0 },
+    SILVER: { min_points: 0 },
+  }), /above/);
+});

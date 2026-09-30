@@ -231,6 +231,24 @@ alter table marketplace_notifications add column if not exists push_attempts int
 create index if not exists marketplace_notifications_client_created_idx
   on marketplace_notifications (marketplace_client_id, created_at desc);
 
+-- Wake the push dispatcher immediately after a notification transaction commits.
+-- The dispatcher keeps a short polling fallback for deployments where this
+-- trigger has not been applied yet.
+create or replace function notify_marketplace_notification_created()
+returns trigger
+language plpgsql
+as $$
+begin
+  perform pg_notify('marketplace_notification_created', new.id::text);
+  return new;
+end;
+$$;
+
+drop trigger if exists marketplace_notification_push_notify on marketplace_notifications;
+create trigger marketplace_notification_push_notify
+after insert on marketplace_notifications
+for each row execute function notify_marketplace_notification_created();
+
 create or replace function notify_marketplace_queue_status()
 returns trigger
 language plpgsql

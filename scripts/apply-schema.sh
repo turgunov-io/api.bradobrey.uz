@@ -59,6 +59,7 @@ FILES=(
   otp_codes.sql
   banners.sql
   marketplace_tz_compliance.sql
+  loyalty_points_reversal.sql
 )
 
 list_tables() {
