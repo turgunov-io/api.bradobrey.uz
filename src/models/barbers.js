@@ -1831,7 +1831,7 @@ class Barbers {
                 client:clients ( id, name, phone )
             `)
             .eq('barber_id', barberId)
-            .in('status', ['waiting', 'called', 'in_progress'])
+            .in('status', ACTIVE_QUEUE_STATUSES)
             .order('created_at', { ascending: true });
 
         if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
@@ -1851,7 +1851,7 @@ class Barbers {
                     client:clients ( id, name, phone )
                 `)
                 .eq('barber_id', barberId)
-                .in('status', ['waiting', 'called', 'in_progress'])
+                .in('status', ACTIVE_QUEUE_STATUSES)
                 .order('created_at', { ascending: true }));
         }
 

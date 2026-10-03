@@ -16,7 +16,7 @@ const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
 // Managers can also work as barbers and must be bookable in the kiosk.
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber', 'manager'];
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
-const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'transfer_pending', 'in_progress'];
+const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
 const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
 
@@ -351,16 +351,15 @@ class Kiosk {
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
             .select("id, barber_id, client_id, status, created_at, started_at, service_ids") // 🔥 ADDED service_ids
-            .eq("branch_id", branch_id);
+            .eq("branch_id", branch_id)
+            .in('status', ACTIVE_QUEUE_STATUSES);
 
         if (queuesError) {
             return res.status(500).json({ error: queuesError.message });
         }
 
         const queues = (rawQueues || []).filter((entry) => {
-            if (['completed', 'no_show', 'not_in_time'].includes(entry.status)) {
-                return false;
-            }
+            if (!ACTIVE_QUEUE_STATUSES.includes(entry.status)) return false;
             if (!entry?.created_at) return true;
             if (['waiting', 'called', 'swapped'].includes(entry.status)) {
                 return new Date(entry.created_at) >= cutoffDate;
