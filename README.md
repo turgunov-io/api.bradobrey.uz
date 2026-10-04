@@ -28,9 +28,9 @@ Backend for a barbershop live-queue system (JWT auth for barbers, PostgreSQL per
 
 ## Key Endpoints
 
-- `POST /api/auth/login` — returns JWT + barber data (if role = barber)
-- `POST /api/auth/register` — create user (role-driven); for barbers also creates profile
-- `GET /api/auth/me` — current user from JWT
+- `POST /api/auth/login` — returns JWT + barber data (if role = barber); `/api/barbers/login` remains available for legacy clients
+- `POST /api/barbers/register` — create user (role-driven); for barbers also creates profile
+- `GET /api/barbers/me` — current user from JWT
 - `GET /api/barber/queue` — barber’s queue (waiting + called)
 - `GET /api/barbers/me?period=YYYY-MM` — current barber profile with `barber.finance` details for the selected month
 - `GET /api/verifix/events` — barber activity log with lateness fields
@@ -184,7 +184,7 @@ Before enabling this workflow against a database, apply
   - Edit branch: `PATCH /api/branches/:id`
   - Activate/deactivate: `POST /api/branches/:id/{activate|deactivate}`
 - **Barber**
-  - Register (role `barber`): `POST /api/auth/register`
+  - Register (role `barber`): `POST /api/barbers/register`
   - Login (requires `branch_id` to bind shift to a branch): `POST /api/auth/login` → JWT (payload contains `barberId`)
   - View own queue: `GET /api/barber/queue` (only `waiting`/`called`, with ETA)
   - Call client: `POST /api/queue/:id/call`
@@ -248,7 +248,7 @@ Before enabling this workflow against a database, apply
 ```
 Build an Express + PostgreSQL backend for a barbershop live-queue system with JWT auth and Socket.io updates.
 - Entities: branches, barbers (id=users.id, phone, photo, specialization, is_authorized, is_on_shift), services (duration_minutes, base_price, is_active), clients (name, phone unique), queue_entries (client_id, branch_id, barber_id, service_id + service_ids[], status waiting|called|swapped|rejected|in_progress|completed|cancelled|no_show, source point|site|admin, payment_method cash|card|certificate, timestamps), payments (amount, method), media_assets (ads|music|kids|video, barber_id optional).
-- Auth: /api/auth/register, /api/auth/login (barber must supply branch_id), /api/auth/me. Token payload includes barberId and branchId.
+- Auth: /api/barbers/register, /api/auth/login (barber must supply branch_id), /api/barbers/me. Token payload includes barberId and branchId.
 - Barber workspace: /api/barber/queue (today only, auto-reject stale via timeout_minutes, includes services, price, payment, eta), /api/barber/queue/:id/reject, /api/barber/queue/:id/swap, /api/barber/queue/:id (patch services/payment/client info), /api/barber/stats, /api/barber/history, /api/barber/profile (get/patch), /api/barber/shift/start, /api/barber/shift/stop, media CRUD /api/barber/media (list/create/update, scoped to barber or shared).
 - Queue actions (shared): /api/queue/:id/{call|start|complete|pause} as needed.
 - Client/kiosk: /api/monitor/barbers?branch_id=, /api/monitor/queue (enqueue client with service_ids array), /api/monitor/queue/:id/status, /api/monitor/queue/:id/cancel.
