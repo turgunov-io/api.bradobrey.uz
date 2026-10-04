@@ -46,7 +46,7 @@
 - [ ] Обновить README, `.env.example`, `MARKETPLACE_TZ_AUDIT.md` и threat model после исправлений.
 - [x] Реализовать backend `employee-quality-v1`, immutable completion evidence, protected aggregate/drill-down/review contracts и boundary/permission tests.
 - [ ] Применить employee-quality migration в staging, проверить query plans/p95 и выполнить API integration/security matrix against PostgreSQL.
-- [ ] Применить marker-protected `employee_quality_permissions_backfill.sql` для существующих пользователей и проверить фактическую матрицу; новые пользователи получают явные permissions через административный workflow.
+- [ ] Применить marker-protected `employee_quality_permissions_backfill.sql` для существующих пользователей и проверить фактическую матрицу; новые пользователи получают явные permissions через административный workflow. Локальная проверка заблокирована ошибкой PostgreSQL `28P01` (неверные/неактуальные credentials), поэтому rollout ещё не подтверждён на DB.
 - [ ] До production создать отдельного owner/migrator и ограниченного runtime DB role; проверить `GRANT/REVOKE`, чтобы runtime role не мог отключать trigger-ы или напрямую писать immutable audit/event tables. Текущая схема не может безопасно угадать deployment-specific role names.
 
 ## Текущий статус

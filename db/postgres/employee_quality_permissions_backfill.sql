@@ -20,6 +20,7 @@ begin
     select id, permission
       from (
         select id, unnest(array[
+          'dashboard.access',
           'history.read.branch',
           'statistics.read.branch',
           'statistics.read.global',
@@ -31,6 +32,7 @@ begin
         union all
 
         select id, unnest(array[
+          'dashboard.access',
           'history.read.branch',
           'statistics.read.branch',
           'statistics.quality.review'

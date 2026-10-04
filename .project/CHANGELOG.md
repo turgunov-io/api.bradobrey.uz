@@ -3,7 +3,7 @@
 ## 2026-10-04
 
 - Login, admin login and `/api/barbers/me` now return authoritative `user_permissions`, preventing Dashboard role fallbacks from disagreeing with API authorization.
-- Added a marker-protected one-time permission backfill for pre-existing employee-quality users; repeat schema runs do not restore later revocations.
+- Added a marker-protected one-time permission backfill for pre-existing employee-quality users, including explicit `dashboard.access` for administrative roles; repeat schema runs do not restore later revocations.
 - Добавлен server-side `employee-quality-v1`: strict `<50%` classifier, deterministic quality-first ranking, eligibility/data-confidence rules и revenue только как справочная метрика.
 - Добавлены защищённые aggregate, PII-free drill-down и versioned/idempotent review endpoints с self/branch/global enforcement и отдельным `statistics.quality.review`.
 - Добавлена транзакционная additive migration для immutable plan/completion snapshots, approximate historical backfill, review audit events и status attribution columns/indexes. Audit UUID не удаляются и не обнуляются при удалении operational entities.
