@@ -254,6 +254,286 @@ test('PATCH /api/barbers/queue/:id validates in-progress services and returns en
   }
 });
 
+test('generic queue PATCH cannot reopen or change any terminal status', async () => {
+  const terminalStatuses = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
+  const mock = installDbMock({
+    queue_entries: terminalStatuses.map((status) => ({
+      data: {
+        id: `queue-${status}`,
+        barber_id: 'barber-1',
+        branch_id: 'branch-1',
+        status,
+        service_id: 'service-1',
+        service_ids: ['service-1'],
+      },
+      error: null,
+    })),
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    for (const status of terminalStatuses) {
+      const req = {
+        app: { get: () => null },
+        body: { status: 'waiting' },
+        headers: { authorization: `Bearer ${token}` },
+        params: { id: `queue-${status}` },
+      };
+      const res = createResponse();
+      await barbers.updateQueue(req, res);
+      assert.equal(res.statusCode, 409);
+      assert.match(res.payload.error, new RegExp(`terminal queue entry in status ${status}`));
+    }
+    assert.equal(mock.calls.some((call) => call.method === 'update'), false);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('generic queue PATCH cannot mutate services or payment on terminal entries', async () => {
+  const mutations = [
+    { payment_method: 'card' },
+    { service_id: 'service-2' },
+    { service_ids: ['service-1', 'service-2'] },
+    { status: 'completed', payment_method: 'cash' },
+  ];
+  const mock = installDbMock({
+    queue_entries: mutations.map((_, index) => ({
+      data: {
+        id: `terminal-${index}`,
+        barber_id: 'barber-1',
+        branch_id: 'branch-1',
+        status: 'completed',
+        service_id: 'service-1',
+        service_ids: ['service-1'],
+      },
+      error: null,
+    })),
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    for (let index = 0; index < mutations.length; index += 1) {
+      const res = createResponse();
+      await barbers.updateQueue({
+        app: { get: () => null },
+        body: mutations[index],
+        headers: { authorization: `Bearer ${token}` },
+        params: { id: `terminal-${index}` },
+      }, res);
+      assert.equal(res.statusCode, 409);
+      assert.match(res.payload.error, /Cannot mutate terminal queue entry/);
+    }
+    assert.equal(mock.calls.some((call) => call.method === 'update'), false);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('generic queue PATCH treats a repeated terminal status as a read-only no-op', async () => {
+  const entry = {
+    id: 'terminal-idempotent',
+    barber_id: 'barber-1',
+    branch_id: 'branch-1',
+    status: 'completed',
+    service_id: 'service-1',
+    service_ids: ['service-1'],
+  };
+  const mock = installDbMock({
+    queue_entries: [{ data: entry, error: null }],
+    services: [{ data: [{ id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 30 }], error: null }],
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    const res = createResponse();
+    await barbers.updateQueue({
+      app: { get: () => null },
+      body: { status: 'completed' },
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: entry.id },
+    }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.idempotent, true);
+    assert.equal(res.payload.entry.status, 'completed');
+    assert.equal(res.payload.entry.total_duration, 30);
+    assert.equal(mock.calls.some((call) => call.method === 'update'), false);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('generic queue PATCH detects a concurrent status transition', async () => {
+  const mock = installDbMock({
+    queue_entries: [
+      { data: { id: 'queue-race', barber_id: 'barber-1', branch_id: 'branch-1', status: 'called' }, error: null },
+      { data: null, error: null },
+    ],
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    const res = createResponse();
+    await barbers.updateQueue({
+      app: { get: () => null },
+      body: { status: 'in_progress' },
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: 'queue-race' },
+    }, res);
+    assert.equal(res.statusCode, 409);
+    assert.match(res.payload.error, /changed concurrently/);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('dedicated complete endpoint rejects every conflicting terminal state', async () => {
+  const conflictingTerminalStatuses = ['cancelled', 'rejected', 'no_show', 'not_in_time'];
+  const mock = installDbMock({
+    queue_entries: conflictingTerminalStatuses.map((status) => ({
+      data: {
+        id: `complete-${status}`,
+        barber_id: 'barber-1',
+        branch_id: 'branch-1',
+        status,
+        price_override: 100,
+      },
+      error: null,
+    })),
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    for (const status of conflictingTerminalStatuses) {
+      const res = createResponse();
+      await barbers.completeQueueEntry({
+        app: { get: () => null },
+        body: { payment_method: 'cash' },
+        headers: { authorization: `Bearer ${token}` },
+        params: { id: `complete-${status}` },
+      }, res);
+      assert.equal(res.statusCode, 409);
+      assert.match(res.payload.error, new RegExp(`from status ${status}`));
+    }
+    assert.equal(mock.calls.some((call) => call.method === 'update'), false);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('dedicated complete endpoint accepts only in_progress as a non-idempotent source status', async () => {
+  const invalidSourceStatuses = ['waiting', 'called', 'swapped'];
+  const mock = installDbMock({
+    queue_entries: invalidSourceStatuses.map((status) => ({
+      data: {
+        id: `complete-source-${status}`,
+        barber_id: 'barber-1',
+        branch_id: 'branch-1',
+        status,
+        price_override: 100,
+      },
+      error: null,
+    })),
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    for (const status of invalidSourceStatuses) {
+      const res = createResponse();
+      await barbers.completeQueueEntry({
+        app: { get: () => null },
+        body: { payment_method: 'cash' },
+        headers: { authorization: `Bearer ${token}` },
+        params: { id: `complete-source-${status}` },
+      }, res);
+      assert.equal(res.statusCode, 409);
+      assert.match(res.payload.error, new RegExp(`from status ${status}`));
+    }
+    assert.equal(mock.calls.some((call) => call.method === 'update'), false);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('dedicated complete endpoint preserves completed retry without rewriting queue status', async () => {
+  const entry = {
+    id: 'complete-idempotent',
+    barber_id: 'barber-1',
+    branch_id: null,
+    client_id: null,
+    status: 'completed',
+    service_id: null,
+    service_ids: [],
+    payment_method: null,
+    price_override: null,
+  };
+  const mock = installDbMock({
+    queue_entries: [{ data: entry, error: null }],
+    payments: [{ data: [], error: null }],
+    marketplace_booking_persons: [{ data: [], error: null }],
+  });
+  const originalConnect = pool.connect;
+  pool.connect = async () => ({
+    query: async () => ({ rows: [] }),
+    release() {},
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    const res = createResponse();
+    await barbers.completeQueueEntry({
+      app: { get: () => null },
+      body: {},
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: entry.id },
+    }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.entry.status, 'completed');
+    assert.equal(mock.calls.some((call) => call.method === 'update' && call.table === 'queue_entries'), false);
+  } finally {
+    pool.connect = originalConnect;
+    mock.restore();
+  }
+});
+
+test('dedicated complete endpoint uses prior status as CAS and rejects a concurrent terminal transition', async () => {
+  const entry = {
+    id: 'complete-race',
+    barber_id: 'barber-1',
+    branch_id: 'branch-1',
+    client_id: null,
+    status: 'in_progress',
+    price_override: 100,
+  };
+  const mock = installDbMock({
+    queue_entries: [
+      { data: entry, error: null },
+      { data: null, error: null },
+    ],
+  });
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+
+  try {
+    const res = createResponse();
+    await barbers.completeQueueEntry({
+      app: { get: () => null },
+      body: { payment_method: 'cash' },
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: entry.id },
+    }, res);
+    assert.equal(res.statusCode, 409);
+    assert.match(res.payload.error, /changed concurrently/);
+    assert.equal(mock.calls.some((call) => (
+      call.method === 'eq'
+      && call.table === 'queue_entries'
+      && call.column === 'status'
+      && call.value === 'in_progress'
+    )), true);
+  } finally {
+    mock.restore();
+  }
+});
+
 test('PATCH /api/barbers/queue/:id/no-show is owner-scoped, guarded, idempotent, and realtime', async () => {
   const baseEntry = { id: 'queue-1', client_id: 'client-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'called', finished_at: null };
   const noShowEntry = { ...baseEntry, status: 'no_show', finished_at: new Date().toISOString() };

@@ -33,3 +33,19 @@
 - Blocking level: IMPORTANT.
 - Current assumption: API использует `MARKETPLACE`, persistence adapter явно переводит в legacy `site` до безопасной миграции.
 - Required owner decision: подтвердить canonical contract.
+
+## OQ-05 — Network boundary for global employee statistics
+
+- Question: будет ли одна PostgreSQL database всегда принадлежать одной сети, или требуется несколько сетей/tenants в одной БД?
+- Why it matters: текущие `users`, `branches` и quality snapshots не имеют `network_id`; `statistics.read.global` охватывает всю БД.
+- Blocking level: BLOCKING для multi-tenant rollout global scope.
+- Current assumption: одна БД = одна сеть; API явно сообщает `tenant_model=single-network-database`.
+- Required owner decision: подтвердить изоляцию deployment или согласовать schema migration с `network_id`.
+
+## OQ-06 — Employee-attributable terminal reasons rollout
+
+- Question: какие UI/actions должны собирать четыре утверждённых employee reason codes и кто может их выбирать?
+- Why it matters: текущие status routes не имеют атомарного server-derived actor/reason contract; inferred blame запрещён.
+- Blocking level: IMPORTANT для ненулевой employee-failure метрики, не блокирует conservative quality ranking.
+- Current assumption: generic legacy/new status changes остаются `unknown` и нейтральны до отдельной транзакционной миграции каждого action.
+- Required owner decision: подтвердить action-to-reason matrix и роли, имеющие право фиксировать ответственность.

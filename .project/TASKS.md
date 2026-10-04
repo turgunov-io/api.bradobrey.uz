@@ -29,6 +29,9 @@
 - [ ] Исправить loyalty rate/caps/Frequency/Happy Hours/rounding и review group/service semantics.
 - [ ] Добавить locking/versioning в cashback reconciliation.
 - [ ] Добавить DB readiness, structured logging/metrics и полный graceful shutdown.
+- [ ] Перевести каждый terminal status-changing route на общий DB transaction helper, который записывает server-derived actor/reason вместе со status; до этого employee-failure metric остаётся conservative/zero для generic transitions.
+- [ ] Передавать authenticated actor в immutable `queue_quality_plan_snapshots` для service edits after start; текущий DB trigger сохраняет reason/time, но actor остаётся unknown.
+- [ ] Добавить `network_id`/tenant boundary в users, branches, quality snapshots и permissions до использования global statistics в multi-network database.
 
 ## P2 — completeness and quality
 
@@ -41,6 +44,10 @@
 - [ ] Ввести versioned migration chain со всеми зависимыми SQL, полным preflight и backup/rollback для data-impacting шагов.
 - [ ] Удалить tracked `node_modules` из Git после чистой воспроизводимой установки.
 - [ ] Обновить README, `.env.example`, `MARKETPLACE_TZ_AUDIT.md` и threat model после исправлений.
+- [x] Реализовать backend `employee-quality-v1`, immutable completion evidence, protected aggregate/drill-down/review contracts и boundary/permission tests.
+- [ ] Применить employee-quality migration в staging, проверить query plans/p95 и выполнить API integration/security matrix against PostgreSQL.
+- [ ] Через административный permission workflow явно назначить необходимые `statistics.read.*`, `history.read.*` и `statistics.quality.review`; migration намеренно не делает role-based auto-grant.
+- [ ] До production создать отдельного owner/migrator и ограниченного runtime DB role; проверить `GRANT/REVOKE`, чтобы runtime role не мог отключать trigger-ы или напрямую писать immutable audit/event tables. Текущая схема не может безопасно угадать deployment-specific role names.
 
 ## Текущий статус
 

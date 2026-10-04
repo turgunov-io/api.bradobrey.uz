@@ -20,6 +20,7 @@ const LEGACY_LOGIN_ROLES = new Set([...ADMIN_ROLES, ...BARBER_WORKSPACE_ROLES]);
 const EMPLOYEE_ROLES = new Set(['admin', 'manager', 'barber', 'super-barber', 'super-manager']);
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const REASSIGNABLE_QUEUE_STATUSES = ['waiting', 'called', 'swapped'];
+const COMPLETABLE_QUEUE_STATUSES = new Set(['in_progress']);
 const PAYMENT_PART_METHODS = new Set(['payme', 'click', 'cash', 'card', 'certificate']);
 const QUEUE_PAYMENT_METHODS = new Set(['payme', 'click', 'cash', 'card', 'certificate', 'mixed']);
 const EMPLOYEE_ARCHIVE_FILTERS = new Set(['active', 'only', 'all']);
@@ -2122,6 +2123,27 @@ class Barbers {
         ];
 
         const updatePayload = {};
+        const terminalStatuses = new Set(['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time']);
+        const hasTerminalDataMutation = payment_method !== undefined
+            || service_id !== undefined
+            || service_ids !== undefined;
+
+        if (terminalStatuses.has(entry.status)) {
+            if (hasTerminalDataMutation || (status !== undefined && status !== entry.status)) {
+                return res.status(409).json({
+                    error: `Cannot mutate terminal queue entry in status ${entry.status}`,
+                });
+            }
+            if (status === entry.status) {
+                let enrichedEntry;
+                try {
+                    enrichedEntry = await enrichQueueEntryServices(entry);
+                } catch (error) {
+                    return res.status(error.statusCode || 500).json({ error: error.message });
+                }
+                return res.json({ entry: enrichedEntry, cashback: null, idempotent: true });
+            }
+        }
 
         if (status !== undefined) {
             if (!allowedStatuses.includes(status)) {
@@ -2183,11 +2205,15 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('status', entry.status)
             .select('id, status, swapped_flag, created_at, started_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, price_override, price_override_reason, client:clients ( id, name )')
             .maybeSingle();
 
         if (updateError) {
             return res.status(500).json({ error: updateError.message });
+        }
+        if (!updated) {
+            return res.status(409).json({ error: 'Queue entry status changed concurrently' });
         }
 
         let enrichedUpdated;
@@ -2783,6 +2809,11 @@ class Barbers {
         }
 
         const wasAlreadyCompleted = entry.status === 'completed';
+        if (!wasAlreadyCompleted && !COMPLETABLE_QUEUE_STATUSES.has(entry.status)) {
+            return res.status(409).json({
+                error: `Cannot complete queue entry from status ${entry.status}`,
+            });
+        }
 
         let orderAmount = 0;
         let finalPaymentMethod = null;
@@ -2832,11 +2863,15 @@ class Barbers {
                 .update(updatePayload)
                 .eq('id', id)
                 .eq('barber_id', barberId)
+                .eq('status', entry.status)
                 .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id, price_override, price_override_reason')
                 .maybeSingle();
 
             if (updateError) {
                 return res.status(500).json({ error: updateError.message });
+            }
+            if (!data) {
+                return res.status(409).json({ error: 'Queue entry status changed concurrently' });
             }
             updated = data;
         }

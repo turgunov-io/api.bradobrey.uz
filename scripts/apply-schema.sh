@@ -10,7 +10,7 @@
 #
 # Requires DATABASE_URL in the environment or a local .env with it.
 
-set -u
+set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
 
@@ -46,6 +46,7 @@ FILES=(
   queue_entry_timestamps_tz.sql
   queue_transfer_history.sql
   payments.sql
+  employee_quality_ranking.sql
   certificates.sql
   promo_codes.sql
   cashback.sql

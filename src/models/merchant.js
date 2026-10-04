@@ -747,6 +747,23 @@ class Merchant {
         return res.status(404).json({ error: 'Branch not found' });
       }
 
+      if (await tableExists('queue_quality_assessments')) {
+        const audited = await client.query(
+          `select 1
+             from queue_quality_assessments assessment
+            where assessment.branch_id = $1
+               or assessment.employee_id in (select id from barbers where branch_id = $1)
+            limit 1`,
+          [id]
+        );
+        if (audited.rows[0]) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'Branch contains immutable employee quality audit; deactivate it instead of deleting it',
+          });
+        }
+      }
+
       const hasQueue = await tableExists('queue_entries');
       const hasMedia = await tableExists('media_assets');
 
@@ -925,6 +942,20 @@ class Merchant {
       if (!owned.rows[0]) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Barber not found' });
+      }
+
+
+      if (await tableExists('queue_quality_assessments')) {
+        const audited = await client.query(
+          'select 1 from queue_quality_assessments where employee_id = $1 limit 1',
+          [id]
+        );
+        if (audited.rows[0]) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'Employee has immutable quality audit; deactivate or archive the employee instead',
+          });
+        }
       }
 
       const hasQueue = await tableExists('queue_entries');

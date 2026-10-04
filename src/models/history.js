@@ -182,6 +182,9 @@ const prepareHistoryEntries = async (entries) => {
         .select('id, queue_entry_id, from_status, to_status, barber_id, occurred_at')
         .in('queue_entry_id', ids)
         .order('occurred_at', { ascending: true });
+    const { data: qualityAssessments, error: qualityError } = await db.from('queue_quality_assessments')
+        .select('queue_entry_id, classifiable, unclassified_reason, suspicious, rule_code, rule_version, expected_duration_minutes, actual_duration_minutes, assessment_source, data_confidence, review_state')
+        .in('queue_entry_id', ids);
     // Older installations remain readable until the additive migration is applied.
     const byOrder = new Map();
     if (!error) for (const event of transfers || []) {
@@ -195,6 +198,12 @@ const prepareHistoryEntries = async (entries) => {
         group.push(event);
         statusesByOrder.set(event.queue_entry_id, group);
     }
+    const qualityByOrder = new Map();
+    // Older installations remain readable until the additive quality migration
+    // is applied. Missing quality data is represented as null, never as clean.
+    if (!qualityError) for (const assessment of qualityAssessments || []) {
+        qualityByOrder.set(assessment.queue_entry_id, assessment);
+    }
     const barberIds = Array.from(new Set([...(transfers || []).flatMap((event) => [event.from_barber_id, event.to_barber_id]), ...(statusEvents || []).map((event) => event.barber_id)].filter(Boolean)));
     const namesByBarber = new Map();
     if (barberIds.length) {
@@ -205,6 +214,7 @@ const prepareHistoryEntries = async (entries) => {
         ...entry,
         transfer_history: (byOrder.get(entry.id) || []).map((event) => ({ ...event, from_barber_name: namesByBarber.get(String(event.from_barber_id)) || null, to_barber_name: namesByBarber.get(String(event.to_barber_id)) || null })),
         status_history: (statusesByOrder.get(entry.id) || []).map((event) => ({ ...event, barber_name: namesByBarber.get(String(event.barber_id)) || null })),
+        quality_assessment: qualityByOrder.get(entry.id) || null,
     }));
 };
 
@@ -340,7 +350,11 @@ class History {
 
     async all(req, res) {
         const { filter } = req.query;
-        const branchId = req.query.branch_id || req.query.branchId || req.query.id;
+        const authorizedScope = req.historyAccess?.scope || null;
+        const branchId = authorizedScope?.type === 'branch'
+            ? authorizedScope.branchId
+            : req.query.branch_id || req.query.branchId || req.query.id;
+        const employeeId = authorizedScope?.type === 'self' ? authorizedScope.employeeId : null;
         const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
         const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
         const fetchAll = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
@@ -391,6 +405,9 @@ class History {
         if (branchId) {
             query = query.eq('branch_id', branchId);
         }
+        if (employeeId) {
+            query = query.eq('barber_id', employeeId);
+        }
 
         if (from) query = query.gte('created_at', from);
         if (to) query = query.lte('created_at', to);
@@ -440,7 +457,7 @@ class History {
     }
 
     async branch(req, res) {
-        const id = req.query.id;
+        const id = req.historyAccess?.scope?.branchId || req.query.id;
         if (!id) return res.status(400).json({ error: "Branch ID is required!" });
 
         const { data, error } = await db

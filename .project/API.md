@@ -1,5 +1,20 @@
 # API contracts
 
+## Employee quality statistics (`employee-quality-v1`)
+
+All routes require a valid JWT and permissions loaded from `user_permissions`; an empty permission set is authoritative.
+The migration does not infer or grant permissions from a role. Provision `statistics.read.*`, `history.read.*`, and `statistics.quality.review` explicitly through the administrative permission workflow.
+
+- `GET /api/statistics/employees` requires `start_date`, `end_date`, and `scope=global|branch|self`. Branch scope also requires `branch_id`. Dates use a half-open Asia/Tashkent interval and ranges over 366 days are rejected. The response is PII-free, ranks the full authorized cohort, binds `scope.employee_id`, and returns stable numeric-cursor pagination metadata. Revenue is non-ranking context only.
+- `GET /api/statistics/employees/:employeeId/orders` additionally requires the corresponding History permission and `category=suspicious|employee_failure|unclassified`. Branch checks use immutable assessment/status-event branch snapshots.
+- `PATCH /api/statistics/employees/:employeeId/orders/:orderId/review` requires `statistics.quality.review`, History permission, a branch/global scope, `review_state`, `review_comment`, `expected_version`, and an `idempotency_key`. The assessed employee cannot review their own evidence. Stale or conflicting writes return `409`.
+
+Ranking keys are, in order: active suspicious presence, suspicious count, exact suspicious rate, trusted completions, exact attributable-failure rate, and attributable-failure count. Revenue, `no_show`, `not_in_time`, and unattributed/generic cancellations never affect rank. `barbers.is_active` is a short break/availability flag and never affects eligibility. Only non-archived `barber`/`super-barber` completion snapshots with at least 10 classifiable completions, at least 90% coverage, and entirely authoritative live evidence receive an official place.
+
+Manager statistics and suspicious-order notifications use `queue_quality_assessments` when a completion snapshot exists. A missing per-order snapshot is explicitly reported/handled as `runtime_fallback_current_catalog` with `data_confidence=approximate`; it is never promoted to authoritative evidence.
+
+Global scope currently means the whole database. It is safe only while one PostgreSQL database represents one authorized network; see `OPEN_QUESTIONS.md` before multi-tenant rollout.
+
 ## Barber/Kiosk queue
 
 ### `GET /api/barbers/queue`
@@ -32,7 +47,7 @@ Client names, phones, identifiers, and transfer free-text reasons are intentiona
 
 ### `PATCH /api/barbers/queue/:id`
 
-Existing queue update contract. `service_id`/`service_ids` are validated before persistence. The response entry also contains `services`, `total_duration`, `total_price`, and `started_at`. Service/payment changes emit `queue:update` with type `queue_updated`.
+Existing queue update contract. `service_id`/`service_ids` are validated before persistence. The response entry also contains `services`, `total_duration`, `total_price`, and `started_at`. Service/payment changes emit `queue:update` with type `queue_updated`. Once an entry is in `completed`, `cancelled`, `rejected`, `no_show`, or `not_in_time`, this generic endpoint cannot change its status, services, or payment method. Repeating the same terminal status is a read-only idempotent response and performs no write. Status writes use the previously read status as a concurrency guard and return `409` after a race.
 
 ### `PATCH /api/barbers/queue/:id/edit-before-complete`
 
@@ -43,6 +58,10 @@ Accepted optional fields:
 - `amount` plus mandatory `reason`: set a manual final-price override.
 
 The assigned barber may edit any non-terminal entry, including `in_progress`. A service-only edit clears an older price override and recalculates service total/duration. The response is enriched like the generic queue update and emits `queue_updated`.
+
+### `PATCH /api/barbers/queue/:id/complete`
+
+Only an assigned entry currently in `in_progress` may transition to `completed`. A repeated request for an already `completed` entry preserves the existing idempotent recovery behavior without rewriting queue status. Other terminal states and earlier active states return `409`. The completion update compares the previously read `in_progress` status, so a concurrent cancellation, rejection, no-show, or not-in-time transition cannot be overwritten.
 
 ### `PATCH /api/barbers/queue/:id/no-show`
 

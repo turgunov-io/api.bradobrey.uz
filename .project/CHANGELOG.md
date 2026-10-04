@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-04
+
+- Добавлен server-side `employee-quality-v1`: strict `<50%` classifier, deterministic quality-first ranking, eligibility/data-confidence rules и revenue только как справочная метрика.
+- Добавлены защищённые aggregate, PII-free drill-down и versioned/idempotent review endpoints с self/branch/global enforcement и отдельным `statistics.quality.review`.
+- Добавлена транзакционная additive migration для immutable plan/completion snapshots, approximate historical backfill, review audit events и status attribution columns/indexes. Audit UUID не удаляются и не обнуляются при удалении operational entities.
+- Миграция не выдаёт permissions автоматически: существующий и новый authoritative empty `user_permissions` сохраняется без role-based escalation.
+- Legacy Statistics и History routes теперь требуют JWT + authoritative DB permissions; manager/employee legacy scope выводится из актуального DB user/branch, а не из JWT branch claim.
+- History и Notifications используют каноническую persisted/classifier semantics; fallback `created_at` для suspicious detection удалён.
+- Добавлено 11 employee-quality tests; полный backend suite проходит 57/57.
+- Финальный DB review исправлен: `is_active` (перерыв) исключён из eligibility; manager Statistics и Notifications читают persisted assessments, а catalog fallback помечают `approximate`.
+- Generic queue PATCH блокирует reopen/change terminal status и использует optimistic status guard; добавлены регресс-тесты всех terminal состояний и race.
+- Backfill принимает только реальный `finished_at`; assessment `id/created_at` и review projection защищены trigger-ами, удаления audited employees/branches блокируются, добавлены employee/global event indexes.
+- `apply-schema.sh` теперь fail-fast (`set -euo pipefail`). Полный backend suite проходит 60/60.
+- Исправлено отображение persisted suspicious assessment в Notifications: canonical `actual_duration_minutes`/`expected_duration_minutes` явно преобразуются в notification DTO, без `undefined`/`NaN` и без подмены текущим каталогом.
+- Generic queue PATCH теперь запрещает менять услуги и payment method terminal заказа; повтор того же terminal status остаётся read-only idempotent no-op. Полный suite проходит 64/64.
+- Dedicated complete endpoint теперь разрешает переход только `in_progress → completed`, сохраняет completed retry, блокирует все другие terminal/active source states и применяет CAS по исходному status. Полный suite проходит 68/68.
+
 ## 2026-10-03
 
 - Kiosk barber availability теперь явно возвращает busy/available state; незавершённый overdue `in_progress` не превращается в свободного барбера и продолжает блокировать ETA.

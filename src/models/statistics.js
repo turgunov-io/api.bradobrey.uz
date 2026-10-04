@@ -1,4 +1,5 @@
 const { db } = require('../config/postgres');
+const { classifyCompletedOrder } = require('../services/employeeQuality');
 
 const percent = (count, total) => (total ? Number(((count / total) * 100).toFixed(1)) : 0);
 
@@ -36,11 +37,9 @@ const roundMoney = (value) => Math.round(toAmount(value) * 100) / 100;
 
 class Statistics {
   async manager(req, res) {
-    const access = req.employeeAccess;
-    const role = String(access?.payload?.role || access?.user?.role || '').trim().toLowerCase();
-    const branchId = access?.payload?.branchId
-      || access?.payload?.branch_id
-      || access?.user?.branch_id
+    const access = req.statisticsAccess;
+    const role = String(access?.user?.role || '').trim().toLowerCase();
+    const branchId = access?.user?.branch_id
       || null;
 
     if (!MANAGER_ROLES.has(role)) {
@@ -92,7 +91,7 @@ class Statistics {
       const orderIds = orders.map((order) => order.id).filter(Boolean);
       const serviceIds = Array.from(new Set(orders.flatMap(serviceIdsForEntry)));
 
-      const [paymentsResult, servicesResult] = await Promise.all([
+      const [paymentsResult, servicesResult, assessmentsResult] = await Promise.all([
         orderIds.length
           ? db.query(
             `select queue_entry_id, amount, method, created_at
@@ -105,7 +104,22 @@ class Statistics {
         serviceIds.length
           ? db.query('select id, base_price, duration_minutes from services where id = any($1::uuid[])', [serviceIds])
           : { rows: [] },
+        orderIds.length
+          ? db.from('queue_quality_assessments')
+            .select('queue_entry_id, expected_duration_minutes, actual_duration_minutes, classifiable, unclassified_reason, suspicious, rule_version, assessment_source, data_confidence, review_state')
+            .in('queue_entry_id', orderIds)
+          : { data: [], error: null },
       ]);
+      const missingAssessmentSchema = assessmentsResult.error
+        && (['42P01', '42703'].includes(assessmentsResult.error.code)
+          || /(queue_quality_assessments|column).*does not exist/i.test(assessmentsResult.error.message || ''));
+      if (assessmentsResult.error && !missingAssessmentSchema) {
+        throw new Error(assessmentsResult.error.message);
+      }
+      const assessmentsByOrder = new Map((assessmentsResult.data || []).map((assessment) => [
+        String(assessment.queue_entry_id),
+        assessment,
+      ]));
 
       const servicePrices = new Map((servicesResult.rows || []).map((service) => [
         String(service.id),
@@ -186,15 +200,33 @@ class Statistics {
           barberMap.set(barberId, current);
         }
 
-        const startedAt = order.started_at ? new Date(order.started_at).getTime() : NaN;
-        const finishedAt = order.finished_at ? new Date(order.finished_at).getTime() : NaN;
-        const durationMinutes = Number.isFinite(startedAt) && Number.isFinite(finishedAt)
-          ? Math.max(0, Math.round((finishedAt - startedAt) / 60000))
-          : null;
         const expectedDurationMinutes = serviceIdsForEntry(order).reduce(
           (sum, serviceId) => sum + (serviceDurations.get(String(serviceId)) || 0),
           0
         );
+        const persistedAssessment = assessmentsByOrder.get(String(order.id));
+        const persistedQuality = persistedAssessment ? {
+          actual_minutes: persistedAssessment.actual_duration_minutes,
+          classifiable: persistedAssessment.classifiable,
+          expected_minutes: persistedAssessment.expected_duration_minutes,
+          suspicious: persistedAssessment.suspicious,
+          unclassified_reason: persistedAssessment.unclassified_reason,
+          rule_version: persistedAssessment.rule_version,
+          assessment_source: persistedAssessment.assessment_source,
+          data_confidence: persistedAssessment.data_confidence,
+          review_state: persistedAssessment.review_state,
+        } : null;
+        const quality = persistedQuality || {
+          ...classifyCompletedOrder({
+            employeeId: order.barber_id,
+            expectedMinutes: expectedDurationMinutes,
+            finishedAt: order.finished_at,
+            startedAt: order.started_at,
+          }),
+          assessment_source: 'runtime_fallback_current_catalog',
+          data_confidence: 'approximate',
+          review_state: null,
+        };
 
         return {
           id: order.id,
@@ -214,12 +246,15 @@ class Statistics {
           created_at: order.created_at || null,
           started_at: order.started_at || null,
           finished_at: order.finished_at || null,
-          duration_minutes: durationMinutes,
-          expected_duration_minutes: expectedDurationMinutes || null,
-          suspicious: isCompleted
-            && expectedDurationMinutes > 0
-            && durationMinutes !== null
-            && durationMinutes < expectedDurationMinutes * 0.5,
+          duration_minutes: quality.actual_minutes,
+          expected_duration_minutes: quality.expected_minutes || null,
+          suspicious: isCompleted && quality.suspicious,
+          quality_classifiable: isCompleted ? quality.classifiable : false,
+          quality_unclassified_reason: isCompleted ? quality.unclassified_reason : null,
+          quality_rule_version: isCompleted ? quality.rule_version : null,
+          quality_assessment_source: isCompleted ? quality.assessment_source : null,
+          quality_data_confidence: isCompleted ? quality.data_confidence : null,
+          quality_review_state: isCompleted ? quality.review_state : null,
         };
       });
 
@@ -261,7 +296,10 @@ class Statistics {
     if (!barber) {
       return res.status(400).json({ error: 'barber id is required in path param :barber' });
     }
-    return this.handleScoped(req, res, { barberId: barber });
+    const branchId = req.statisticsAccess?.scope?.type === 'branch'
+      ? req.statisticsAccess.scope.branchId
+      : null;
+    return this.handleScoped(req, res, { barberId: barber, branchId });
   }
 
   async handleScoped(req, res, scope = {}) {

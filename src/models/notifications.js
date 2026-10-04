@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const webpush = require('web-push');
 const { db } = require('../config/postgres');
+const { classifyCompletedOrder } = require('../services/employeeQuality');
 const EMPLOYEE_ROLES = ['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'super-barber', 'barber'];
 
 function configureWebPush() {
@@ -52,14 +53,49 @@ function authenticate(req, res) {
     catch (_error) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
 }
 
+function normalizePersistedQualityAssessment(assessment) {
+    if (!assessment) return null;
+    return {
+        ...assessment,
+        actual_minutes: assessment.actual_duration_minutes,
+        expected_minutes: assessment.expected_duration_minutes,
+    };
+}
+
 async function createSuspiciousOrderNotifications(entry) {
     if (!entry?.id || !entry?.branch_id) return;
-    const ids = Array.from(new Set([...(Array.isArray(entry.service_ids) ? entry.service_ids : []), ...(entry.service_id ? [entry.service_id] : [])].filter(Boolean)));
+    const assessmentResult = await db.from('queue_quality_assessments')
+        .select('queue_entry_id, service_ids, expected_duration_minutes, actual_duration_minutes, classifiable, suspicious, unclassified_reason, rule_version, assessment_source, data_confidence, review_state')
+        .eq('queue_entry_id', entry.id)
+        .maybeSingle();
+    const missingAssessmentSchema = assessmentResult.error
+        && (['42P01', '42703'].includes(assessmentResult.error.code)
+            || /(queue_quality_assessments|column).*does not exist/i.test(assessmentResult.error.message || ''));
+    if (assessmentResult.error && !missingAssessmentSchema) throw new Error(assessmentResult.error.message);
+    const assessment = normalizePersistedQualityAssessment(assessmentResult.data);
+    const ids = Array.from(new Set((assessment?.service_ids?.length
+        ? assessment.service_ids
+        : [...(Array.isArray(entry.service_ids) ? entry.service_ids : []), ...(entry.service_id ? [entry.service_id] : [])]
+    ).filter(Boolean)));
     const { data: services, error: serviceError } = ids.length ? await db.from('services').select('id, name, duration_minutes').in('id', ids) : { data: [], error: null };
     if (serviceError) throw new Error(serviceError.message);
     const expected = ids.reduce((sum, id) => sum + (Number((services || []).find(s => String(s.id) === String(id))?.duration_minutes) || 0), 0);
-    const actual = (new Date(entry.finished_at).getTime() - new Date(entry.started_at || entry.created_at).getTime()) / 60000;
-    if (entry.status !== 'completed' || !expected || !Number.isFinite(actual) || actual < 0 || actual >= expected * 0.5) return;
+    const quality = assessment || {
+        ...classifyCompletedOrder({
+            employeeId: entry.barber_id,
+            expectedMinutes: expected,
+            finishedAt: entry.finished_at,
+            startedAt: entry.started_at,
+        }),
+        assessment_source: 'runtime_fallback_current_catalog',
+        data_confidence: 'approximate',
+        review_state: null,
+    };
+    const activeSuspicion = quality.suspicious
+        && (quality.review_state === null || ['unreviewed', 'confirmed'].includes(quality.review_state));
+    if (entry.status !== 'completed' || !activeSuspicion) return;
+    const actual = quality.actual_minutes;
+    const assessedExpected = Number(quality.expected_duration_minutes ?? quality.expected_minutes ?? expected);
     const [{ data: barber }, { data: branch }, { data: recipients, error: recipientError }] = await Promise.all([
         db.from('barbers').select('name').eq('id', entry.barber_id).maybeSingle(),
         db.from('branches').select('name').eq('id', entry.branch_id).maybeSingle(),
@@ -74,10 +110,20 @@ async function createSuspiciousOrderNotifications(entry) {
         .filter(Boolean)
         .join(', ') || 'Услуга не указана';
     const title = `${clientName} — информация по заказу`;
-    const body = `Филиал: ${branchName} • Мастер: ${barberName} • Услуга: ${serviceNames} • Время: ${Math.round(actual)} мин. из ${expected} мин.`;
+    const body = `Филиал: ${branchName} • Мастер: ${barberName} • Услуга: ${serviceNames} • Время: ${Math.round(actual)} мин. из ${assessedExpected} мин.`;
     const rows = (recipients || []).filter(user => ['admin_network', 'admin', 'super-manager', 'super-barber'].includes(user.role) || String(user.branch_id) === String(entry.branch_id)).map(user => ({
         recipient_user_id: user.id, type: 'suspicious_order', title, body, order_id: entry.id, branch_id: entry.branch_id,
-        data: { branch_name: branchName, barber_name: barberName, service_name: serviceNames, client_name: clientName, actual_minutes: actual, expected_minutes: expected },
+        data: {
+            branch_name: branchName,
+            barber_name: barberName,
+            service_name: serviceNames,
+            client_name: clientName,
+            actual_minutes: actual,
+            expected_minutes: assessedExpected,
+            quality_assessment_source: quality.assessment_source,
+            quality_data_confidence: quality.data_confidence,
+            quality_rule_version: quality.rule_version,
+        },
     }));
     if (rows.length) {
         const inserted = [];
@@ -206,4 +252,9 @@ class Notifications {
     async read(req, res) { const payload = authenticate(req, res); if (!payload) return; const { data, error } = await db.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', req.params.id).eq('recipient_user_id', payload.sub || payload.id).select('*').maybeSingle(); if (error) return res.status(500).json({ error: error.message }); if (!data) return res.status(404).json({ error: 'Notification not found' }); return res.json({ item: data }); }
     async readAll(req, res) { const payload = authenticate(req, res); if (!payload) return; const { error } = await db.from('notifications').update({ read_at: new Date().toISOString() }).eq('recipient_user_id', payload.sub || payload.id).is('read_at', null); if (error) return res.status(500).json({ error: error.message }); return res.json({ success: true }); }
 }
-module.exports = { notifications: new Notifications(), createSuspiciousOrderNotifications, ensureNotificationsTable };
+module.exports = {
+    notifications: new Notifications(),
+    createSuspiciousOrderNotifications,
+    ensureNotificationsTable,
+    _private: { normalizePersistedQualityAssessment },
+};
