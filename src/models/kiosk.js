@@ -2,6 +2,7 @@ const { db } = require("../config/postgres");
 const { toAbsolutePublicUrl } = require("../config/uploads");
 const jwt = require("jsonwebtoken");
 const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
+const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
 
 const {
     applyPromoDiscount,
@@ -350,7 +351,7 @@ class Kiosk {
 
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
-            .select("id, barber_id, client_id, status, created_at, started_at, service_ids") // 🔥 ADDED service_ids
+            .select("id, barber_id, client_id, status, created_at, started_at, service_id, service_ids")
             .eq("branch_id", branch_id)
             .in('status', ACTIVE_QUEUE_STATUSES);
 
@@ -370,7 +371,7 @@ class Kiosk {
         const allServiceIds = Array.from(
             new Set(
                 (queues || [])
-                    .flatMap(q => q.service_ids || [])
+                    .flatMap(serviceIdsForQueueEntry)
                     .filter(Boolean)
             )
         );
@@ -415,24 +416,25 @@ class Kiosk {
 
         const queuesByBarber = {};
         const waitingTimeByBarber = {};
+        const queueStateByBarber = {};
+        const now = Date.now();
 
         for (const entry of queues || []) {
             const key = entry.barber_id;
             if (!key) continue;
             if (!allowedBarberIds.has(key)) continue;
 
-            if (entry.status === 'completed' || entry.status === 'no_show' || entry.status === 'not_in_time') {
-                continue;
-            }
-
             if (!queuesByBarber[key]) queuesByBarber[key] = [];
             if (!waitingTimeByBarber[key]) waitingTimeByBarber[key] = 0;
 
-            const serviceDuration = (entry.service_ids || []).reduce((sum, serviceId) => {
-                return sum + (servicesById[serviceId] || 0);
-            }, 0);
+            const timing = queueEntryTiming(entry, servicesById, now);
+            const serviceDuration = timing.plannedMinutes;
 
-            waitingTimeByBarber[key] += serviceDuration;
+            waitingTimeByBarber[key] += timing.blockingMinutes;
+            const state = queueStateByBarber[key] || { has_in_progress: false, current_service_overdue: false };
+            state.has_in_progress ||= entry.status === 'in_progress';
+            state.current_service_overdue ||= timing.overdue;
+            queueStateByBarber[key] = state;
 
             queuesByBarber[key].push({
                 id: entry.id,
@@ -440,23 +442,42 @@ class Kiosk {
                 status: entry.status,
                 created_at: entry.created_at,
                 started_at: entry.started_at || null,
-                estimated_time: serviceDuration
+                estimated_time: serviceDuration,
+                estimated_remaining_time: timing.remainingMinutes,
+                is_overdue: timing.overdue
             });
         }
 
         const overallEstimatedWaitingTime = Object.values(waitingTimeByBarber)
             .reduce((sum, val) => sum + val, 0);
 
-        const response = visibleBarbers.map((barber) => ({
-            id: barber.id,
-            name: barber.name,
-            photo: barber.photo_url || null,
-            branch_id: barber.branch_id,
-            is_active: barber.is_active ?? null,
-            is_on_shift: barber.is_on_shift ?? null,
-            clients: queuesByBarber[barber.id] || [],
-            estimated_waiting_time: waitingTimeByBarber[barber.id] || 0
-        }));
+        const response = visibleBarbers.map((barber) => {
+            const clients = queuesByBarber[barber.id] || [];
+            const state = queueStateByBarber[barber.id] || { has_in_progress: false, current_service_overdue: false };
+            const availabilityStatus = barber.is_active === false
+                ? 'inactive'
+                : barber.is_on_shift !== true
+                    ? 'off_shift'
+                    : clients.length
+                        ? 'busy'
+                        : 'available';
+
+            return {
+                id: barber.id,
+                name: barber.name,
+                photo: barber.photo_url || null,
+                branch_id: barber.branch_id,
+                is_active: barber.is_active ?? null,
+                is_on_shift: barber.is_on_shift ?? null,
+                is_available: availabilityStatus === 'available',
+                availability_status: availabilityStatus,
+                active_queue_count: clients.length,
+                has_in_progress: state.has_in_progress,
+                current_service_overdue: state.current_service_overdue,
+                clients,
+                estimated_waiting_time: waitingTimeByBarber[barber.id] || 0
+            };
+        });
 
         return res.status(200).json({
             barbers: response,
@@ -1470,8 +1491,12 @@ class Kiosk {
         }
 
         let estimatedWaitingTime = 0;
+        let entryTiming = null;
+        const now = Date.now();
         for (const item of activeEntries || []) {
-            estimatedWaitingTime += durationByEntryId.get(item.id) || 0;
+            const timing = queueEntryTiming(item, null, now, durationByEntryId.get(item.id) || 0);
+            estimatedWaitingTime += timing.blockingMinutes;
+            if (item.id === entry.id) entryTiming = timing;
             if (item.id === entry.id) break;
         }
 
@@ -1479,6 +1504,9 @@ class Kiosk {
             entry,
             estimated_time: durationByEntryId.get(entry.id) || 0,
             estimated_waiting_time: estimatedWaitingTime,
+            estimated_remaining_time: entryTiming?.remainingMinutes ?? 0,
+            is_overdue: entryTiming?.overdue ?? false,
+            is_active: ACTIVE_QUEUE_STATUSES.includes(entry.status),
         });
     }
 

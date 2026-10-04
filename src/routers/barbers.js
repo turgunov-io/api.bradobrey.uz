@@ -24,6 +24,7 @@ router.patch('/queue/transfers/:transferId/accept', (req, res) => queueTransfers
 router.patch('/queue/transfers/:transferId/reject', (req, res) => queueTransfers.reject(req, res));
 router.get("/queue/:id/reassign-options", (req, res) => barbers.queueReassignOptions(req, res));
 router.patch("/queue/:id/reassign", (req, res) => barbers.reassignQueue(req, res));
+router.get("/queue/:id/barber-history", (req, res) => queueTransfers.history(req, res));
 router.get("/queue/:id", (req, res) => barbers.getQueueById(req, res));
 router.patch("/queue/:id", (req, res) => barbers.updateQueue(req, res));
 

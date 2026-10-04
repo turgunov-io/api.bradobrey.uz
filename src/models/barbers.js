@@ -560,6 +560,7 @@ const markNoShow = async (entryId) => {
         .from('queue_entries')
         .update({ status: 'no_show', finished_at: new Date().toISOString() })
         .eq('id', entryId)
+        .eq('status', 'called')
         .select('id, branch_id, barber_id, status')
         .maybeSingle();
     if (error) throw new Error(error.message);
@@ -573,6 +574,109 @@ const serviceIdsForEntry = (entry) => {
 
     if (serviceIds.length) return serviceIds;
     return entry?.service_id ? [entry.service_id] : [];
+};
+
+const normalizeServiceIds = (values) => Array.from(new Set(
+    (Array.isArray(values) ? values : [])
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+));
+
+const loadQueueServices = async (serviceIds, { strict = true } = {}) => {
+    const ids = normalizeServiceIds(serviceIds);
+    if (!ids.length) return [];
+
+    const { data, error } = await db
+        .from('services')
+        .select('id, name, base_price, duration_minutes, is_active')
+        .in('id', ids);
+
+    if (error) throw new Error(error.message);
+
+    const byId = new Map((data || []).map((service) => [String(service.id), service]));
+    if (strict && byId.size !== ids.length) {
+        const error = new Error('One or more service_ids are invalid');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    return ids.map((id) => byId.get(id)).filter(Boolean);
+};
+
+const enrichQueueEntryServices = async (entry) => {
+    if (!entry) return entry;
+    const services = await loadQueueServices(serviceIdsForEntry(entry), { strict: false });
+    const servicesTotal = roundMoneyAmount(services.reduce((sum, service) => (
+        sum + roundMoneyAmount(service?.base_price)
+    ), 0));
+    const totalDuration = services.reduce((sum, service) => (
+        sum + Math.max(0, Number(service?.duration_minutes) || 0)
+    ), 0);
+
+    return {
+        ...entry,
+        services,
+        total_duration: totalDuration,
+        total_price: hasExplicitAmount(entry.price_override)
+            ? roundMoneyAmount(entry.price_override)
+            : servicesTotal,
+    };
+};
+
+const enrichQueueEntriesWithTransferHistory = async (entries) => {
+    const items = Array.isArray(entries) ? entries : [];
+    const entryIds = items.map((entry) => entry?.id).filter(Boolean);
+    if (!entryIds.length) return items;
+
+    const { data: transfers, error: transferError } = await db
+        .from('queue_transfer_events')
+        .select('id, queue_entry_id, from_barber_id, to_barber_id, status, original_status, requested_at, responded_at, expires_at')
+        .in('queue_entry_id', entryIds)
+        .order('requested_at', { ascending: true });
+
+    if (transferError) {
+        if (isMissingRelationError(transferError, 'queue_transfer_events')) {
+            return items.map((entry) => ({ ...entry, transfer_history: [] }));
+        }
+        throw new Error(transferError.message);
+    }
+
+    const barberIds = Array.from(new Set((transfers || []).flatMap((transfer) => (
+        [transfer.from_barber_id, transfer.to_barber_id]
+    )).filter(Boolean)));
+    const namesByBarberId = new Map();
+
+    if (barberIds.length) {
+        const { data: barbers, error: barbersError } = await db
+            .from('barbers')
+            .select('id, name')
+            .in('id', barberIds);
+        if (barbersError) throw new Error(barbersError.message);
+        for (const barber of barbers || []) {
+            namesByBarberId.set(String(barber.id), barber.name || null);
+        }
+    }
+
+    const transfersByEntryId = new Map();
+    for (const transfer of transfers || []) {
+        const entryId = String(transfer.queue_entry_id);
+        const history = transfersByEntryId.get(entryId) || [];
+        history.push({
+            ...transfer,
+            from_barber_name: transfer.from_barber_id
+                ? namesByBarberId.get(String(transfer.from_barber_id)) || null
+                : null,
+            to_barber_name: transfer.to_barber_id
+                ? namesByBarberId.get(String(transfer.to_barber_id)) || null
+                : null,
+        });
+        transfersByEntryId.set(entryId, history);
+    }
+
+    return items.map((entry) => ({
+        ...entry,
+        transfer_history: transfersByEntryId.get(String(entry.id)) || [],
+    }));
 };
 
 const roundMoneyAmount = (value) => {
@@ -971,16 +1075,20 @@ const scheduleCallFollowUp = (entry, io) => {
             if (error || !fresh || fresh.status !== 'called') return;
 
             const isSecondCall = fresh.swapped_flag === true;
+            let changed = null;
             if (isSecondCall) {
-                await markNoShow(fresh.id);
+                changed = await markNoShow(fresh.id);
             } else {
-                await swapCalledEntry(fresh);
+                changed = await swapCalledEntry(fresh);
             }
 
-            if (io) {
+            if (io && changed) {
                 io.to(`branch:${fresh.branch_id}`).emit('queue:update', {
-                    type: 'queue_changed',
+                    type: isSecondCall ? 'queue_no_show' : 'queue_changed',
+                    entryId: fresh.id,
                     barberId: fresh.barber_id,
+                    branchId: fresh.branch_id,
+                    status: changed.status,
                 });
             }
         } catch (e) {
@@ -1867,7 +1975,13 @@ class Barbers {
             return true;
         });
 
-        const enriched = await enrichQueueEntriesWithBenefits(filtered);
+        const withBenefits = await enrichQueueEntriesWithBenefits(filtered);
+        let enriched;
+        try {
+            enriched = await enrichQueueEntriesWithTransferHistory(withBenefits);
+        } catch (historyError) {
+            return res.status(500).json({ error: historyError.message });
+        }
 
         return res.json({
             items: enriched,
@@ -1983,7 +2097,7 @@ class Barbers {
 
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
-            .select('id, barber_id, status, swapped_flag, branch_id, created_at')
+            .select('id, barber_id, status, swapped_flag, branch_id, created_at, started_at, service_id, service_ids, price_override, price_override_reason')
             .eq('id', id)
             .eq('barber_id', barberId)
             .maybeSingle();
@@ -2023,15 +2137,41 @@ class Barbers {
             updatePayload.payment_method = payment_method;
         }
 
-        if (service_id !== undefined) {
-            updatePayload.service_id = service_id || null;
-        }
-
+        let selectedServices = null;
         if (Array.isArray(service_ids)) {
-            updatePayload.service_ids = service_ids;
-            if (!updatePayload.service_id && service_ids.length) {
-                updatePayload.service_id = service_ids[0];
+            const normalizedServiceIds = normalizeServiceIds(service_ids);
+            if (!normalizedServiceIds.length) {
+                return res.status(400).json({ error: 'service_ids must contain at least one service' });
             }
+            const requestedPrimaryServiceId = service_id === undefined
+                ? null
+                : String(service_id || '').trim();
+            if (requestedPrimaryServiceId && !normalizedServiceIds.includes(requestedPrimaryServiceId)) {
+                return res.status(400).json({ error: 'service_id must be included in service_ids' });
+            }
+            try {
+                selectedServices = await loadQueueServices(normalizedServiceIds);
+            } catch (error) {
+                return res.status(error.statusCode || 500).json({ error: error.message });
+            }
+            updatePayload.service_ids = normalizedServiceIds;
+            updatePayload.service_id = requestedPrimaryServiceId || normalizedServiceIds[0];
+            updatePayload.price_override = null;
+            updatePayload.price_override_reason = null;
+        } else if (service_id !== undefined) {
+            const normalizedServiceIds = normalizeServiceIds([service_id]);
+            if (!normalizedServiceIds.length) {
+                return res.status(400).json({ error: 'service_id is required' });
+            }
+            try {
+                selectedServices = await loadQueueServices(normalizedServiceIds);
+            } catch (error) {
+                return res.status(error.statusCode || 500).json({ error: error.message });
+            }
+            updatePayload.service_id = normalizedServiceIds[0];
+            updatePayload.service_ids = normalizedServiceIds;
+            updatePayload.price_override = null;
+            updatePayload.price_override_reason = null;
         }
 
         if (Object.keys(updatePayload).length === 0) {
@@ -2050,6 +2190,13 @@ class Barbers {
             return res.status(500).json({ error: updateError.message });
         }
 
+        let enrichedUpdated;
+        try {
+            enrichedUpdated = await enrichQueueEntryServices(updated);
+        } catch (error) {
+            return res.status(error.statusCode || 500).json({ error: error.message });
+        }
+
         const io = req.app.get('io');
         if (status !== undefined) {
             if (status === 'called') {
@@ -2058,6 +2205,18 @@ class Barbers {
             } else {
                 clearCallTimer(id);
             }
+        }
+
+        if (io && updated?.branch_id && (selectedServices || service_id !== undefined || payment_method !== undefined)) {
+            io.to(`branch:${updated.branch_id}`).emit('queue:update', {
+                type: 'queue_updated',
+                entryId: updated.id,
+                barberId: updated.barber_id,
+                branchId: updated.branch_id,
+                service_ids: enrichedUpdated.service_ids,
+                total_duration: enrichedUpdated.total_duration,
+                total_price: enrichedUpdated.total_price,
+            });
         }
 
         let cashback = null;
@@ -2082,7 +2241,7 @@ class Barbers {
             }
         }
 
-        return res.json({ entry: updated, cashback });
+        return res.json({ entry: enrichedUpdated, cashback });
     }
 
     async queueReassignOptions(req, res) {
@@ -2417,7 +2576,7 @@ class Barbers {
 
     async editBeforeComplete(req, res) {
         const { id } = req.params || {};
-        const { amount, reason } = req.body || {};
+        const { add_service_ids, amount, reason, service_ids } = req.body || {};
 
         const authHeader = req.headers.authorization || "";
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -2441,37 +2600,46 @@ class Barbers {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const numericAmount = Number(amount);
-        if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+        const amountProvided = hasExplicitAmount(amount);
+        const replaceServices = Array.isArray(service_ids);
+        const addServices = Array.isArray(add_service_ids);
+        if (!amountProvided && !replaceServices && !addServices) {
+            return res.status(400).json({ error: 'Provide amount, service_ids, or add_service_ids' });
+        }
+
+        const numericAmount = amountProvided ? Number(amount) : null;
+        if (amountProvided && (!Number.isFinite(numericAmount) || numericAmount <= 0)) {
             return res.status(400).json({ error: 'amount must be a positive number' });
         }
 
-        if (!reason || !reason.trim()) {
+        if (amountProvided && (!reason || !reason.trim())) {
             return res.status(400).json({ error: 'reason is required when editing the final price' });
         }
 
-        // Fetch the cheapest service price to enforce a floor
-        const { data: cheapestService, error: serviceError } = await db
-            .from('services')
-            .select('base_price')
-            .order('base_price', { ascending: true })
-            .limit(1)
-            .maybeSingle();
+        if (amountProvided) {
+            // Preserve the existing global price floor for manual overrides.
+            const { data: cheapestService, error: serviceError } = await db
+                .from('services')
+                .select('base_price')
+                .order('base_price', { ascending: true })
+                .limit(1)
+                .maybeSingle();
 
-        if (serviceError) {
-            return res.status(500).json({ error: serviceError.message });
-        }
+            if (serviceError) {
+                return res.status(500).json({ error: serviceError.message });
+            }
 
-        const minServicePrice = cheapestService ? Number(cheapestService.base_price) : null;
-        if (minServicePrice && Number.isFinite(minServicePrice) && numericAmount < minServicePrice) {
-            return res.status(400).json({ error: `amount cannot be lower than minimum service price ${minServicePrice}` });
+            const minServicePrice = cheapestService ? Number(cheapestService.base_price) : null;
+            if (minServicePrice && Number.isFinite(minServicePrice) && numericAmount < minServicePrice) {
+                return res.status(400).json({ error: `amount cannot be lower than minimum service price ${minServicePrice}` });
+            }
         }
 
         const barberId = payload.sub || payload.id;
 
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
-            .select('id, barber_id, status')
+            .select('id, barber_id, status, branch_id, started_at, service_id, service_ids, price_override, price_override_reason')
             .eq('id', id)
             .eq('barber_id', barberId)
             .maybeSingle();
@@ -2488,10 +2656,34 @@ class Barbers {
             return res.status(409).json({ error: `Cannot edit price in status ${entry.status}` });
         }
 
+        const currentServiceIds = normalizeServiceIds(serviceIdsForEntry(entry));
+        const nextServiceIds = replaceServices
+            ? normalizeServiceIds(service_ids)
+            : normalizeServiceIds([...currentServiceIds, ...(addServices ? add_service_ids : [])]);
+        const servicesChanged = replaceServices || addServices;
+
+        if (servicesChanged) {
+            if (!nextServiceIds.length) {
+                return res.status(400).json({ error: 'At least one service is required' });
+            }
+            try {
+                await loadQueueServices(nextServiceIds);
+            } catch (error) {
+                return res.status(error.statusCode || 500).json({ error: error.message });
+            }
+        }
+
         const updatePayload = {
-            price_override: numericAmount,
-            price_override_reason: reason.trim(),
             updated_at: new Date().toISOString(),
+            ...(amountProvided ? {
+                price_override: numericAmount,
+                price_override_reason: reason.trim(),
+            } : {}),
+            ...(servicesChanged ? {
+                service_id: nextServiceIds[0],
+                service_ids: nextServiceIds,
+                ...(!amountProvided ? { price_override: null, price_override_reason: null } : {}),
+            } : {}),
         };
 
         const { data: updated, error: updateError } = await db
@@ -2499,7 +2691,8 @@ class Barbers {
             .update(updatePayload)
             .eq('id', id)
             .eq('barber_id', barberId)
-            .select('id, status, branch_id, price_override, price_override_reason')
+            .eq('status', entry.status)
+            .select('id, status, branch_id, barber_id, started_at, service_id, service_ids, price_override, price_override_reason')
             .maybeSingle();
 
         if (updateError) {
@@ -2509,9 +2702,33 @@ class Barbers {
             });
         }
 
+        if (!updated) {
+            return res.status(409).json({ error: 'Queue entry changed while it was being edited' });
+        }
+
+        let enriched;
+        try {
+            enriched = await enrichQueueEntryServices(updated);
+        } catch (error) {
+            return res.status(error.statusCode || 500).json({ error: error.message });
+        }
+
+        const io = req.app.get('io');
+        if (io && enriched.branch_id) {
+            io.to(`branch:${enriched.branch_id}`).emit('queue:update', {
+                type: 'queue_updated',
+                entryId: enriched.id,
+                barberId: enriched.barber_id,
+                branchId: enriched.branch_id,
+                service_ids: enriched.service_ids,
+                total_duration: enriched.total_duration,
+                total_price: enriched.total_price,
+            });
+        }
+
         return res.json({
-            entry: updated,
-            message: 'Price updated before completion',
+            entry: enriched,
+            message: servicesChanged ? 'Queue services updated before completion' : 'Price updated before completion',
         });
     }
 
@@ -2796,11 +3013,44 @@ class Barbers {
         const { id } = req.params || {};
         const { no_show = true } = req.body || {};
 
+        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can mark no-show');
+        if (!auth) return;
+        if (!id) return res.status(400).json({ error: 'Queue entry id is required' });
+
+        const { data: entry, error: entryError } = await db
+            .from('queue_entries')
+            .select('id, client_id, barber_id, branch_id, status, finished_at')
+            .eq('id', id)
+            .eq('barber_id', auth.barberId)
+            .maybeSingle();
+
+        if (entryError) return res.status(500).json({ error: entryError.message });
+        if (!entry) return res.status(404).json({ error: 'Queue entry not found' });
+
+        const targetStatus = no_show ? 'no_show' : 'waiting';
+        if (entry.status === targetStatus) {
+            return res.json({ queue_entry: entry, idempotent: true });
+        }
+
+        const allowedSourceStatuses = no_show
+            ? ['waiting', 'called', 'swapped']
+            : ['no_show'];
+        if (!allowedSourceStatuses.includes(entry.status)) {
+            return res.status(409).json({
+                error: `Queue entry cannot transition from ${entry.status} to ${targetStatus}`,
+                queue_entry: entry,
+            });
+        }
+
+        clearCallTimer(id);
+
         const { data: updated, error: updateError } = await db
             .from('queue_entries')
-            .update({ status: no_show ? 'no_show' : 'waiting', finished_at: no_show ? new Date().toISOString() : null })
+            .update({ status: targetStatus, finished_at: no_show ? new Date().toISOString() : null })
             .eq('id', id)
-            .select('id, client_id, barber_id, status, finished_at')
+            .eq('barber_id', auth.barberId)
+            .eq('status', entry.status)
+            .select('id, client_id, barber_id, branch_id, status, finished_at')
             .maybeSingle();
 
         if (updateError) {
@@ -2808,16 +3058,48 @@ class Barbers {
         }
 
         if (!updated) {
-            return res.status(404).json({ error: 'Queue entry not found' });
+            return res.status(409).json({ error: 'Queue entry status changed concurrently' });
         }
 
-        return res.json({ queue_entry: updated });
+        const io = req.app.get('io');
+        if (io && updated.branch_id) {
+            io.to(`branch:${updated.branch_id}`).emit('queue:update', {
+                type: no_show ? 'queue_no_show' : 'queue_no_show_reverted',
+                entryId: updated.id,
+                barberId: updated.barber_id,
+                branchId: updated.branch_id,
+                status: updated.status,
+            });
+        }
+
+        return res.json({ queue_entry: updated, idempotent: false });
     }
 
     async markNotInTime(req, res) {
         const { id } = req.params || {};
 
+        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can mark not-in-time');
+        if (!auth) return;
         if (!id) return res.status(400).json({ error: 'Queue entry id is required' });
+
+        const { data: entry, error: entryError } = await db
+            .from('queue_entries')
+            .select('id, client_id, barber_id, branch_id, status, finished_at')
+            .eq('id', id)
+            .eq('barber_id', auth.barberId)
+            .maybeSingle();
+
+        if (entryError) return res.status(500).json({ error: entryError.message });
+        if (!entry) return res.status(404).json({ error: 'Queue entry not found' });
+        if (entry.status === 'not_in_time') {
+            return res.json({ queue_entry: entry, idempotent: true });
+        }
+        if (!['called', 'in_progress'].includes(entry.status)) {
+            return res.status(409).json({
+                error: `Queue entry cannot transition from ${entry.status} to not_in_time`,
+                queue_entry: entry,
+            });
+        }
 
         clearCallTimer(id);
 
@@ -2825,7 +3107,9 @@ class Barbers {
             .from('queue_entries')
             .update({ status: 'not_in_time', finished_at: new Date().toISOString() })
             .eq('id', id)
-            .select('id, client_id, barber_id, status, finished_at')
+            .eq('barber_id', auth.barberId)
+            .eq('status', entry.status)
+            .select('id, client_id, barber_id, branch_id, status, finished_at')
             .maybeSingle();
 
         if (updateError) {
@@ -2833,10 +3117,21 @@ class Barbers {
         }
 
         if (!updated) {
-            return res.status(404).json({ error: 'Queue entry not found' });
+            return res.status(409).json({ error: 'Queue entry status changed concurrently' });
         }
 
-        return res.json({ queue_entry: updated });
+        const io = req.app.get('io');
+        if (io && updated.branch_id) {
+            io.to(`branch:${updated.branch_id}`).emit('queue:update', {
+                type: 'queue_not_in_time',
+                entryId: updated.id,
+                barberId: updated.barber_id,
+                branchId: updated.branch_id,
+                status: updated.status,
+            });
+        }
+
+        return res.json({ queue_entry: updated, idempotent: false });
     }
 }
 

@@ -33,6 +33,7 @@
 ## P2 — completeness and quality
 
 - [x] Унифицировать active queue statuses между Barber и Kiosk и покрыть contract-тестами.
+- [x] Сделать Kiosk availability authoritative для overdue `in_progress`, добавить barber transfer-history в active queue/read contract, realtime service edits и надёжные idempotent no-show/not-in-time transitions.
 - [ ] Реализовать/уточнить price/kids filters, weighted rating и публичный ответ барбершопа.
 - [ ] Реализовать Frequency и Happy Hours либо согласовать исключение из ТЗ.
 - [ ] Унифицировать ETA и документировать canonical source mapping (`site` ↔ `MARKETPLACE`).

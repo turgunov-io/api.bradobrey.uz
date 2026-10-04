@@ -13,7 +13,8 @@ function identity(req, res) {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     const id = payload.sub || payload.id;
     if (!BARBER_ROLES.has(payload.role) || !id) { res.status(403).json({ error: 'Only barbers and managers can transfer orders' }); return null; }
-    return { id: String(id), branchId: payload.branchId ? String(payload.branchId) : null };
+    const branchId = payload.branchId || payload.branch_id || null;
+    return { id: String(id), branchId: branchId ? String(branchId) : null, role: payload.role };
   } catch (_) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
 }
 
@@ -137,6 +138,105 @@ async function pending(req, res) {
   finally { client.release(); }
 }
 
+async function history(req, res) {
+  const actor = identity(req, res);
+  if (!actor) return;
+  const orderId = String(req.params.id || '').trim();
+  if (!orderId) return res.status(400).json({ error: 'Queue entry id is required' });
+
+  try {
+    const entryResult = await pool.query(`select q.id, q.status, q.branch_id, q.barber_id,
+      b.name as current_barber_name
+      from queue_entries q left join barbers b on b.id=q.barber_id where q.id=$1`, [orderId]);
+    const entry = entryResult.rows[0];
+    if (!entry) return res.status(404).json({ error: 'Queue entry not found' });
+
+    const [transferResult, statusResult] = await Promise.all([
+      pool.query(`select t.id, t.from_barber_id, fb.name as from_barber_name,
+        t.to_barber_id, tb.name as to_barber_name, t.status, t.original_status,
+        t.requested_at, t.responded_at, t.expires_at
+        from queue_transfer_events t
+        left join barbers fb on fb.id=t.from_barber_id
+        left join barbers tb on tb.id=t.to_barber_id
+        where t.queue_entry_id=$1 order by t.requested_at, t.id`, [orderId]),
+      pool.query(`select e.id, e.from_status, e.to_status, e.barber_id,
+        b.name as barber_name, e.occurred_at
+        from queue_status_events e left join barbers b on b.id=e.barber_id
+        where e.queue_entry_id=$1 order by e.occurred_at, e.id`, [orderId]),
+    ]);
+
+    const transfers = transferResult.rows || [];
+    const statusHistory = statusResult.rows || [];
+    const participantIds = new Set([
+      String(entry.barber_id || ''),
+      ...transfers.flatMap((transfer) => [
+        String(transfer.from_barber_id || ''),
+        String(transfer.to_barber_id || ''),
+      ]),
+    ].filter(Boolean));
+    const isBranchManager = ['manager', 'super-manager'].includes(actor.role)
+      && actor.branchId
+      && actor.branchId === String(entry.branch_id);
+
+    if (!participantIds.has(actor.id) && !isBranchManager) {
+      return res.status(404).json({ error: 'Queue entry not found' });
+    }
+
+    const earliestAssignment = statusHistory.find((event) => event.barber_id);
+    const firstTransfer = transfers.find((transfer) => transfer.from_barber_id);
+    const originalBarber = earliestAssignment
+      ? { id: String(earliestAssignment.barber_id), name: earliestAssignment.barber_name || null }
+      : firstTransfer
+        ? { id: String(firstTransfer.from_barber_id), name: firstTransfer.from_barber_name || null }
+        : { id: String(entry.barber_id), name: entry.current_barber_name || null };
+    const barberPath = [originalBarber];
+
+    for (const transfer of transfers) {
+      if (transfer.status !== 'accepted' || !transfer.to_barber_id) continue;
+      const next = { id: String(transfer.to_barber_id), name: transfer.to_barber_name || null };
+      if (barberPath.at(-1)?.id !== next.id) barberPath.push(next);
+    }
+
+    const currentBarber = { id: String(entry.barber_id), name: entry.current_barber_name || null };
+    if (barberPath.at(-1)?.id !== currentBarber.id) barberPath.push(currentBarber);
+
+    return res.json({
+      entry: {
+        id: String(entry.id),
+        status: entry.status,
+        original_barber: originalBarber,
+        current_barber: currentBarber,
+        barber_path: barberPath,
+      },
+      transfers: transfers.map((transfer) => ({
+        id: String(transfer.id),
+        from_barber: transfer.from_barber_id
+          ? { id: String(transfer.from_barber_id), name: transfer.from_barber_name || null }
+          : null,
+        to_barber: transfer.to_barber_id
+          ? { id: String(transfer.to_barber_id), name: transfer.to_barber_name || null }
+          : null,
+        status: transfer.status,
+        original_status: transfer.original_status,
+        requested_at: transfer.requested_at,
+        responded_at: transfer.responded_at,
+        expires_at: transfer.expires_at,
+      })),
+      status_history: statusHistory.map((event) => ({
+        id: String(event.id),
+        from_status: event.from_status,
+        to_status: event.to_status,
+        barber: event.barber_id
+          ? { id: String(event.barber_id), name: event.barber_name || null }
+          : null,
+        occurred_at: event.occurred_at,
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+}
+
 async function respond(req, res, decision) {
   const actor = identity(req, res);
   if (!actor) return;
@@ -179,4 +279,4 @@ async function respond(req, res, decision) {
   finally { client.release(); }
 }
 
-module.exports = { request, pending, startExpiryScheduler, stopExpiryScheduler, accept: (req, res) => respond(req, res, 'accept'), reject: (req, res) => respond(req, res, 'reject') };
+module.exports = { request, pending, history, startExpiryScheduler, stopExpiryScheduler, accept: (req, res) => respond(req, res, 'accept'), reject: (req, res) => respond(req, res, 'reject') };
