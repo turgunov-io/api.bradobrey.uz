@@ -22,7 +22,7 @@
 - Quality migration stamps `started_at`/`finished_at` with PostgreSQL `now()` on transitions into `in_progress`/`completed`; client timestamps cannot influence v1 classification or period inclusion.
 - Plan snapshot versions фиксируют timestamp и controlled reason; actor пока `NULL`, пока queue service-edit routes не переведены на authenticated transactional attribution.
 - Statistics/History используют DB `user_permissions` как authoritative source, включая пустой набор. Разрешение review отделено: `statistics.quality.review`.
-- Quality/statistics permissions никогда не выводятся автоматически из role и не выдаются migration trigger-ом. Их нужно назначать явно в `user_permissions`; пустой набор остаётся authoritative deny.
+- Quality/statistics permissions авторизуются только по `user_permissions`, а login/me всегда возвращают этот authoritative набор. Для пользователей, существовавших до rollout, есть одноразовый marker-protected role-compatible backfill; после marker ручной отзыв права не восстанавливается повторным schema run. Новые пользователи получают явный набор через административный workflow.
 - Audit tables сохраняют raw UUID без FK cascade/SET NULL. Plan/review/status events append-only, а completion assessment разрешает менять только review projection fields.
 - Status routes пока не передают достоверного actor/reason в одной транзакции; поэтому новые generic cancellation events намеренно остаются `actor_type=unknown` и не считаются employee failures.
 - В схеме нет `network_id`; `statistics.read.global` допустим только при single-network-per-database deployment.
@@ -43,6 +43,6 @@
 
 ## Проверенные команды (2026-10-04)
 
-- `npm test`: 68/68 pass, включая employee-quality boundary/ranking/permission/migration tests, persisted-notification snapshot mapping, generic terminal PATCH integrity и dedicated completion CAS/terminal tests.
+- `npm test`: 70/70 pass, включая employee-quality boundary/ranking/permission/migration tests, authoritative session permissions, one-time permission provisioning, persisted-notification snapshot mapping, generic terminal PATCH integrity и dedicated completion CAS/terminal tests.
 - `node --check`: employee-quality, statistics/history integration files pass.
 - Миграция подготовлена и включена в `scripts/apply-schema.sh`, но не применялась: безопасная staging PostgreSQL не предоставлена.

@@ -77,7 +77,7 @@
 - Finding: legacy statistics/history routes ранее не имели единой external-API authorization boundary; branch мог поступать из caller input/JWT claims.
 - Severity: High.
 - Developer Fix: routes требуют JWT, загружают актуального user/branch и authoritative `user_permissions`; self/branch/global и drill-down predicates enforced server-side; authoritative empty permissions deny access.
-- Permission provisioning: migration не делает role-based auto-grant ни существующим, ни новым users; доступ появляется только после явного назначения permission.
+- Permission provisioning: для существующих до rollout users подготовлен одноразовый marker-protected backfill; повторный schema run не возвращает отозванные права. Новые users требуют явного назначения permission. Login/me возвращают authoritative DB rows, а не role fallback.
 - Security Retest: unit/contract permission boundaries pass; live PostgreSQL route matrix pending staging DB.
 - Resolution: FIXED IN CODE / STAGING RETEST REQUIRED.
 

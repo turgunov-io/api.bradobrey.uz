@@ -2,8 +2,8 @@
 
 ## Employee quality statistics (`employee-quality-v1`)
 
-All routes require a valid JWT and permissions loaded from `user_permissions`; an empty permission set is authoritative.
-The migration does not infer or grant permissions from a role. Provision `statistics.read.*`, `history.read.*`, and `statistics.quality.review` explicitly through the administrative permission workflow.
+All routes require a valid JWT and permissions loaded from `user_permissions`; an empty permission set is authoritative after rollout provisioning.
+`employee_quality_permissions_backfill.sql` performs a one-time role-compatible grant for users that predate these permissions and records a migration marker. Re-running schema deployment never restores permissions revoked after that marker. New users receive explicit permissions through the administrative workflow.
 
 - `GET /api/statistics/employees` requires `start_date`, `end_date`, and `scope=global|branch|self`. Branch scope also requires `branch_id`. Dates use a half-open Asia/Tashkent interval and ranges over 366 days are rejected. The response is PII-free, ranks the full authorized cohort, binds `scope.employee_id`, and returns stable numeric-cursor pagination metadata. Revenue is non-ranking context only.
 - `GET /api/statistics/employees/:employeeId/orders` additionally requires the corresponding History permission and `category=suspicious|employee_failure|unclassified`. Branch checks use immutable assessment/status-event branch snapshots.

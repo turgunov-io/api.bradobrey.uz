@@ -47,6 +47,7 @@ FILES=(
   queue_transfer_history.sql
   payments.sql
   employee_quality_ranking.sql
+  employee_quality_permissions_backfill.sql
   certificates.sql
   promo_codes.sql
   cashback.sql

@@ -349,3 +349,35 @@ test('migration contract uses exact v1 reasons, atomic snapshots, and approximat
   assert.match(notificationsModel, /from\('queue_quality_assessments'\)/);
   assert.match(notificationsModel, /runtime_fallback_current_catalog/);
 });
+
+test('login and session responses expose authoritative database permissions', () => {
+  const barbersModel = fs.readFileSync(path.join(__dirname, '..', 'src', 'models', 'barbers.js'), 'utf8');
+  assert.match(barbersModel, /const loginPermissions = \(await fetchPermissionsByUserIds\(\[userData\.id\]\)\)/);
+  assert.match(barbersModel, /permissions: loginPermissions/);
+  assert.match(barbersModel, /const adminPermissions = \(await fetchPermissionsByUserIds\(\[adminUser\.id\]\)\)/);
+  assert.match(barbersModel, /permissions: adminPermissions/);
+  assert.match(barbersModel, /return res\.json\(\{ user: \{ \.\.\.user, permissions \}, barber \}\)/);
+});
+
+test('existing employee quality permissions are provisioned once without defeating later revocation', () => {
+  const sql = fs.readFileSync(path.join(
+    __dirname,
+    '..',
+    'db',
+    'postgres',
+    'employee_quality_permissions_backfill.sql',
+  ), 'utf8');
+  const runner = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'apply-schema.sh'), 'utf8');
+
+  assert.match(sql, /employee_quality_permissions_v1_backfill/);
+  assert.match(sql, /if not exists[\s\S]*schema_data_migrations/i);
+  assert.match(sql, /statistics\.read\.global/);
+  assert.match(sql, /statistics\.read\.branch/);
+  assert.match(sql, /statistics\.read\.self/);
+  assert.match(sql, /history\.read\.branch/);
+  assert.match(sql, /history\.read\.self/);
+  assert.match(sql, /statistics\.quality\.review/);
+  assert.match(sql, /on conflict \(user_id, permission\) do nothing/i);
+  assert.doesNotMatch(sql, /create\s+trigger/i);
+  assert.match(runner, /employee_quality_ranking\.sql[\s\S]*employee_quality_permissions_backfill\.sql/);
+});

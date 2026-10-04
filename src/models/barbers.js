@@ -1593,6 +1593,8 @@ class Barbers {
             return res.status(403).json({ error: 'Employee access has been revoked' });
         }
 
+        const loginPermissions = (await fetchPermissionsByUserIds([userData.id])).get(String(userData.id)) || [];
+
         // Managers work in the selected branch and must receive that branch
         // in the token, just like the barber workspace roles.
         if (ADMIN_ROLES.has(userData.role) && !BARBER_WORKSPACE_ROLES.has(userData.role)) {
@@ -1611,6 +1613,7 @@ class Barbers {
                     login: userData.login,
                     role: userData.role,
                     branch_id: effectiveBranchId,
+                    permissions: loginPermissions,
                 },
             });
         }
@@ -1650,6 +1653,7 @@ class Barbers {
                 login: userData.login,
                 role: userData.role,
                 branch_id,
+                permissions: loginPermissions,
             },
         });
     }
@@ -1696,6 +1700,8 @@ class Barbers {
             return res.status(403).json({ error: 'Employee access has been revoked' });
         }
 
+        const adminPermissions = (await fetchPermissionsByUserIds([adminUser.id])).get(String(adminUser.id)) || [];
+
         const token = signUserToken({
             branch_id: adminUser.branch_id || null,
             id: adminUser.id,
@@ -1710,6 +1716,7 @@ class Barbers {
                 login: adminUser.login,
                 role: adminUser.role,
                 branch_id: adminUser.branch_id || null,
+                permissions: adminPermissions,
             },
         });
     }
@@ -1849,6 +1856,8 @@ class Barbers {
             return res.status(404).json({ error: 'User not found' });
         }
 
+        const permissions = (await fetchPermissionsByUserIds([user.id])).get(String(user.id)) || [];
+
         let barber = null;
         if (isBarberWorkspaceRole(user.role)) {
             const { data: barberData, error: barberError } = await db
@@ -1892,7 +1901,7 @@ class Barbers {
             };
         }
 
-        return res.json({ user, barber });
+        return res.json({ user: { ...user, permissions }, barber });
     }
 
     async myQueue(req, res) {
