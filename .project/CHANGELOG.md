@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-05
+
+- Fixed Statistics/History authorization for `admin` and `admin_network` accounts with no `user_permissions` rows: they now receive the full admin permission preset while non-empty explicit permission rows remain authoritative.
+
 ## 2026-10-04
 
 - Login, admin login and `/api/barbers/me` now return authoritative `user_permissions`, preventing Dashboard role fallbacks from disagreeing with API authorization.

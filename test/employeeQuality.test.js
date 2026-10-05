@@ -113,8 +113,12 @@ test('eligibility requires sample, coverage, employment record, and authoritativ
   assert.equal(normalizeEmployeeMetrics(baseRow({ is_archived: true })).provisional_reason, 'employee_archived');
 });
 
-test('permission rows are authoritative, including an empty permission set', () => {
-  assert.equal(effectivePermissions('admin_network', []).size, 0);
+test('admin roles receive the full preset when no per-user permissions are provisioned', () => {
+  assert.equal(effectivePermissions('admin', []).has('statistics.read.global'), true);
+  assert.equal(effectivePermissions('admin_network', []).has('history.read.branch'), true);
+  assert.equal(effectivePermissions('admin', [{ permission: 'statistics.read.branch' }]).size, 1);
+
+  assert.equal(effectivePermissions('manager', []).size, 0);
   const user = {
     id: '00000000-0000-4000-8000-000000000001',
     branch_id: '00000000-0000-4000-8000-00000000000a',

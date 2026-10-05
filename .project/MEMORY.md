@@ -1,5 +1,7 @@
 # Project memory
 
+- For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
+
 ## Долговременные факты
 
 - Backend использует Express, PostgreSQL и Socket.IO; Marketplace и kiosk объединены через legacy `queue_entries`.

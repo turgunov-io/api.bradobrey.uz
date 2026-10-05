@@ -7,6 +7,35 @@ const BRANCH_ROLES = new Set(['admin_branch', 'manager']);
 const SELF_ROLES = new Set(['barber', 'super-barber']);
 const REVIEW_ROLES = new Set([...NETWORK_ROLES, ...BRANCH_ROLES]);
 const QUALITY_REVIEW_PERMISSION = 'statistics.quality.review';
+const SUPERUSER_ROLES = new Set(['admin_network', 'admin']);
+const ADMIN_PERMISSION_PRESET = [
+  'dashboard.access',
+  'employees.read',
+  'employees.create',
+  'employees.update',
+  'employees.delete',
+  'queue.read',
+  'queue.manage.self',
+  'queue.manage.branch',
+  'history.read.self',
+  'history.read.branch',
+  'statistics.read.self',
+  'statistics.read.branch',
+  'statistics.read.global',
+  'statistics.quality.review',
+  'clients.read',
+  'services.read',
+  'services.manage',
+  'expenses.read',
+  'expenses.create',
+  'expenses.update',
+  'expenses.delete',
+  'penalties.read',
+  'penalties.create',
+  'penalties.cancel',
+  'promo.manage',
+  'certificates.manage',
+];
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -48,10 +77,16 @@ function getBearerToken(req) {
   return header.startsWith('Bearer ') ? header.slice(7) : null;
 }
 
-function effectivePermissions(_role, rows = []) {
-  // The permissions table is authoritative, including an intentionally empty
-  // set. Request authorization must never silently grant permissions from a
-  // role name.
+function effectivePermissions(role, rows = []) {
+  const normalizedRole = String(role || '').trim().toLowerCase();
+
+  // Admin accounts are superusers. An empty row set means that no per-user
+  // permissions were provisioned, so preserve the role's full dashboard
+  // access. A non-empty set remains authoritative for deliberate overrides.
+  if (SUPERUSER_ROLES.has(normalizedRole) && rows.length === 0) {
+    return new Set(ADMIN_PERMISSION_PRESET);
+  }
+
   return new Set(rows.map((row) => String(row.permission || '')).filter(Boolean));
 }
 
