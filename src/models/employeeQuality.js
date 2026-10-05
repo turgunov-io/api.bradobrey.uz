@@ -17,6 +17,11 @@ const DRILLDOWN_CATEGORIES = new Set(['suspicious', 'employee_failure', 'unclass
 
 const isMissingQualitySchema = (error) => (
   String(error?.code || '') === '42P01'
+  // A partially applied migration can create the quality tables while still
+  // missing one of the additive columns used by the aggregate queries. Treat
+  // PostgreSQL's undefined-column response as unavailable schema as well;
+  // returning a generic 500 hides the actionable migration requirement.
+  || String(error?.code || '') === '42703'
   || /queue_quality_(assessments|review_events)|responsible_employee_id/i.test(String(error?.message || ''))
 );
 

@@ -215,6 +215,14 @@ test('employee quality pagination uses stable numeric cursors and bounded limits
   assert.match(parsePagination({ limit: 201 }).error, /limit/);
 });
 
+test('partial employee quality migrations fail closed as unavailable schema', () => {
+  const { isMissingQualitySchema } = employeeQualityModel._private;
+  assert.equal(isMissingQualitySchema({ code: '42P01', message: 'relation "queue_quality_assessments" does not exist' }), true);
+  assert.equal(isMissingQualitySchema({ code: '42703', message: 'column e.actor_type does not exist' }), true);
+  assert.equal(isMissingQualitySchema({ code: '42703', message: 'column b.name does not exist' }), true);
+  assert.equal(isMissingQualitySchema({ code: '23505', message: 'duplicate key value violates unique constraint' }), false);
+});
+
 test('quality review idempotency binds the canonical comment as well as state and version', () => {
   const { reviewReplayMatches } = employeeQualityModel._private;
   const replay = {
