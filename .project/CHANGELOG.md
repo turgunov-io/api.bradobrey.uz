@@ -3,6 +3,7 @@
 ## 2026-10-05
 
 - Fixed Statistics/History authorization for `admin` and `admin_network` accounts with no `user_permissions` rows: they now receive the full admin permission preset while non-empty explicit permission rows remain authoritative.
+- Live smoke verification found that `GET /api/statistics/employees` returns HTTP 501 until the Employee Quality PostgreSQL migration is applied. The API remains fail-closed and does not substitute revenue ranking.
 
 ## 2026-10-04
 

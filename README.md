@@ -15,6 +15,23 @@ Backend for a barbershop live-queue system (JWT auth for barbers, PostgreSQL per
 - Install deps: `npm install`
 - Start dev server: `npm run dev` (defaults to `http://localhost:4000`)
 
+## Employee Quality v1 deployment
+
+Apply the Employee Quality schema and its one-time permission backfill from the
+API server. The script reads `DATABASE_URL` from the environment or local
+`.env`, never prints it, validates the base schema, verifies the new tables, and
+does not restart PM2 unless requested:
+
+```bash
+CONFIRM_PRODUCTION=YES bash ./scripts/apply-employee-quality.sh
+```
+
+To restart the API after the migration:
+
+```bash
+CONFIRM_PRODUCTION=YES RESTART_PM2=1 PM2_APP_NAME=bradobrey bash ./scripts/apply-employee-quality.sh
+```
+
 ## Cashback (loyalty)
 
 - Cashback is stored in `cashback_wallets` and is attached to `clients` (phone-based identity).
