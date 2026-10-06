@@ -7,6 +7,7 @@
   unique Telegram bindings, six-digit HMAC-hashed OTPs, expiry, five attempts,
   60-second cooldown, and five-per-hour phone rate limiting.
 - Wired `marketplace_telegram_auth.sql` into `db:marketplace:apply`.
+- Removed the legacy marketplace email OTP stdout log.
 
 ## 2026-10-06
 

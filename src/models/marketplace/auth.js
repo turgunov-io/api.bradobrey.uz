@@ -342,7 +342,6 @@ class MarketplaceAuth {
         return res.status(500).json({ error: 'OTP delivery is not configured' });
       }
 
-      console.log(`Marketplace OTP for ${email}: ${code}`);
       return res.status(200).json({ message: 'OTP sent' });
     } catch (error) {
       console.error(error);

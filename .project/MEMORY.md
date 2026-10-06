@@ -78,3 +78,23 @@
   valid staging PostgreSQL credentials were not provided.
 - `npm audit --omit=dev --audit-level=high`: existing install reports 27
   vulnerabilities; no forced dependency upgrades were applied.
+
+## Проверка production Telegram OTP (2026-10-07)
+
+- Live `https://api.bradobrey.uz/api/marketplace/auth/telegram/request-code`
+  возвращает старый `TELEGRAM_NOT_CONFIGURED` (503), а live
+  `/api/integrations/telegram/webhook` возвращает 404. Текущий checkout уже
+  содержит Bot API flow и этот webhook route, поэтому production runtime не
+  синхронизирован с checkout.
+- В локальном production `.env` отсутствуют
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_SECRET` и
+  `OTP_HASH_SECRET`; значения в память не записывать. Без Bot credentials
+  нельзя безопасно выполнить `getMe`, `setWebhook` или реальный smoke test.
+- Public health проходит через nginx; DNS `api.bradobrey.uz` разрешается в
+  `95.46.96.213`. SSH-проверка с доступным ключом для `root`, `ubuntu` и
+  `admin` отклонена, поэтому live PM2/.env/nginx/DB проверить и перезапустить
+  из этого checkout невозможно. Read-only PostgreSQL check также отклонён
+  production DB ошибкой `28P01`.
+- Удалён legacy stdout-log email OTP из
+  `src/models/marketplace/auth.js`; Telegram flow уже не логирует token, OTP
+  или полный request headers.
