@@ -4,7 +4,9 @@
 - Рабочая директория: `D:\api.bradobrey.uz`.
 - Стек: Node.js, Express, PostgreSQL, Socket.IO.
 - Источник продуктовых требований: `C:\Users\admin\Documents\Bradobrey\ТЗ_Маркетплейс_v1.pdf`.
-- Текущий режим OTP: SMS-провайдер временно не используется, код `0000` согласован владельцем как исключение только для разработки/текущего этапа.
+- Авторизация по телефону использует Telegram MTProto OTP; универсальный OTP
+  fallback удалён. Legacy `/phone/*` endpoints должны направлять потребителей
+  на `/telegram/*`.
 - Аудит 2026-10-03: backend не готов к production; подробности в `API_TZ_COMPLIANCE_AUDIT.md` и `SECURITY.md`.
 
 ## Ограничения текущей проверки

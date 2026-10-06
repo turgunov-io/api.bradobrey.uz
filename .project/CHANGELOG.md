@@ -2,6 +2,12 @@
 
 ## 2026-10-06
 
+- Removed the universal marketplace phone OTP fallback and disabled legacy
+  `/phone/*` OTP handlers. Phone authentication now requires Telegram OTP via
+  `/telegram/request-code` and `/telegram/verify-code`.
+
+## 2026-10-06
+
 - Added Telegram MTProto marketplace authorization by phone and Telegram code,
   including optional 2FA password handling, one-time expiring challenges,
   encrypted persistent StringSessions, JWT issuance, and contract tests.

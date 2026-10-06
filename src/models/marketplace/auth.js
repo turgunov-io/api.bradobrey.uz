@@ -20,18 +20,13 @@ const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
 const generateOtpCode = () => crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
 
-const fixedOtpCode = () => {
-  const configured = String(process.env.MARKETPLACE_FIXED_OTP || '').trim();
-  if (/^\d{4,6}$/.test(configured)) return configured;
-  // Temporary fallback until an SMS provider is configured.
-  return '0000';
-};
-
-const generateMarketplaceOtpCode = () => fixedOtpCode() || generateOtpCode();
+// Legacy email verification uses a fresh random code. Phone authentication is
+// handled by Telegram MTProto and must never have a fixed-code bypass.
+const generateMarketplaceOtpCode = generateOtpCode;
 
 const normalizeOtpCode = (codeInput) => {
   if (typeof codeInput === 'number' && Number.isInteger(codeInput)) {
-    return String(codeInput).padStart(fixedOtpCode()?.length || 6, '0');
+    return String(codeInput).padStart(6, '0');
   }
 
   // Gmail clients can copy a code with spaces or a hyphen (for example
@@ -70,24 +65,6 @@ const signMarketplaceToken = ({ id, email = null, phone = null }) => {
 
   const expiresIn = process.env.JWT_EXPIRES_IN || '12h';
   return jwt.sign({ sub: id, email, phone, role: MARKETPLACE_ROLE }, jwtSecret, { expiresIn });
-};
-
-const sendPhoneOtp = async ({ phone, code }) => {
-  const url = String(process.env.SMS_WEBHOOK_URL || '').trim();
-  if (!url) return { sent: false, reason: 'sms_provider_not_configured' };
-
-  const headers = { 'content-type': 'application/json' };
-  if (process.env.SMS_WEBHOOK_TOKEN) {
-    headers.authorization = `Bearer ${process.env.SMS_WEBHOOK_TOKEN}`;
-  }
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ phone, message: `BRADOBREY verification code: ${code}` }),
-  });
-  if (!response.ok) return { sent: false, reason: `sms_provider_http_${response.status}` };
-  return { sent: true };
 };
 
 const canSendOtpEmail = () =>
@@ -172,56 +149,24 @@ const trySendOtpEmail = async ({ to, code }) => {
 };
 
 class MarketplaceAuth {
-  async requestPhoneOtp(req, res) {
-    try {
-      const phone = normalizePhone(req.body?.phone);
-      if (!isValidE164(phone)) {
-        return res.status(400).json({ error: 'phone must be in E.164 format' });
-      }
-
-      // Use the configured/fallback code while SMS delivery is unavailable.
-      // This keeps the code stored in the database aligned with verifyPhone.
-      const code = generateMarketplaceOtpCode();
-      const referralCode = String(req.body?.referral_code || '').trim().toUpperCase() || null;
-      const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
-      const { error: invalidateError } = await db.from('otp_codes')
-        .update({ used: true })
-        .eq('phone', phone)
-        .eq('used', false);
-      if (invalidateError) return res.status(500).json({ error: invalidateError.message });
-
-      const { error: insertError } = await db.from('otp_codes').insert({
-        phone,
-        referral_code: referralCode,
-        request_ip: req.ip || null,
-        device_id: String(req.get('x-device-id') || '').trim() || null,
-        code,
-        expires_at: expiresAt,
-        used: false,
-      });
-      if (insertError) return res.status(500).json({ error: insertError.message });
-
-      const result = await sendPhoneOtp({ phone, code });
-      if (result.sent) return res.json({ message: 'OTP sent' });
-      if (!process.env.SMS_WEBHOOK_URL) {
-        console.warn(`SMS provider is not configured; use fallback OTP ${code}`);
-        return res.json({ message: 'OTP sent' });
-      }
-      if (process.env.NODE_ENV === 'production') {
-        return res.status(503).json({ error: 'SMS delivery is not configured' });
-      }
-      console.log(`Marketplace OTP for ${phone}: ${code}`);
-      return res.json({ message: 'OTP sent', ...(shouldReturnOtpInResponse() ? { code } : {}) });
-    } catch (error) {
-      console.error(error);
-      return res.status(500).json({ error: error.message || 'Internal server error' });
-    }
+  async requestPhoneOtp(_req, res) {
+    return res.status(410).json({
+      error: 'Phone OTP authentication is disabled; use Telegram OTP',
+      code: 'TELEGRAM_AUTH_REQUIRED',
+    });
   }
 
-  async verifyPhone(req, res) {
+  async verifyPhone(_req, res) {
+    return res.status(410).json({
+      error: 'Phone OTP authentication is disabled; use Telegram OTP',
+      code: 'TELEGRAM_AUTH_REQUIRED',
+    });
+
+    // Kept below only as historical implementation context. The early return
+    // above makes the legacy SMS/DB OTP path unreachable.
     const phone = normalizePhone(req.body?.phone);
     const code = normalizeOtpCode(req.body?.code);
-    const expectedOtpLength = fixedOtpCode()?.length || 6;
+    const expectedOtpLength = 6;
     const displayName = String(req.body?.display_name || '').trim().slice(0, 120);
     const language = String(req.body?.language || 'ru').trim().toLowerCase();
     if (!isValidE164(phone) || !new RegExp(`^\\d{${expectedOtpLength}}$`).test(code)) {
@@ -416,7 +361,7 @@ class MarketplaceAuth {
       const email = normalizeEmail(emailInput);
       const code = normalizeOtpCode(codeInput);
 
-      const expectedLength = fixedOtpCode()?.length || 6;
+      const expectedLength = 6;
       if (!email || !isValidEmail(email) || !new RegExp(`^\\d{${expectedLength}}$`).test(code)) {
         return res.status(400).json({ error: 'Invalid email or code' });
       }

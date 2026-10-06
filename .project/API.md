@@ -94,3 +94,7 @@ Request: `{ "challenge_id": "...", "code": "12345", "password": "..." }`
 Pending challenges expire and are attempt-limited. Telegram StringSessions are
 encrypted at rest using `TELEGRAM_SESSION_ENCRYPTION_KEY`; plaintext sessions,
 API hashes, and verification codes must never be logged or committed.
+
+The legacy `POST /api/marketplace/auth/phone/request-otp` and
+`POST /api/marketplace/auth/phone/verify` endpoints return HTTP 410 with
+`TELEGRAM_AUTH_REQUIRED`; they do not create or verify fallback OTPs.

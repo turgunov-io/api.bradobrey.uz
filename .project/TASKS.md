@@ -52,3 +52,19 @@
 ## Текущий статус
 
 Состояние: SECURITY / AUDIT COMPLETE, REMEDIATION IN PROGRESS. Queue status contract исправлен и покрыт тестами; остальные release blockers остаются открытыми.
+
+## Выполнено — Telegram authorization
+
+- [x] Добавлена backend-авторизация marketplace через Telegram MTProto: phone,
+  code, optional 2FA password, JWT и encrypted StringSession.
+- [x] Добавлена Flutter-форма Telegram login и подключение к существующему
+  secure auth session store.
+- [ ] Применить `marketplace_telegram_auth.sql` в staging и проверить реальным
+  Telegram test account; production rollout требует credentials вне Git.
+- [ ] Configure and validate the three backend Telegram secrets outside Git;
+  current runtime `.env` is missing all three and fails with
+  `TELEGRAM_NOT_CONFIGURED`.
+- [x] Remove the legacy universal `0000` fallback and disable legacy phone OTP;
+  backend phone authentication now requires the Telegram OTP endpoints.
+- [ ] Verify `telegram_auth_challenges` and `telegram_auth_sessions` in the
+  target PostgreSQL database; local verification is blocked by DB credentials.

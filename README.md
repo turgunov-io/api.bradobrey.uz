@@ -95,7 +95,10 @@ CONFIRM_PRODUCTION=YES RESTART_PM2=1 PM2_APP_NAME=bradobrey bash ./scripts/apply
 Marketplace TЗ compliance migration:
 
 - Apply `db/postgres/marketplace_tz_compliance.sql` after the existing marketplace SQL files.
-- Phone auth: `POST /api/marketplace/auth/phone/request-otp`, `POST /api/marketplace/auth/phone/verify`.
+- Telegram phone auth: `POST /api/marketplace/auth/telegram/request-code`,
+  `POST /api/marketplace/auth/telegram/verify-code`.
+- Legacy `/api/marketplace/auth/phone/*` endpoints return
+  `TELEGRAM_AUTH_REQUIRED` and never issue a fallback OTP.
 - Compliance endpoints: `GET /api/marketplace/compliance/active`, `POST /api/marketplace/compliance/:id/cancel`, `GET /api/marketplace/compliance/loyalty`, `GET /api/marketplace/compliance/referral`, `POST /api/marketplace/compliance/reviews`.
 - Unified wallet endpoint: `GET /api/marketplace/profile/cashback` returns the shared cashback/referral wallet and a source-labeled transaction history.
 - Client notifications: `GET /api/marketplace/compliance/notifications`, `POST /api/marketplace/compliance/notifications/:id/read`, `POST /api/marketplace/compliance/push-tokens`.

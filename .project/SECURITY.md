@@ -124,7 +124,9 @@
 
 ## OTP `0000`
 
-Статус: **ACCEPTED TEMPORARILY**, но **RELEASE BLOCKER**. На текущем этапе не считается дефектом. Production должен fail-fast при fixed/missing SMS configuration; OTP не должен попадать в response/logs и должен иметь распределённую защиту от перебора.
+Статус: **REMOVED**. Backend больше не принимает и не создаёт универсальный
+код; legacy phone OTP endpoints fail closed with `TELEGRAM_AUTH_REQUIRED`.
+Phone authentication must use the Telegram challenge/verify flow.
 
 ## Границы проверки
 
@@ -140,3 +142,28 @@
   before database storage; they are excluded from logs and API responses.
 - Production security retest remains required after applying the migration and
   configuring credentials in staging. No live Telegram account was used locally.
+
+### SEC-007 — Telegram runtime configuration is absent
+
+- Severity: Critical for Telegram login availability.
+- Evidence: the backend working `.env` is missing `TELEGRAM_API_ID`,
+  `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION_ENCRYPTION_KEY`; a direct service
+  config check returns `TELEGRAM_NOT_CONFIGURED` / HTTP 503 semantics.
+- Affected component: `src/services/telegramAuth.js` and deployment environment.
+- Recommended fix: provision the three values in the target runtime secret
+  store, restart the API, apply `marketplace_telegram_auth.sql`, and run a
+  controlled Telegram test account flow.
+- Status: Open; production secret store and database schema were not verified.
+
+### SEC-008 — Default phone flow bypasses Telegram
+
+- Severity: Resolved in backend; client migration remains a deployment
+  dependency.
+- Evidence: legacy `/phone/request-otp` and `/phone/verify` now return HTTP 410
+  with `TELEGRAM_AUTH_REQUIRED`; they no longer create or verify an OTP.
+- Affected component: marketplace client authentication UX and legacy phone
+  auth endpoints.
+- Recommended fix: provision the runtime secrets, apply the Telegram migration,
+  restart the API, and run a controlled Telegram challenge/verify test.
+- Status: Backend fixed; Telegram secrets, database migration, restart, and
+  end-to-end test remain open deployment steps.
