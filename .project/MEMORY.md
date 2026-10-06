@@ -54,10 +54,13 @@
 - Миграция подготовлена и включена в `scripts/apply-schema.sh`, но не применялась: безопасная staging PostgreSQL не предоставлена.
 - Telegram marketplace auth uses the ordinary Bot API under
   `/api/auth/telegram/*` (with marketplace-prefixed aliases). Linking uses a
-  five-minute opaque deep-link token; OTPs are six digits, HMAC-hashed, expire
-  after five minutes, and allow five attempts. Telegram user/chat bindings are
-  unique per marketplace client. Runtime verification requires the additive
-  migration and Bot credentials outside Git.
+  five-minute opaque deep-link token; `/start` binds Telegram and asks for the
+  app phone before issuing a six-digit HMAC-hashed OTP. OTPs expire after 60
+  seconds, allow five attempts, and use progressive 60s/2m/5m/15m/24h phone
+  cooldowns. Telegram user/chat bindings are unique per marketplace client.
+  Runtime verification requires the additive migration and Bot credentials
+  outside Git. The new flow is implemented in the local checkout but not yet
+  deployed to production.
 - Audit 2026-10-07: the phone flow contains no Gateway/MTProto calls; webhook
   requests require `TELEGRAM_WEBHOOK_SECRET`, and duplicate `/start` delivery
   is idempotent. Local PostgreSQL connectivity still needs staging verification.

@@ -2,6 +2,10 @@
 
 ## 2026-10-07
 
+- Updated the local Telegram Bot flow to ask for the app phone after `/start`,
+  validate it against the opaque session, issue a 60-second hash-only OTP, and
+  provide Telegram's `copy_text` inline button. Added progressive phone-based
+  cooldowns and registration name fields while preserving existing routes.
 - Replaced paid Telegram Gateway delivery with the ordinary Telegram Bot API.
 - Added five-minute deep-link onboarding, secret-protected webhook handling,
   unique Telegram bindings, six-digit HMAC-hashed OTPs, expiry, five attempts,

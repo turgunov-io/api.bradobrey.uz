@@ -42,9 +42,9 @@ class TelegramBotService {
     } finally { clearTimeout(timeout); }
   }
 
-  async sendMessage(chatId, text) {
+  async sendMessage(chatId, text, options = {}) {
     if (!chatId || !text) throw new TelegramBotError('INVALID_MESSAGE', 400);
-    return this.request('sendMessage', { chat_id: String(chatId), text });
+    return this.request('sendMessage', { chat_id: String(chatId), text, ...options });
   }
 
   async setWebhook({ url, secretToken, allowedUpdates = ['message'] }) {

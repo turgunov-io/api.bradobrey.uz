@@ -5,17 +5,30 @@ const TelegramAuth = require('../services/telegramAuth');
 const { rateLimit } = require('../middleware/rateLimit');
 
 const router = express.Router();
-const sendLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 3, keyPrefix: 'telegram-bot-send' });
+const sendLimiter = rateLimit({ windowMs: 24 * 60 * 60 * 1000, max: 10, keyPrefix: 'telegram-bot-send' });
 const verifyLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 10, keyPrefix: 'telegram-bot-verify' });
 
 const handleError = (res, error) => {
-  if (error?.expose && Number.isInteger(error.status)) return res.status(error.status).json({ error: error.message, code: error.code });
+  if (error?.expose && Number.isInteger(error.status)) {
+    const body = { error: error.message, code: error.code };
+    if (Number.isInteger(error.retryAfter)) body.retryAfter = error.retryAfter;
+    return res.status(error.status).json(body);
+  }
   console.error('[telegram-bot-auth] request failed', error?.code || 'UNKNOWN');
   return res.status(500).json({ error: 'Internal server error', code: 'TELEGRAM_AUTH_FAILED' });
 };
 
 const sendCode = async (req, res) => {
-  try { return res.json(await TelegramAuth.sendCode({ phone: req.body?.phone })); }
+  try {
+    return res.json(await TelegramAuth.sendCode({
+      phone: req.body?.phone,
+      displayName: req.body?.display_name,
+      firstName: req.body?.first_name,
+      lastName: req.body?.last_name,
+      patronymic: req.body?.patronymic,
+      language: req.body?.language,
+    }));
+  }
   catch (error) { return handleError(res, error); }
 };
 
@@ -28,6 +41,7 @@ const verifyCode = async (req, res) => {
       displayName: req.body?.display_name,
       firstName: req.body?.first_name,
       lastName: req.body?.last_name,
+      patronymic: req.body?.patronymic,
       language: req.body?.language,
     }));
   } catch (error) { return handleError(res, error); }

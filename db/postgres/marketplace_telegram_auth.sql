@@ -37,6 +37,9 @@ create table if not exists telegram_auth_challenges (
 );
 
 alter table telegram_auth_challenges add column if not exists display_name text;
+alter table telegram_auth_challenges add column if not exists first_name text;
+alter table telegram_auth_challenges add column if not exists last_name text;
+alter table telegram_auth_challenges add column if not exists patronymic text;
 alter table telegram_auth_challenges add column if not exists language text;
 alter table telegram_auth_challenges alter column phone_code_hash_encrypted drop not null;
 alter table telegram_auth_challenges alter column telegram_session_encrypted drop not null;

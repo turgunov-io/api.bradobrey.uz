@@ -7,19 +7,20 @@ const { TelegramBotError } = require('./telegram-bot.service');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const LINK_TTL_SECONDS = 5 * 60;
-const OTP_TTL_SECONDS = 5 * 60;
-const RESEND_COOLDOWN_SECONDS = 60;
-const HOURLY_SEND_LIMIT = 5;
+const OTP_TTL_SECONDS = 60;
+const RATE_LIMIT_WINDOW_SECONDS = 24 * 60 * 60;
+const OTP_COOLDOWNS_SECONDS = [0, 60, 2 * 60, 5 * 60, 15 * 60];
 const MAX_ATTEMPTS = 5;
 const VERIFY_LOCK_MS = 2 * 1000;
 
 class TelegramAuthError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = {}) {
     super(message);
     this.name = 'TelegramAuthError';
     this.status = status;
     this.code = code;
     this.expose = true;
+    Object.assign(this, details);
   }
 }
 
@@ -80,7 +81,7 @@ class TelegramAuthService {
     return error;
   }
 
-  async reserveSend(phone) {
+  async reserveSend({ phone, displayName, firstName, lastName, patronymic, language }) {
     const client = await this.pool.connect();
     const linkToken = createOpaqueToken();
     const challengeId = createOpaqueToken();
@@ -89,38 +90,34 @@ class TelegramAuthService {
       await client.query('BEGIN');
       const recent = await client.query(
         `select count(*)::int as count, extract(epoch from (now() - max(created_at)))::int as age_seconds
-           from telegram_auth_challenges where phone = $1 and created_at > now() - interval '1 hour'`, [phone],
+           from telegram_auth_challenges where phone = $1 and created_at > now() - interval '24 hours'`, [phone],
       );
       const count = Number(recent.rows[0]?.count || 0);
       const ageRaw = recent.rows[0]?.age_seconds;
       const age = ageRaw === null || ageRaw === undefined ? null : Number(ageRaw);
-      if (count >= HOURLY_SEND_LIMIT) {
+      const cooldown = count >= OTP_COOLDOWNS_SECONDS.length
+        ? RATE_LIMIT_WINDOW_SECONDS
+        : OTP_COOLDOWNS_SECONDS[count];
+      const retryAfter = age !== null && Number.isFinite(age) ? Math.max(0, cooldown - age) : 0;
+      if (retryAfter > 0) {
         await client.query('ROLLBACK');
-        throw new TelegramAuthError(429, 'TELEGRAM_HOURLY_LIMIT', 'Too many verification codes requested');
+        throw new TelegramAuthError(429, 'OTP_RATE_LIMITED', 'Please wait before requesting another code', { retryAfter });
       }
-      if (age !== null && Number.isFinite(age) && age < RESEND_COOLDOWN_SECONDS) {
-        await client.query('ROLLBACK');
-        throw new TelegramAuthError(429, 'TELEGRAM_RESEND_TOO_SOON', 'Please wait before requesting another code');
-      }
-      const accountResult = await client.query(
-        `select id, telegram_user_id, telegram_chat_id, is_active from marketplace_clients where phone = $1 for update`, [phone],
-      );
-      const account = accountResult.rows[0];
-      const linked = Boolean(account?.telegram_user_id && account?.telegram_chat_id);
       await client.query(
         `update telegram_auth_challenges set status = 'revoked', used_at = coalesce(used_at, now()), locked_until = null, updated_at = now()
-          where phone = $1 and used_at is null and status in ('awaiting_telegram_link', 'pending')`, [phone],
+          where phone = $1 and used_at is null and status in ('awaiting_telegram_link', 'awaiting_phone', 'pending')`, [phone],
       );
       await client.query(
         `insert into telegram_auth_challenges
-          (challenge_hash, phone, attempts, max_attempts, expires_at, status, link_token_hash, otp_hash, telegram_user_id, telegram_chat_id)
-         values ($1, $2, 0, $3, now() + ($4::text || ' seconds')::interval, $5, $6, null, $7, $8)`,
-        [challengeHash, phone, MAX_ATTEMPTS, linked ? OTP_TTL_SECONDS : LINK_TTL_SECONDS,
-          linked ? 'pending' : 'awaiting_telegram_link', linked ? null : hashToken(linkToken),
-          linked ? account.telegram_user_id : null, linked ? account.telegram_chat_id : null],
+          (challenge_hash, phone, attempts, max_attempts, expires_at, status, link_token_hash, otp_hash,
+           telegram_user_id, telegram_chat_id, display_name, first_name, last_name, patronymic, language)
+         values ($1, $2, 0, $3, now() + ($4::text || ' seconds')::interval, 'awaiting_telegram_link', $5, null,
+           null, null, nullif($6, ''), nullif($7, ''), nullif($8, ''), nullif($9, ''), nullif($10, ''))`,
+        [challengeHash, phone, MAX_ATTEMPTS, LINK_TTL_SECONDS, hashToken(linkToken),
+          cleanName(displayName), cleanName(firstName), cleanName(lastName), cleanName(patronymic), language || null],
       );
       await client.query('COMMIT');
-      return { challengeId, challengeHash, linkToken: linked ? null : linkToken, chatId: linked ? account.telegram_chat_id : null, requiresLink: !linked, phone };
+      return { challengeId, challengeHash, linkToken, requiresLink: true, phone };
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
       throw this.dbError(error);
@@ -140,7 +137,9 @@ class TelegramAuthService {
 
   async sendOtp(challenge, code) {
     try {
-      await this.bot.sendMessage(challenge.chatId, `Ваш код подтверждения Bradobrey: ${code}`);
+      await this.bot.sendMessage(challenge.chatId, `Ваш код для входа в Bradobrey: ${code}\nКод действует 60 секунд.`, {
+        reply_markup: { inline_keyboard: [[{ text: '📋 Копировать код', copy_text: { text: code } }]] },
+      });
       await this.updateChallenge(challenge.challengeHash, { delivery_status: 'sent' });
     } catch (error) {
       await this.updateChallenge(challenge.challengeHash, { status: 'failed', used_at: new Date(), delivery_status: 'failed' }).catch(() => {});
@@ -148,25 +147,29 @@ class TelegramAuthService {
     }
   }
 
-  async sendCode({ phone: phoneInput }) {
+  async sendCode({ phone: phoneInput, displayName, firstName, lastName, patronymic, language }) {
     const phone = normalizePhone(phoneInput);
     if (!isValidE164(phone)) throw new TelegramAuthError(400, 'INVALID_PHONE', 'phone must be in E.164 format');
-    const reservation = await this.reserveSend(phone);
-    if (reservation.requiresLink) {
-      let botUrl;
-      try { botUrl = this.bot.botUrl(reservation.linkToken); } catch (error) { throw this.mapBotError(error); }
-      return { requiresTelegramLink: true, linkToken: reservation.linkToken, botUrl, challenge_id: reservation.challengeId, expiresIn: LINK_TTL_SECONDS, expires_in: LINK_TTL_SECONDS, retry_after: RESEND_COOLDOWN_SECONDS };
-    }
-    const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
-    await this.updateChallenge(reservation.challengeHash, { otp_hash: this.hashOtp(code), delivery_status: 'pending' });
-    await this.sendOtp(reservation, code);
-    return { requiresTelegramLink: false, challenge_id: reservation.challengeId, expires_in: OTP_TTL_SECONDS, retry_after: RESEND_COOLDOWN_SECONDS };
+    const reservation = await this.reserveSend({ phone, displayName, firstName, lastName, patronymic, language });
+    let botUrl;
+    try { botUrl = this.bot.botUrl(reservation.linkToken); } catch (error) { throw this.mapBotError(error); }
+    return {
+      requiresTelegramLink: true,
+      requiresTelegram: true,
+      linkToken: reservation.linkToken,
+      botUrl,
+      telegramUrl: botUrl,
+      challenge_id: reservation.challengeId,
+      sessionId: reservation.challengeId,
+      expiresIn: LINK_TTL_SECONDS,
+      expires_in: LINK_TTL_SECONDS,
+      retry_after: OTP_COOLDOWNS_SECONDS[1],
+    };
   }
 
   async linkTelegram({ linkToken, telegramUserId, telegramChatId }) {
     const client = await this.pool.connect();
     const tokenHash = hashToken(linkToken);
-    const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
     try {
       await client.query('BEGIN');
       const result = await client.query(
@@ -178,7 +181,7 @@ class TelegramAuthService {
       if (challenge.status !== 'awaiting_telegram_link') {
         const sameChat = String(challenge.telegram_chat_id || '') === String(telegramChatId);
         await client.query('ROLLBACK');
-        if (sameChat && challenge.status === 'pending') return { alreadyProcessed: true };
+        if (sameChat && ['awaiting_phone', 'pending'].includes(challenge.status)) return { alreadyProcessed: true };
         throw new TelegramAuthError(409, 'LINK_TOKEN_USED', 'Telegram link has already been used');
       }
       const account = await client.query(`select id, phone from marketplace_clients where telegram_user_id = $1 or telegram_chat_id = $2 for update`, [String(telegramUserId), String(telegramChatId)]);
@@ -187,17 +190,53 @@ class TelegramAuthService {
         throw new TelegramAuthError(409, 'TELEGRAM_BINDING_CONFLICT', 'This Telegram account is already linked');
       }
       const pending = await client.query(
-        `select phone from telegram_auth_challenges where used_at is null and status = 'pending'
+        `select phone from telegram_auth_challenges where used_at is null and status in ('awaiting_phone', 'pending')
           and (telegram_user_id = $1 or telegram_chat_id = $2) and phone <> $3 limit 1`, [String(telegramUserId), String(telegramChatId), challenge.phone],
       );
       if (pending.rows[0]) { await client.query('ROLLBACK'); throw new TelegramAuthError(409, 'TELEGRAM_BINDING_CONFLICT', 'This Telegram account is already linked'); }
       await client.query(
-        `update telegram_auth_challenges set status = 'pending', otp_hash = $2, telegram_user_id = $3, telegram_chat_id = $4,
-          expires_at = now() + ($5::text || ' seconds')::interval, delivery_status = 'pending', updated_at = now()
-          where challenge_hash = $1`, [challenge.challenge_hash, this.hashOtp(code), String(telegramUserId), String(telegramChatId), OTP_TTL_SECONDS],
+        `update telegram_auth_challenges set status = 'awaiting_phone', otp_hash = null, telegram_user_id = $2, telegram_chat_id = $3,
+          expires_at = now() + ($4::text || ' seconds')::interval, delivery_status = 'awaiting_phone', updated_at = now()
+          where challenge_hash = $1`, [challenge.challenge_hash, String(telegramUserId), String(telegramChatId), LINK_TTL_SECONDS],
       );
       await client.query('COMMIT');
-      return { challengeHash: challenge.challenge_hash, phone: challenge.phone, chatId: String(telegramChatId), code };
+      return { challengeHash: challenge.challenge_hash, phone: challenge.phone, chatId: String(telegramChatId) };
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+      throw this.dbError(error);
+    } finally { client.release(); }
+  }
+
+  async confirmTelegramPhone({ telegramUserId, telegramChatId, phone }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `select challenge_hash, phone, display_name, first_name, last_name, patronymic, language,
+                telegram_user_id, telegram_chat_id, status, delivery_status
+           from telegram_auth_challenges
+          where telegram_user_id = $1 and telegram_chat_id = $2 and status = 'awaiting_phone'
+            and used_at is null and expires_at > now()
+          order by created_at desc limit 1 for update`,
+        [String(telegramUserId), String(telegramChatId)],
+      );
+      const challenge = result.rows[0];
+      if (!challenge) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      if (challenge.phone !== phone) {
+        await client.query('ROLLBACK');
+        throw new TelegramAuthError(400, 'TELEGRAM_PHONE_MISMATCH', 'Номер не совпадает с номером из приложения');
+      }
+      const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+      await client.query(
+        `update telegram_auth_challenges set status = 'pending', otp_hash = $2,
+          expires_at = now() + ($3::text || ' seconds')::interval, delivery_status = 'pending', updated_at = now()
+          where challenge_hash = $1`, [challenge.challenge_hash, this.hashOtp(code), OTP_TTL_SECONDS],
+      );
+      await client.query('COMMIT');
+      return { ...challenge, challengeHash: challenge.challenge_hash, chatId: String(telegramChatId), code };
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
       throw this.dbError(error);
@@ -209,12 +248,20 @@ class TelegramAuthService {
     const fromId = message?.from?.id;
     const chatId = message?.chat?.id;
     const text = String(message?.text || '').trim();
+    const contactPhone = message?.contact?.user_id === undefined || String(message.contact.user_id) === String(fromId)
+      ? message?.contact?.phone_number
+      : null;
+    const submittedPhone = normalizePhone(contactPhone || text);
     if (fromId === undefined || chatId === undefined) return;
     if (/^\/help(?:@[^\s]+)?$/i.test(text)) {
-      await this.bot.sendMessage(chatId, 'Bradobrey помогает подтвердить номер телефона. Откройте ссылку из приложения и нажмите Start.');
+      await this.bot.sendMessage(chatId, 'Bradobrey помогает подтвердить номер телефона. Откройте ссылку из приложения и нажмите Start, затем отправьте номер телефона.');
       return;
     }
     const match = text.match(/^\/start(?:@[^\s]+)?(?:\s+([A-Za-z0-9_-]{20,128}))?$/i);
+    if (!match?.[1] && isValidE164(submittedPhone)) {
+      await this.handlePhoneMessage(update);
+      return;
+    }
     if (!match?.[1]) {
       await this.bot.sendMessage(chatId, 'Добро пожаловать в Bradobrey. Для подтверждения номера откройте ссылку из приложения.');
       return;
@@ -230,7 +277,34 @@ class TelegramAuthService {
       throw error;
     }
     if (linked.alreadyProcessed) return;
-    await this.sendOtp(linked, linked.code);
+    await this.bot.sendMessage(chatId, 'Введите номер телефона, который вы указали в приложении.');
+  }
+
+  async handlePhoneMessage(update) {
+    const message = update?.message;
+    const fromId = message?.from?.id;
+    const chatId = message?.chat?.id;
+    if (fromId === undefined || chatId === undefined) return;
+    const contactPhone = message?.contact?.user_id === undefined || String(message.contact.user_id) === String(fromId)
+      ? message?.contact?.phone_number
+      : null;
+    const phone = normalizePhone(contactPhone || message?.text);
+    if (!isValidE164(phone)) return;
+    let confirmed;
+    try {
+      confirmed = await this.confirmTelegramPhone({ telegramUserId: fromId, telegramChatId: chatId, phone });
+    } catch (error) {
+      if (error instanceof TelegramAuthError && error.code === 'TELEGRAM_PHONE_MISMATCH') {
+        await this.bot.sendMessage(chatId, 'Номер не совпадает с номером из приложения. Отправьте его ещё раз.');
+        return;
+      }
+      throw error;
+    }
+    if (!confirmed) {
+      await this.bot.sendMessage(chatId, 'Откройте ссылку из приложения Bradobrey и нажмите Start.');
+      return;
+    }
+    await this.sendOtp(confirmed, confirmed.code);
   }
 
   async reserveVerification(challengeHash, phone) {
@@ -238,7 +312,8 @@ class TelegramAuthService {
     try {
       await client.query('BEGIN');
       const result = await client.query(
-        `select challenge_hash, phone, otp_hash, telegram_user_id, telegram_chat_id, attempts, max_attempts
+        `select challenge_hash, phone, otp_hash, telegram_user_id, telegram_chat_id, attempts, max_attempts,
+                display_name, first_name, last_name, patronymic, language
            from telegram_auth_challenges where challenge_hash = $1 and ($2::text is null or phone = $2)
             and used_at is null and status = 'pending' and expires_at > now()
             and (locked_until is null or locked_until < now()) for update`, [challengeHash, phone || null],
@@ -264,11 +339,11 @@ class TelegramAuthService {
     await this.updateChallenge(challengeHash, { locked_until: null, ...(Number(attempts) >= Number(maxAttempts) ? { status: 'failed', used_at: new Date() } : {}) });
   }
 
-  async completeLogin({ challengeHash, phone, telegramUserId, telegramChatId, displayName, firstName, lastName, language }) {
+  async completeLogin({ challengeHash, phone, telegramUserId, telegramChatId, displayName, firstName, lastName, patronymic, language }) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const existingResult = await client.query(`select id, email, phone, display_name, first_name, last_name, language, is_active, telegram_user_id, telegram_chat_id from marketplace_clients where phone = $1 for update`, [phone]);
+      const existingResult = await client.query(`select id, email, phone, display_name, first_name, last_name, patronymic, language, is_active, telegram_user_id, telegram_chat_id from marketplace_clients where phone = $1 for update`, [phone]);
       const existing = existingResult.rows[0];
       if (existing?.is_active === false) { await client.query('ROLLBACK'); throw new TelegramAuthError(403, 'ACCOUNT_DISABLED', 'Account is disabled'); }
       if (existing && ((existing.telegram_user_id && String(existing.telegram_user_id) !== String(telegramUserId)) || (existing.telegram_chat_id && String(existing.telegram_chat_id) !== String(telegramChatId)))) {
@@ -280,8 +355,8 @@ class TelegramAuthService {
       const requestedName = cleanName(displayName) || [cleanName(firstName), cleanName(lastName)].filter(Boolean).join(' ') || existing?.display_name || 'Client';
       const safeLanguage = language && ['uz', 'ru', 'en'].includes(language) ? language : null;
       const accountResult = existing
-        ? await client.query(`update marketplace_clients set display_name = case when display_name is null or display_name = '' then $2 else display_name end, first_name = case when first_name is null or first_name = '' then nullif($3, '') else first_name end, last_name = case when last_name is null or last_name = '' then nullif($4, '') else last_name end, language = coalesce($5, language), telegram_user_id = $6, telegram_chat_id = $7, last_login_at = now() where id = $1 returning id, email, phone, display_name, language, is_active`, [existing.id, requestedName, cleanName(firstName), cleanName(lastName), safeLanguage, String(telegramUserId), String(telegramChatId)])
-        : await client.query(`insert into marketplace_clients (phone, display_name, first_name, last_name, language, is_active, telegram_user_id, telegram_chat_id, last_login_at) values ($1, $2, nullif($3, ''), nullif($4, ''), coalesce($5, 'ru'), true, $6, $7, now()) returning id, email, phone, display_name, language, is_active`, [phone, requestedName, cleanName(firstName), cleanName(lastName), safeLanguage, String(telegramUserId), String(telegramChatId)]);
+        ? await client.query(`update marketplace_clients set display_name = case when display_name is null or display_name = '' then $2 else display_name end, first_name = case when first_name is null or first_name = '' then nullif($3, '') else first_name end, last_name = case when last_name is null or last_name = '' then nullif($4, '') else last_name end, patronymic = case when patronymic is null or patronymic = '' then nullif($5, '') else patronymic end, language = coalesce($6, language), telegram_user_id = $7, telegram_chat_id = $8, last_login_at = now() where id = $1 returning id, email, phone, display_name, first_name, last_name, patronymic, language, is_active`, [existing.id, requestedName, cleanName(firstName), cleanName(lastName), cleanName(patronymic), safeLanguage, String(telegramUserId), String(telegramChatId)])
+        : await client.query(`insert into marketplace_clients (phone, display_name, first_name, last_name, patronymic, language, is_active, telegram_user_id, telegram_chat_id, last_login_at) values ($1, $2, nullif($3, ''), nullif($4, ''), nullif($5, ''), coalesce($6, 'ru'), true, $7, $8, now()) returning id, email, phone, display_name, first_name, last_name, patronymic, language, is_active`, [phone, requestedName, cleanName(firstName), cleanName(lastName), cleanName(patronymic), safeLanguage, String(telegramUserId), String(telegramChatId)]);
       const account = accountResult.rows[0];
       const used = await client.query(`update telegram_auth_challenges set status = 'verified', used_at = now(), locked_until = null, updated_at = now() where challenge_hash = $1 and status = 'pending' and used_at is null returning challenge_hash`, [challengeHash]);
       if (!used.rows[0]) { await client.query('ROLLBACK'); throw new TelegramAuthError(410, 'VERIFICATION_SESSION_EXPIRED', 'Verification session expired'); }
@@ -293,7 +368,7 @@ class TelegramAuthService {
     } finally { client.release(); }
   }
 
-  async verifyCode({ challengeId: challengeIdInput, phone: phoneInput, code: codeInput, displayName, firstName, lastName, language }) {
+  async verifyCode({ challengeId: challengeIdInput, phone: phoneInput, code: codeInput, displayName, firstName, lastName, patronymic, language }) {
     const challengeId = String(challengeIdInput || '').trim();
     const phone = phoneInput ? normalizePhone(phoneInput) : null;
     const code = normalizeCode(codeInput);
@@ -318,11 +393,23 @@ class TelegramAuthService {
       await this.markInvalidCode(reserved.challenge_hash, Number(reserved.attempts) + 1, reserved.max_attempts);
       throw new TelegramAuthError(400, 'INVALID_CODE', 'Invalid verification code');
     }
-    const { account, isNew } = await this.completeLogin({ challengeHash: reserved.challenge_hash, phone: reserved.phone, telegramUserId: reserved.telegram_user_id, telegramChatId: reserved.telegram_chat_id, displayName, firstName, lastName, language: normalizedLanguage });
+    const { account, isNew } = await this.completeLogin({
+      challengeHash: reserved.challenge_hash,
+      phone: reserved.phone,
+      telegramUserId: reserved.telegram_user_id,
+      telegramChatId: reserved.telegram_chat_id,
+      displayName: reserved.display_name || displayName,
+      firstName: reserved.first_name || firstName,
+      lastName: reserved.last_name || lastName,
+      patronymic: reserved.patronymic || patronymic,
+      language: normalizedLanguage || reserved.language,
+    });
+    const token = jwt.sign({ sub: account.id, email: account.email || null, phone: account.phone, role: MARKETPLACE_ROLE }, this.getJwtSecret(), { expiresIn: this.env.JWT_EXPIRES_IN || '12h' });
     return {
-      token: jwt.sign({ sub: account.id, email: account.email || null, phone: account.phone, role: MARKETPLACE_ROLE }, this.getJwtSecret(), { expiresIn: this.env.JWT_EXPIRES_IN || '12h' }),
+      token,
+      accessToken: token,
       verified: true, is_new_user: isNew,
-      client: { id: account.id, phone: account.phone, display_name: account.display_name, language: account.language, is_active: account.is_active },
+      client: { id: account.id, phone: account.phone, display_name: account.display_name, first_name: account.first_name, last_name: account.last_name, patronymic: account.patronymic, language: account.language, is_active: account.is_active },
     };
   }
 
