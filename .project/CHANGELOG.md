@@ -1,10 +1,22 @@
 # Changelog
 
+## 2026-10-07
+
+- Replaced paid Telegram Gateway delivery with the ordinary Telegram Bot API.
+- Added five-minute deep-link onboarding, secret-protected webhook handling,
+  unique Telegram bindings, six-digit HMAC-hashed OTPs, expiry, five attempts,
+  60-second cooldown, and five-per-hour phone rate limiting.
+- Wired `marketplace_telegram_auth.sql` into `db:marketplace:apply`.
+
 ## 2026-10-06
 
-- Removed the universal marketplace phone OTP fallback and disabled legacy
-  `/phone/*` OTP handlers. Phone authentication now requires Telegram OTP via
-  `/telegram/request-code` and `/telegram/verify-code`.
+- Replaced the marketplace phone authorization implementation with the official
+  Telegram Gateway API. Added `/api/auth/telegram/send-code` and
+  `/api/auth/telegram/verify-code`, persisted opaque Gateway challenges with
+  cooldown/expiry/attempt limits, and kept the previous request-code route as
+  a compatibility alias.
+- Removed the MTProto/GramJS dependency and backend `api_id/api_hash` session
+  configuration from the phone verification flow.
 
 ## 2026-10-06
 

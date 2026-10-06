@@ -95,8 +95,10 @@ CONFIRM_PRODUCTION=YES RESTART_PM2=1 PM2_APP_NAME=bradobrey bash ./scripts/apply
 Marketplace TЗ compliance migration:
 
 - Apply `db/postgres/marketplace_tz_compliance.sql` after the existing marketplace SQL files.
-- Telegram phone auth: `POST /api/marketplace/auth/telegram/request-code`,
-  `POST /api/marketplace/auth/telegram/verify-code`.
+- Telegram Bot phone auth: `POST /api/auth/telegram/send-code` (and `/link`) plus
+  `POST /api/auth/telegram/verify-code` and `/webhook` (marketplace-prefixed
+  aliases are also supported). Unlinked users receive a short-lived bot deep
+  link; after `/start`, six-digit codes are delivered by the own Bot API.
 - Legacy `/api/marketplace/auth/phone/*` endpoints return
   `TELEGRAM_AUTH_REQUIRED` and never issue a fallback OTP.
 - Compliance endpoints: `GET /api/marketplace/compliance/active`, `POST /api/marketplace/compliance/:id/cancel`, `GET /api/marketplace/compliance/loyalty`, `GET /api/marketplace/compliance/referral`, `POST /api/marketplace/compliance/reviews`.

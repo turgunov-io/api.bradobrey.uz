@@ -9,8 +9,8 @@
 - Group booking реализован транзакционно; single booking на 2026-10-03 неатомарен.
 - Payment completion/ledger и cashback settlement semantics также неатомарны и не соответствуют финансовой модели ТЗ; не доверять существующим отметкам `DONE` без DB integration evidence.
 - Marketplace migration хранится в `db/postgres/marketplace_tz_compliance.sql`; фактическая применённость в runtime DB не подтверждена.
-- Универсальный OTP `0000` удалён из backend; phone auth должен проходить через
-  Telegram MTProto OTP.
+- Универсальный OTP `0000` удалён из backend; phone auth проходит через
+  собственного Telegram Bot с одноразовым deep-link onboarding.
 - `.env` сейчас игнорируется, но ранее был в Git history. Не хранить секреты или их значения в документации.
 - `firebase-service-account-new.json` локально игнорируется и на момент аудита не отслеживался Git.
 - Существующий корневой `MARKETPLACE_TZ_AUDIT.md` переоценивает atomicity single booking/cashback и push delivery; актуальный аудит находится в `.project/API_TZ_COMPLIANCE_AUDIT.md`.
@@ -41,11 +41,10 @@
 - `npm run test:integration`: test skipped без `MARKETPLACE_INTEGRATION=1`.
 - `node --check`: 106 JS-файлов pass.
 - `npm run build`: no-op, не является quality gate.
-- `npm audit --omit=dev`: baseline was 25 vulnerabilities; after adding GramJS,
-  the current local install reports 27 vulnerabilities (2 critical, 17 high,
-  7 moderate, 1 low). This remains an existing dependency-release risk and was
-  not auto-fixed because the suggested forced upgrades include breaking PM2/
-  Nodemailer changes.
+- `npm audit --omit=dev`: the current local install reports 27 vulnerabilities
+  (2 critical, 17 high, 7 moderate, 1 low). This remains an existing
+  dependency-release risk and was not auto-fixed because the suggested forced
+  upgrades include breaking PM2/Nodemailer changes.
 - App load дошёл до DB и получил authentication failure; живое поведение схемы не проверено.
 
 ## Проверенные команды (2026-10-04)
@@ -53,18 +52,29 @@
 - `npm test`: 70/70 pass, включая employee-quality boundary/ranking/permission/migration tests, authoritative session permissions, one-time permission provisioning, persisted-notification snapshot mapping, generic terminal PATCH integrity и dedicated completion CAS/terminal tests.
 - `node --check`: employee-quality, statistics/history integration files pass.
 - Миграция подготовлена и включена в `scripts/apply-schema.sh`, но не применялась: безопасная staging PostgreSQL не предоставлена.
-- Telegram marketplace auth uses GramJS endpoints under `/api/marketplace/auth/telegram/*`.
-  `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` and the 32-byte
-  `TELEGRAM_SESSION_ENCRYPTION_KEY` are backend-only; challenges and encrypted
-  StringSessions require the additive `marketplace_telegram_auth.sql` migration.
-  Runtime verification is not production-ready until that migration is applied
-  in staging and real Telegram credentials are configured outside Git.
-- Audit 2026-10-06: the backend working `.env` has none of
-  `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, or
-  `TELEGRAM_SESSION_ENCRYPTION_KEY`; `TelegramAuthService.getConfig()` therefore
-  fails closed with `TELEGRAM_NOT_CONFIGURED` before contacting Telegram.
+- Telegram marketplace auth uses the ordinary Bot API under
+  `/api/auth/telegram/*` (with marketplace-prefixed aliases). Linking uses a
+  five-minute opaque deep-link token; OTPs are six digits, HMAC-hashed, expire
+  after five minutes, and allow five attempts. Telegram user/chat bindings are
+  unique per marketplace client. Runtime verification requires the additive
+  migration and Bot credentials outside Git.
+- Audit 2026-10-07: the phone flow contains no Gateway/MTProto calls; webhook
+  requests require `TELEGRAM_WEBHOOK_SECRET`, and duplicate `/start` delivery
+  is idempotent. Local PostgreSQL connectivity still needs staging verification.
 - Audit 2026-10-06: legacy backend `/api/marketplace/auth/phone/*` endpoints no
   longer issue or verify OTP and fail closed with `TELEGRAM_AUTH_REQUIRED`;
-  `/api/marketplace/auth/telegram/*` is the only phone OTP path.
+  Bot `/api/auth/telegram/*` is the only phone OTP path.
 - Audit 2026-10-06: local PostgreSQL connectivity could not verify the Telegram
   auth tables because the configured `bradobrey_user` password was rejected.
+
+## Проверенные команды (2026-10-07)
+
+- `npm test`: 83/83 pass, including Bot onboarding, hash-only OTP, webhook
+  idempotency, verification reuse protection, and Bot/Gateway contract checks.
+- `node --check`: touched auth, Bot service, router, app, and migration runner
+  files pass.
+- `npm run build`: pass; configured project build is a no-op.
+- `npm run test:integration`: skipped because `MARKETPLACE_INTEGRATION=1` and
+  valid staging PostgreSQL credentials were not provided.
+- `npm audit --omit=dev --audit-level=high`: existing install reports 27
+  vulnerabilities; no forced dependency upgrades were applied.

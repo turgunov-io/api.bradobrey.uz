@@ -6,6 +6,7 @@ const { pool } = require('../src/config/postgres');
 
 const migrationPaths = [
   path.resolve(__dirname, '..', 'db', 'postgres', 'marketplace_tz_compliance.sql'),
+  path.resolve(__dirname, '..', 'db', 'postgres', 'marketplace_telegram_auth.sql'),
   path.resolve(__dirname, '..', 'db', 'postgres', 'loyalty_points_reversal.sql'),
 ];
 const lockKey = 'bradobrey-marketplace-tz-compliance-v1';

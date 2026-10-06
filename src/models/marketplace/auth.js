@@ -21,7 +21,7 @@ const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const generateOtpCode = () => crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
 
 // Legacy email verification uses a fresh random code. Phone authentication is
-// handled by Telegram MTProto and must never have a fixed-code bypass.
+// handled by the Telegram Bot flow and must never have a fixed-code bypass.
 const generateMarketplaceOtpCode = generateOtpCode;
 
 const normalizeOtpCode = (codeInput) => {

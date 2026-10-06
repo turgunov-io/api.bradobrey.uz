@@ -71,29 +71,54 @@ Requires the assigned barber/manager JWT. `no_show=true` permits only `waiting`,
 
 Requires the assigned barber/manager JWT. Only `called` or `in_progress` entries may transition to `not_in_time`. Repeating an already completed `not_in_time` request returns `200` with `idempotent: true`; conflicting states return `409`. The update is guarded against concurrent status changes and emits `queue_not_in_time` through `queue:update`.
 
-## Telegram marketplace authorization
+## Telegram Bot phone authorization
 
-### `POST /api/marketplace/auth/telegram/request-code`
+Canonical routes:
 
-Starts Telegram MTProto authorization for an E.164 phone number. The backend
-uses GramJS and returns a short-lived opaque `challenge_id` plus
-`code_via_app`. The Telegram API credentials and the pending session remain on
-the backend.
+### `POST /api/auth/telegram/send-code`
 
-Request: `{ "phone": "+998901234567" }`
+Also available under `/api/marketplace/auth/telegram/send-code`.
 
-### `POST /api/marketplace/auth/telegram/verify-code`
+Request: `{ "phone": "+998901234567" }` (E.164; spaces, brackets and hyphens are normalized).
 
-Completes the challenge with the Telegram code. If the account has Telegram
-2FA, the first attempt returns HTTP `409` with
-`code: TELEGRAM_2FA_REQUIRED`; retry with the same challenge and a `password`.
-On success the response matches marketplace phone auth (`token` and `client`).
+If the phone is not linked, response is `{ "requiresTelegramLink": true,
+"linkToken": "...", "botUrl": "https://t.me/<bot>?start=...", "expiresIn": 300 }`.
+The mobile app opens `botUrl` and the Bot API webhook completes the binding.
+If already linked, the backend generates a six-digit OTP and sends it through
+the ordinary Bot API. OTP hashes only are persisted.
 
-Request: `{ "challenge_id": "...", "code": "12345", "password": "..." }`
+`POST /api/auth/telegram/link` is an alias of `send-code`.
 
-Pending challenges expire and are attempt-limited. Telegram StringSessions are
-encrypted at rest using `TELEGRAM_SESSION_ENCRYPTION_KEY`; plaintext sessions,
-API hashes, and verification codes must never be logged or committed.
+### `POST /api/auth/telegram/verify-code`
+
+Also available under `/api/marketplace/auth/telegram/verify-code`.
+
+Request: `{ "challenge_id": "...", "phone": "+998901234567", "code": "123456", "first_name": "...", "last_name": "...", "language": "ru" }`.
+`challenge_id` may be omitted when `phone` is supplied; the latest active
+challenge is used. On success the endpoint marks the phone verified, persists
+the Telegram binding, creates or logs in the marketplace client, and returns
+`{ "token": "...", "verified": true, "is_new_user": true|false, "client": {...} }`.
+
+Errors include `INVALID_PHONE` (400), `TELEGRAM_RESEND_TOO_SOON` (429),
+`TELEGRAM_HOURLY_LIMIT` (429), `INVALID_CODE` (400),
+`LINK_TOKEN_EXPIRED`/`VERIFICATION_SESSION_EXPIRED` (410),
+`TOO_MANY_CODE_ATTEMPTS` (429), and `TELEGRAM_CODE_SEND_FAILED` (502).
+Link tokens and challenge identifiers are opaque hashes in PostgreSQL; links
+and OTPs expire after five minutes, new codes are limited to one per minute
+and five per hour per phone, verification has at most five attempts, and
+plaintext OTPs are never stored.
+
+### `POST /api/auth/telegram/webhook`
+
+Also available under `/api/marketplace/auth/telegram/webhook` and
+`/api/integrations/telegram/webhook`. Telegram sends
+`/start <linkToken>` and `/help` updates here. Requests require the
+`X-Telegram-Bot-Api-Secret-Token` header matching `TELEGRAM_WEBHOOK_SECRET`.
+Duplicate `/start` updates are idempotent. The endpoint always acknowledges a
+validly authenticated Telegram update with HTTP 200.
+
+The old `/api/marketplace/auth/telegram/request-code` route remains as an alias
+of `send-code` for compatibility. Legacy `/phone/*` routes remain disabled.
 
 The legacy `POST /api/marketplace/auth/phone/request-otp` and
 `POST /api/marketplace/auth/phone/verify` endpoints return HTTP 410 with

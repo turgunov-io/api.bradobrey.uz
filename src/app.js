@@ -26,6 +26,7 @@ const penalties = require('./routers/penalties');
 const notifications = require('./routers/notifications');
 const cashbackSettlements = require('./routers/cashbackSettlements');
 const auth = require('./routers/auth');
+const telegramAuth = require('./routers/telegramAuth');
 const { ensureNotificationsTable } = require('./models/notifications');
 const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
 const { securityHeaders } = require('./middleware/securityHeaders');
@@ -80,6 +81,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/barbers', barbers);
 app.use('/api/auth', auth);
+app.post('/api/integrations/telegram/webhook', telegramAuth.webhook);
 app.use('/api/branches', branches);
 app.use('/api/kiosk', kiosk);
 app.use('/api/monitor', monitor);

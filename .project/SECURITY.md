@@ -134,26 +134,28 @@ Phone authentication must use the Telegram challenge/verify flow.
 
 ## Telegram authorization
 
-- `TELEGRAM_API_HASH` and `TELEGRAM_SESSION_ENCRYPTION_KEY` are backend-only
-  secrets; Flutter receives neither value.
-- Telegram challenge identifiers are opaque, hashed before storage, expire, and
-  have bounded verification attempts.
-- Telegram phone-code hashes and StringSessions are encrypted with AES-256-GCM
-  before database storage; they are excluded from logs and API responses.
-- Production security retest remains required after applying the migration and
-  configuring credentials in staging. No live Telegram account was used locally.
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are backend-only; the
+  mobile app receives neither secret.
+- Deep-link tokens and challenge IDs are random, one-time, short-lived values;
+  only their hashes are stored. OTP plaintext is never stored, returned,
+  logged, or included in Telegram API errors.
+- OTPs use `crypto.randomInt()` and HMAC-SHA256 with `OTP_HASH_SECRET` (or the
+  existing JWT secret fallback), expire in five minutes, and allow five tries.
+- Webhook requests require Telegram's secret-token header. Unique partial
+  indexes prevent one Telegram user/chat from binding multiple marketplace
+  accounts.
 
-### SEC-007 — Telegram runtime configuration is absent
+### SEC-007 — Telegram Bot runtime configuration is absent
 
-- Severity: Critical for Telegram login availability.
-- Evidence: the backend working `.env` is missing `TELEGRAM_API_ID`,
-  `TELEGRAM_API_HASH`, and `TELEGRAM_SESSION_ENCRYPTION_KEY`; a direct service
-  config check returns `TELEGRAM_NOT_CONFIGURED` / HTTP 503 semantics.
-- Affected component: `src/services/telegramAuth.js` and deployment environment.
-- Recommended fix: provision the three values in the target runtime secret
-  store, restart the API, apply `marketplace_telegram_auth.sql`, and run a
-  controlled Telegram test account flow.
-- Status: Open; production secret store and database schema were not verified.
+- Severity: High for Telegram login availability.
+- Evidence: Bot API delivery fails closed with generic `TELEGRAM_BOT_NOT_CONFIGURED`
+  or `TELEGRAM_CODE_SEND_FAILED` semantics when configuration is absent.
+- Affected component: `src/services/telegram-bot.service.js`,
+  `src/services/telegramAuth.js`, and deployment environment.
+- Recommended fix: provision Bot credentials in the target runtime secret store,
+  apply the migration, configure the webhook, and run a controlled test account.
+- Status: Open; production secret store, database schema, and live webhook were
+  not verified locally.
 
 ### SEC-008 — Default phone flow bypasses Telegram
 
@@ -163,7 +165,7 @@ Phone authentication must use the Telegram challenge/verify flow.
   with `TELEGRAM_AUTH_REQUIRED`; they no longer create or verify an OTP.
 - Affected component: marketplace client authentication UX and legacy phone
   auth endpoints.
-- Recommended fix: provision the runtime secrets, apply the Telegram migration,
-  restart the API, and run a controlled Telegram challenge/verify test.
+- Recommended fix: provision Bot credentials, apply the Telegram migration,
+  restart the API, and run a controlled Telegram link/verify test.
 - Status: Backend fixed; Telegram secrets, database migration, restart, and
   end-to-end test remain open deployment steps.
