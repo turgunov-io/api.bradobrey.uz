@@ -31,5 +31,5 @@ test('Telegram Bot migration has binding, link-token and hash-only OTP fields', 
   assert.match(migration, /otp_hash text/);
   assert.match(migration, /max_attempts integer/);
   assert.match(migration, /expires_at timestamptz/);
-  assert.doesNotMatch(migration, /otp_code text|code text/);
+  assert.doesNotMatch(migration, /\botp_code\s+text\b/);
 });

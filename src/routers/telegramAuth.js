@@ -21,12 +21,12 @@ const handleError = (res, error) => {
 const sendCode = async (req, res) => {
   try {
     return res.json(await TelegramAuth.sendCode({
-      phone: req.body?.phone,
       displayName: req.body?.display_name,
       firstName: req.body?.first_name,
       lastName: req.body?.last_name,
       patronymic: req.body?.patronymic,
       language: req.body?.language,
+      purpose: req.body?.purpose || req.body?.auth_mode,
     }));
   }
   catch (error) { return handleError(res, error); }
