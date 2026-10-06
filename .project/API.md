@@ -70,3 +70,27 @@ Requires the assigned barber/manager JWT. `no_show=true` permits only `waiting`,
 ### `PATCH /api/barbers/queue/:id/not-in-time`
 
 Requires the assigned barber/manager JWT. Only `called` or `in_progress` entries may transition to `not_in_time`. Repeating an already completed `not_in_time` request returns `200` with `idempotent: true`; conflicting states return `409`. The update is guarded against concurrent status changes and emits `queue_not_in_time` through `queue:update`.
+
+## Telegram marketplace authorization
+
+### `POST /api/marketplace/auth/telegram/request-code`
+
+Starts Telegram MTProto authorization for an E.164 phone number. The backend
+uses GramJS and returns a short-lived opaque `challenge_id` plus
+`code_via_app`. The Telegram API credentials and the pending session remain on
+the backend.
+
+Request: `{ "phone": "+998901234567" }`
+
+### `POST /api/marketplace/auth/telegram/verify-code`
+
+Completes the challenge with the Telegram code. If the account has Telegram
+2FA, the first attempt returns HTTP `409` with
+`code: TELEGRAM_2FA_REQUIRED`; retry with the same challenge and a `password`.
+On success the response matches marketplace phone auth (`token` and `client`).
+
+Request: `{ "challenge_id": "...", "code": "12345", "password": "..." }`
+
+Pending challenges expire and are attempt-limited. Telegram StringSessions are
+encrypted at rest using `TELEGRAM_SESSION_ENCRYPTION_KEY`; plaintext sessions,
+API hashes, and verification codes must never be logged or committed.

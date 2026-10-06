@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-06
+
+- Added Telegram MTProto marketplace authorization by phone and Telegram code,
+  including optional 2FA password handling, one-time expiring challenges,
+  encrypted persistent StringSessions, JWT issuance, and contract tests.
+- Added the additive `marketplace_telegram_auth.sql` migration and wired it into
+  `scripts/apply-schema.sh`. Telegram credentials belong only in backend `.env`:
+  `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and
+  `TELEGRAM_SESSION_ENCRYPTION_KEY`.
+
 ## 2026-10-05
 
 - Fixed Statistics/History authorization for `admin` and `admin_network` accounts with no `user_permissions` rows: they now receive the full admin permission preset while non-empty explicit permission rows remain authoritative.

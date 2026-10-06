@@ -48,3 +48,9 @@
 - `npm test`: 70/70 pass, включая employee-quality boundary/ranking/permission/migration tests, authoritative session permissions, one-time permission provisioning, persisted-notification snapshot mapping, generic terminal PATCH integrity и dedicated completion CAS/terminal tests.
 - `node --check`: employee-quality, statistics/history integration files pass.
 - Миграция подготовлена и включена в `scripts/apply-schema.sh`, но не применялась: безопасная staging PostgreSQL не предоставлена.
+- Telegram marketplace auth uses GramJS endpoints under `/api/marketplace/auth/telegram/*`.
+  `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` and the 32-byte
+  `TELEGRAM_SESSION_ENCRYPTION_KEY` are backend-only; challenges and encrypted
+  StringSessions require the additive `marketplace_telegram_auth.sql` migration.
+  Runtime verification is not production-ready until that migration is applied
+  in staging and real Telegram credentials are configured outside Git.

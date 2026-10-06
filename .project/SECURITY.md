@@ -129,3 +129,14 @@
 ## Границы проверки
 
 Проведён статический security review и безопасные локальные проверки. Live API attack, production DB и destructive pentest не выполнялись. После исправления P0 требуется security regression loop: fix → review → controlled pentest → retest → resolution.
+
+## Telegram authorization
+
+- `TELEGRAM_API_HASH` and `TELEGRAM_SESSION_ENCRYPTION_KEY` are backend-only
+  secrets; Flutter receives neither value.
+- Telegram challenge identifiers are opaque, hashed before storage, expire, and
+  have bounded verification attempts.
+- Telegram phone-code hashes and StringSessions are encrypted with AES-256-GCM
+  before database storage; they are excluded from logs and API responses.
+- Production security retest remains required after applying the migration and
+  configuring credentials in staging. No live Telegram account was used locally.

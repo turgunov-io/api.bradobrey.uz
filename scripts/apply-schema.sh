@@ -60,6 +60,7 @@ FILES=(
   marketplace_catalog.sql
   marketplace_clients.sql
   otp_codes.sql
+  marketplace_telegram_auth.sql
   banners.sql
   marketplace_tz_compliance.sql
   loyalty_points_reversal.sql
