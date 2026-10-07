@@ -59,14 +59,12 @@ const hasWebhookSecret = (req) => {
 
 const webhook = async (req, res) => {
   if (!hasWebhookSecret(req)) return res.status(403).json({ error: 'Forbidden' });
-  try {
-    await TelegramAuth.handleWebhook(req.body);
-  } catch (error) {
-    // Telegram retries failed webhooks. Keep the endpoint quick and do not expose
-    // linking/OTP or upstream details to Telegram.
+  // Acknowledge Telegram before waiting on database/Bot API calls. This prevents
+  // upstream timeouts and duplicate retries when Telegram is slow.
+  res.sendStatus(200);
+  Promise.resolve(TelegramAuth.handleWebhook(req.body)).catch((error) => {
     console.error('[telegram-bot-webhook] update failed', error?.code || 'UNKNOWN');
-  }
-  return res.sendStatus(200);
+  });
 };
 
 router.post('/send-code', sendLimiter, sendCode);
