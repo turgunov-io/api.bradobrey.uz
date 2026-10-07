@@ -394,7 +394,7 @@ class TelegramAuthService {
     } finally { client.release(); }
   }
 
-  async verifyCode({ challengeId: challengeIdInput, code: codeInput, displayName, firstName, lastName, patronymic, language }) {
+  async verifyCode({ challengeId: challengeIdInput, phone: phoneInput, code: codeInput, displayName, firstName, lastName, patronymic, language }) {
     const challengeId = String(challengeIdInput || '').trim();
     const code = normalizeCode(codeInput);
     const normalizedLanguage = language === undefined || language === null || language === '' ? null : String(language).trim().toLowerCase();
@@ -405,7 +405,8 @@ class TelegramAuthService {
       if (!/^[A-Za-z0-9_-]{43}$/.test(challengeId)) throw new TelegramAuthError(400, 'INVALID_CHALLENGE_ID', 'challenge_id is invalid');
       challengeHash = hashToken(challengeId);
     } else {
-      if (!phone) throw new TelegramAuthError(400, 'INVALID_CHALLENGE_ID', 'challenge_id or phone is required');
+      const phone = normalizePhone(phoneInput);
+      if (!isValidE164(phone)) throw new TelegramAuthError(400, 'INVALID_CHALLENGE_ID', 'challenge_id or phone is required');
       const latest = await this.pool.query(
         `select challenge_hash from telegram_auth_challenges where phone = $1 and status = 'pending' and used_at is null and expires_at > now() order by created_at desc limit 1`, [phone],
       );
