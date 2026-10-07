@@ -25,7 +25,9 @@ class TelegramAuthError extends Error {
 }
 
 const normalizePhone = (phoneInput) => {
-  const phone = String(phoneInput || '').trim().replace(/[\s()-]/g, '');
+  let phone = String(phoneInput || '').trim().replace(/[\s()-]/g, '');
+  if (/^00\d{7,15}$/.test(phone)) phone = `+${phone.slice(2)}`;
+  else if (/^\d{7,15}$/.test(phone)) phone = `+${phone}`;
   return phone || null;
 };
 const isValidE164 = (phone) => /^\+\d{7,15}$/.test(phone || '');

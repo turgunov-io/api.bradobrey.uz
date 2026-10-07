@@ -78,7 +78,7 @@ test('start asks for phone, then sends a six-digit hash-only OTP with copy butto
   await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, text: `/start ${link.linkToken}` } });
   assert.equal(pool.challenge.status, 'awaiting_contact');
   assert.match(bot.messages[0].text, /поделиться номером телефона/);
-  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, contact: { user_id: 42, phone_number: '+998901234567' } } });
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, contact: { user_id: 42, phone_number: '998901234567' } } });
   assert.equal(pool.challenge.status, 'pending');
   const code = bot.messages[1].text.match(/\b(\d{6})\b/)[1];
   assert.match(code, /^\d{6}$/);
@@ -121,6 +121,8 @@ test('second request is progressively rate limited for 60 seconds', async () => 
 });
 
 test('validation helpers enforce E.164 and exactly six OTP digits', () => {
+  assert.equal(_internals.normalizePhone('998 90 123 45 67'), '+998901234567');
+  assert.equal(_internals.normalizePhone('00998901234567'), '+998901234567');
   assert.equal(_internals.isValidE164('+998901234567'), true);
   assert.equal(_internals.isValidCode('123456'), true);
   assert.equal(_internals.isValidCode('12345'), false);
