@@ -35,7 +35,7 @@ class FakePool {
     if (q.startsWith('select challenge_hash, phone, status')) {
       return this.challenge && !this.challenge.usedAt && this.challenge.linkHash === params[0] ? { rows: [{ challenge_hash: this.challenge.challengeHash, phone: this.challenge.phone, status: this.challenge.status, telegram_user_id: this.challenge.telegramUserId, telegram_chat_id: this.challenge.telegramChatId }] } : { rows: [] };
     }
-    if (q.startsWith('select id, phone from marketplace_clients') || q.startsWith('select id, phone, is_active from marketplace_clients')) return { rows: [] };
+    if (q.startsWith('select id, phone from marketplace_clients') || q.startsWith('select id, phone, is_active from marketplace_clients')) return { rows: this.account ? [this.account] : [] };
     if (q.startsWith('select phone from telegram_auth_challenges')) return { rows: [] };
     if (q.startsWith('select challenge_hash, phone, display_name')) {
       const usable = this.challenge && !this.challenge.usedAt && this.challenge.status === 'awaiting_contact' && String(this.challenge.telegramUserId) === String(params[0]) && String(this.challenge.telegramChatId) === String(params[1]);
@@ -95,6 +95,17 @@ test('wrong Telegram phone does not generate an OTP', async () => {
   assert.equal(pool.challenge.status, 'awaiting_contact');
   assert.equal(pool.challenge.otpHash, null);
   assert.match(bot.messages.at(-1).text, /чужой контакт/);
+});
+
+test('existing Telegram binding can start a new login session', async () => {
+  const pool = new FakePool({ id: 'client-1', phone: '+998901234567', telegram_user_id: '42', telegram_chat_id: '84', is_active: true });
+  const bot = new FakeBot(); const service = makeService(pool, bot);
+  const link = await service.sendCode({});
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, text: `/start ${link.linkToken}` } });
+  assert.equal(pool.challenge.status, 'awaiting_contact');
+  assert.doesNotMatch(bot.messages.at(-1).text, /Ссылка недействительна/);
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, contact: { user_id: 42, phone_number: '998901234567' } } });
+  assert.equal(pool.challenge.status, 'pending');
 });
 
 test('wrong OTP increments attempts and valid OTP completes login once', async () => {

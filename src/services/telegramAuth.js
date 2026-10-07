@@ -165,7 +165,7 @@ class TelegramAuthService {
         throw new TelegramAuthError(409, 'LINK_TOKEN_USED', 'Telegram link has already been used');
       }
       const account = await client.query(`select id, phone from marketplace_clients where telegram_user_id = $1 or telegram_chat_id = $2 for update`, [String(telegramUserId), String(telegramChatId)]);
-      if (account.rows.find((row) => row.phone !== challenge.phone)) {
+      if (account.rows.find((row) => challenge.phone && row.phone && row.phone !== challenge.phone)) {
         await client.query('ROLLBACK');
         throw new TelegramAuthError(409, 'TELEGRAM_BINDING_CONFLICT', 'This Telegram account is already linked');
       }
