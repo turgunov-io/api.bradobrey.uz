@@ -25,6 +25,7 @@ const sendCode = async (req, res) => {
       firstName: req.body?.first_name,
       lastName: req.body?.last_name,
       patronymic: req.body?.patronymic,
+      referralCode: req.body?.referral_code || req.body?.referralCode,
       language: req.body?.language,
       purpose: req.body?.purpose || req.body?.auth_mode,
     }));

@@ -79,7 +79,10 @@ Canonical routes:
 
 Also available under `/api/marketplace/auth/telegram/send-code`.
 
-Request: `{ "phone": "+998901234567" }` (E.164; spaces, brackets and hyphens are normalized).
+Request: `{ "first_name": "...", "last_name": "...", "referral_code": "..." }`.
+The phone number is intentionally not accepted from the mobile client. It is
+obtained only from the Telegram `message.contact.phone_number` update after the
+user opens the deep link and shares their own contact.
 
 If the phone is not linked, response is `{ "requiresTelegramLink": true,
 "linkToken": "...", "botUrl": "https://t.me/<bot>?start=...", "expiresIn": 300 }`.
@@ -93,9 +96,9 @@ the ordinary Bot API. OTP hashes only are persisted.
 
 Also available under `/api/marketplace/auth/telegram/verify-code`.
 
-Request: `{ "challenge_id": "...", "phone": "+998901234567", "code": "123456", "first_name": "...", "last_name": "...", "language": "ru" }`.
-`challenge_id` may be omitted when `phone` is supplied; the latest active
-challenge is used. On success the endpoint marks the phone verified, persists
+Request: `{ "challenge_id": "...", "code": "123456", "language": "ru" }`.
+The legacy `phone` lookup remains only as a compatibility alias; it is not used
+by the mobile flow. On success the endpoint marks the Telegram-provided phone verified, persists
 the Telegram binding, creates or logs in the marketplace client, and returns
 `{ "token": "...", "verified": true, "is_new_user": true|false, "client": {...} }`.
 
