@@ -14,6 +14,8 @@ test('Telegram phone auth uses Bot API and keeps Gateway/MTProto out of the OTP 
   assert.match(router, /router\.post\('\/verify-code'/);
   assert.match(router, /router\.post\('\/webhook'/);
   assert.match(bot, /api\.telegram\.org\/bot/);
+  assert.match(bot, /editMessageText/);
+  assert.match(service, /scheduleOtpCountdown/);
   assert.match(service, /randomInt\(0, 1_000_000\)/);
   assert.match(service, /createHmac\('sha256'/);
   assert.doesNotMatch(service, /sendVerificationMessage|checkVerificationStatus|TelegramClient|StringSession|auth\.SignIn|auth\.sendCode|TELEGRAM_GATEWAY/);

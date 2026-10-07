@@ -47,6 +47,11 @@ class TelegramBotService {
     return this.request('sendMessage', { chat_id: String(chatId), text, ...options });
   }
 
+  async editMessageText(chatId, messageId, text, options = {}) {
+    if (!chatId || !messageId || !text) throw new TelegramBotError('INVALID_MESSAGE', 400);
+    return this.request('editMessageText', { chat_id: String(chatId), message_id: messageId, text, ...options });
+  }
+
   async setWebhook({ url, secretToken, allowedUpdates = ['message'] }) {
     if (!url || !secretToken) throw new TelegramBotError('WEBHOOK_NOT_CONFIGURED', 503);
     return this.request('setWebhook', { url, secret_token: secretToken, allowed_updates: allowedUpdates });

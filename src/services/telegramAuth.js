@@ -119,14 +119,37 @@ class TelegramAuthService {
 
   async sendOtp(challenge, code) {
     try {
-      await this.bot.sendMessage(challenge.chatId, `Ваш код для входа в Bradobrey: ${code}\nКод действует 60 секунд.`, {
+      const sent = await this.bot.sendMessage(challenge.chatId, `Ваш код для входа в Bradobrey: ${code}\nКод действует ещё 60 секунд.`, {
         reply_markup: { inline_keyboard: [[{ text: '📋 Копировать код', copy_text: { text: code } }]] },
       });
       await this.updateChallenge(challenge.challengeHash, { delivery_status: 'sent' });
+      if (sent?.message_id) this.scheduleOtpCountdown(challenge.chatId, sent.message_id, code);
     } catch (error) {
       await this.updateChallenge(challenge.challengeHash, { status: 'failed', used_at: new Date(), delivery_status: 'failed' }).catch(() => {});
       throw this.mapBotError(error, 'TELEGRAM_CODE_SEND_FAILED');
     }
+  }
+
+  scheduleOtpCountdown(chatId, messageId, code) {
+    const expiresAt = Date.now() + OTP_TTL_SECONDS * 1000;
+    const tick = async () => {
+      const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      try {
+        if (remaining === 0) {
+          await this.bot.editMessageText(chatId, messageId, 'Код истёк. Запросите новый код в приложении.', {
+            reply_markup: { inline_keyboard: [] },
+          });
+          return;
+        }
+        await this.bot.editMessageText(chatId, messageId, `Ваш код для входа в Bradobrey: ${code}\nКод действует ещё ${remaining} секунд.`, {
+          reply_markup: { inline_keyboard: [[{ text: '📋 Копировать код', copy_text: { text: code } }]] },
+        });
+        setTimeout(tick, Math.min(5000, remaining * 1000));
+      } catch (_) {
+        // Message editing is best-effort; verification still enforces the real TTL.
+      }
+    };
+    setTimeout(tick, 5000);
   }
 
   async sendCode({ displayName, firstName, lastName, patronymic, referralCode, language, purpose }) {
