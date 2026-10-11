@@ -51,6 +51,46 @@ test('marketplace settings validate no-show restriction policy', () => {
     third_plus_violation_minutes: 10080,
     lookback_days: 365,
   }), /durations/);
+  assert.match(validateValue('no_show_restrictions', {
+    enabled: true,
+    automatic: true,
+    first_violation_minutes: '3 days',
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+    lookback_days: 365,
+  }), /durations/);
+  assert.match(validateValue('no_show_restrictions', {
+    enabled: true,
+    automatic: true,
+    first_violation_minutes: 1440,
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+  }), /lookback_days/);
+  assert.match(validateValue('no_show_restrictions', {
+    enabled: 'true',
+    automatic: true,
+    first_violation_minutes: 1440,
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+    lookback_days: 365,
+  }), /enabled and automatic/);
+  assert.match(validateValue('no_show_restrictions', {
+    enabled: true,
+    automatic: true,
+    first_violation_minutes: 1440,
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+    lookback_days: 365,
+    updated_at: '2026-10-11T00:00:00.000Z',
+  }), /unsupported fields/);
+  assert.match(validateValue('no_show_restrictions', {
+    enabled: true,
+    automatic: true,
+    first_violation_minutes: '1440',
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+    lookback_days: 365,
+  }), /durations/);
 });
 
 test('marketplace settings reject invalid referral and non-object values', () => {

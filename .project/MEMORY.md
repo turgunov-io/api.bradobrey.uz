@@ -103,3 +103,10 @@
 - Удалён legacy stdout-log email OTP из
   `src/models/marketplace/auth.js`; Telegram flow уже не логирует token, OTP
   или полный request headers.
+
+## Проверка no-show settings (2026-10-11)
+
+- `PATCH /api/marketplace/admin/settings/no_show_restrictions` принимает `{ value: { enabled, automatic, first_violation_minutes, second_violation_minutes, third_plus_violation_minutes, lookback_days } }`; длительности хранятся в минутах и должны быть JSON-числами.
+- Dashboard no-show composable должен передавать Bearer auth header; `skipAuth: true` несовместим с settings controller, который требует JWT роли `admin`/`admin_network`.
+- Backend validator отклоняет лишние поля и строковые числовые значения для no-show settings.
+- PostgreSQL integration verification была недоступна: `127.0.0.1:5432` отказал в соединении 2026-10-11; записи в БД не выполнялись.

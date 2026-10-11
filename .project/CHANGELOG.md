@@ -76,3 +76,8 @@
 - Зафиксированы P0/P1 findings, release acceptance suite и remediation backlog.
 - OTP `0000` зарегистрирован как временно принятое исключение только до подключения SMS; для production оставлен обязательным release gate.
 - БД и deployment не изменялись.
+
+## 2026-10-11
+
+- Ужесточена валидация marketplace no-show settings: allowlist полей и числовые типы минут/дней.
+- Добавлены regression-тесты лишних полей и строковых длительностей.
