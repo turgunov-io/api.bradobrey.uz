@@ -175,6 +175,19 @@ async function loyalty(req, res) {
   return res.json({ status_points: points, level: current, next_level: next, blocked_until: client.blocked_until || null });
 }
 
+async function restrictionStatus(req, res) {
+  const clientId = authClient(req, res);
+  if (!clientId) return;
+  const client = await getClient(clientId);
+  if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
+  const active = client.blocked_until && new Date(client.blocked_until) > new Date();
+  return res.json({
+    restricted: Boolean(active),
+    blocked_until: active ? new Date(client.blocked_until).toISOString() : null,
+    reason: active ? 'NO_SHOW' : null,
+  });
+}
+
 async function referral(req, res) {
   const clientId = authClient(req, res);
   if (!clientId) return;
@@ -719,6 +732,7 @@ async function updateReview(req, res) {
 module.exports = {
   activeBooking,
   loyalty,
+  restrictionStatus,
   referral,
   createReview,
   updateReview,

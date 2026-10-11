@@ -5,6 +5,7 @@ const ALLOWED_KEYS = new Set([
   'loyalty_levels',
   'referral',
   'cashback',
+  'no_show_restrictions',
 ]);
 const { validateLoyaltyLevels } = require('./loyaltyLevels');
 
@@ -51,6 +52,18 @@ function validateValue(key, value) {
     }
     if (start && end && String(start) > String(end)) {
       return 'promotion_end_date must be on or after promotion_start_date';
+    }
+  }
+  if (key === 'no_show_restrictions') {
+    if (typeof value.enabled !== 'boolean' || typeof value.automatic !== 'boolean') {
+      return 'enabled and automatic must be boolean';
+    }
+    const durations = [value.first_violation_minutes, value.second_violation_minutes, value.third_plus_violation_minutes];
+    if (durations.some((item) => !Number.isInteger(Number(item)) || Number(item) < 1 || Number(item) > 43200)) {
+      return 'violation durations must be integers between 1 and 43200 minutes';
+    }
+    if (!Number.isInteger(Number(value.lookback_days)) || Number(value.lookback_days) < 1 || Number(value.lookback_days) > 3650) {
+      return 'lookback_days must be an integer between 1 and 3650';
     }
   }
   if (key === 'loyalty_levels') {

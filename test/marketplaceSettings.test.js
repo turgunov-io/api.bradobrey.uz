@@ -9,6 +9,7 @@ test('marketplace settings expose only supported platform keys', () => {
     'booking_limits',
     'cashback',
     'loyalty_levels',
+    'no_show_restrictions',
     'referral',
     'status_points',
   ]);
@@ -31,6 +32,25 @@ test('marketplace settings validate booking and anti-fraud limits', () => {
     no_show_block_threshold: 5,
     block_hours: 24,
   }), null);
+});
+
+test('marketplace settings validate no-show restriction policy', () => {
+  assert.equal(validateValue('no_show_restrictions', {
+    enabled: true,
+    automatic: true,
+    first_violation_minutes: 1440,
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+    lookback_days: 365,
+  }), null);
+  assert.match(validateValue('no_show_restrictions', {
+    enabled: true,
+    automatic: true,
+    first_violation_minutes: 0,
+    second_violation_minutes: 4320,
+    third_plus_violation_minutes: 10080,
+    lookback_days: 365,
+  }), /durations/);
 });
 
 test('marketplace settings reject invalid referral and non-object values', () => {

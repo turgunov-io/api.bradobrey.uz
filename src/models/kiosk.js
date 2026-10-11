@@ -593,14 +593,20 @@ class Kiosk {
                 .from('marketplace_clients')
                 // Keep booking creation compatible with databases that have
                 // not applied the optional marketplace compliance columns yet.
-                .select('id, phone, is_active')
+                .select('id, phone, is_active, blocked_until')
                 .eq('id', actorId)
                 .maybeSingle();
             if (mpError) return res.status(500).json({ error: mpError.message });
             if (!mpClient) return res.status(404).json({ error: 'Marketplace client not found' });
             if (mpClient.is_active === false) return res.status(403).json({ error: 'Account is disabled' });
             if (mpClient.blocked_until && new Date(mpClient.blocked_until) > new Date()) {
-                return res.status(403).json({ error: 'ACCOUNT_BLOCKED' });
+                return res.status(403).json({
+                    code: 'BOOKING_RESTRICTED',
+                    error: 'BOOKING_RESTRICTED',
+                    blocked_until: new Date(mpClient.blocked_until).toISOString(),
+                    reason: 'NO_SHOW',
+                    message: 'New bookings are temporarily unavailable because of a confirmed no-show.',
+                });
             }
             if (!mpClient.phone || String(mpClient.phone) !== String(normalizedPhone)) {
                 return res.status(403).json({ error: 'Phone mismatch for marketplace booking' });

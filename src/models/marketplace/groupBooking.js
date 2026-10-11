@@ -76,7 +76,10 @@ async function create(req, res) {
     const marketplaceClient = clientResult.rows[0];
     if (!marketplaceClient) { await dbClient.query('ROLLBACK'); return res.status(404).json({ error: 'Marketplace client not found' }); }
     if (marketplaceClient.is_active === false) { await dbClient.query('ROLLBACK'); return res.status(403).json({ error: 'ACCOUNT_BLOCKED' }); }
-    if (marketplaceClient.blocked_until && new Date(marketplaceClient.blocked_until) > new Date()) { await dbClient.query('ROLLBACK'); return res.status(403).json({ error: 'ACCOUNT_BLOCKED' }); }
+    if (marketplaceClient.blocked_until && new Date(marketplaceClient.blocked_until) > new Date()) {
+      await dbClient.query('ROLLBACK');
+      return res.status(403).json({ code: 'BOOKING_RESTRICTED', error: 'BOOKING_RESTRICTED', blocked_until: new Date(marketplaceClient.blocked_until).toISOString(), reason: 'NO_SHOW', message: 'New bookings are temporarily unavailable because of a confirmed no-show.' });
+    }
     if (!marketplaceClient.phone) { await dbClient.query('ROLLBACK'); return res.status(428).json({ error: 'PHONE_REQUIRED' }); }
 
     if (requestId) {

@@ -9,6 +9,7 @@ const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback"
 const { settlePendingReferralBonuses } = require('../services/referralBonus');
 const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
+const { registerConfirmedNoShow } = require('../services/marketplaceNoShowRestriction');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -3114,6 +3115,12 @@ class Barbers {
                 branchId: updated.branch_id,
                 status: updated.status,
             });
+        }
+
+        if (no_show) {
+            try { await registerConfirmedNoShow(updated.id); } catch (restrictionError) {
+                console.error('[marketplace-no-show] restriction update failed:', restrictionError.message);
+            }
         }
 
         return res.json({ queue_entry: updated, idempotent: false });

@@ -417,7 +417,19 @@ values
   ('cashback_policy', '{"max_redeem_share":1}'::jsonb, 'Maximum share of payable service total redeemable from cashback'),
   ('cashback', '{"default_percent":1,"promotion_percent":null,"promotion_start_date":null,"promotion_end_date":null,"timezone":"Asia/Tashkent"}'::jsonb, 'Marketplace cashback percentage and temporary promotion'),
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
+  ,('no_show_restrictions', '{"enabled":true,"automatic":true,"first_violation_minutes":1440,"second_violation_minutes":4320,"third_plus_violation_minutes":10080,"lookback_days":365}'::jsonb, 'Temporary marketplace booking restrictions after confirmed no-shows')
 on conflict (key) do nothing;
+
+create table if not exists marketplace_no_show_violations (
+  id uuid default gen_random_uuid() primary key,
+  queue_entry_id uuid not null unique references queue_entries(id) on delete restrict,
+  marketplace_client_id uuid not null references marketplace_clients(id) on delete restrict,
+  reason text not null default 'NO_SHOW',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists marketplace_no_show_violations_client_created_idx
+  on marketplace_no_show_violations (marketplace_client_id, created_at desc);
 
 update platform_settings
    set value = jsonb_set(value, '{referral_points}', '15'::jsonb, true), updated_at = now()
