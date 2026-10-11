@@ -128,6 +128,6 @@
 
 ## Employee Quality v1 audit (2026-10-11)
 
-- `GET /api/statistics/employees` exists and rejects anonymous requests with 401; production remains blocked by the unapplied PostgreSQL Employee Quality schema and permission backfill, which the model intentionally reports as 501.
+- `GET /api/statistics/employees` exists and rejects anonymous requests with 401. On 2026-10-11 the additive Employee Quality schema and permission backfill were applied idempotently in production; verification reported `review_events=0` and the API process was restarted.
 - Ranking tie-breaks now follow the v1 contract: suspicious state/count/rate, trusted completions, then absolute employee-failure count; revenue and neutral outcomes remain non-ranking fields.
-- Aggregate failures now log a safe diagnostic object server-side and return a stable `EMPLOYEE_QUALITY_LOAD_FAILED` code without exposing SQL details. No production DB or deployment was changed; local PostgreSQL was unavailable.
+- Aggregate failures now log a safe diagnostic object server-side and return a stable `EMPLOYEE_QUALITY_LOAD_FAILED` code without exposing SQL details. Production API and dashboard smoke checks completed after deployment; authenticated ranking data still requires a real user session for end-to-end verification.
