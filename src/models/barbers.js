@@ -1628,7 +1628,7 @@ class Barbers {
         }
 
         const effectiveBranchId = userData.branch_id || branch_id;
-        if (userData.branch_id && branch_id && String(userData.branch_id) !== String(branch_id)) {
+        if (!LOCATION_ROLES.has(userData.role) && userData.branch_id && branch_id && String(userData.branch_id) !== String(branch_id)) {
             return res.status(403).json({ error: 'Employee is not assigned to the selected branch' });
         }
 
