@@ -141,7 +141,8 @@ async function listLocationEvents(req, res) {
   if (branchId) { params.push(branchId); where = 'where e.branch_id = $1'; }
   params.push(limit);
   const result = await db.query(`
-    select e.id, e.barber_id, e.branch_id, e.distance_meters, e.accuracy_meters,
+    select e.id, e.barber_id, e.branch_id, e.latitude, e.longitude,
+      e.branch_latitude, e.branch_longitude, e.distance_meters, e.accuracy_meters,
       e.measured_at, e.status, e.reason, e.created_at, b.name as barber_name, br.name as branch_name
     from barber_login_location_events e
     left join barbers b on b.id = e.barber_id
