@@ -227,7 +227,7 @@ async function loadNeutralCounts(access) {
 async function loadDataQuality(access) {
   const branchId = access.scope.type === 'branch' ? access.scope.branchId : null;
   const employeeId = access.scope.employeeId || null;
-  const params = [access.range.startInclusive, access.range.endExclusive, branchId, employeeId, [...EMPLOYEE_FAILURE_REASONS]];
+  const params = [access.range.startInclusive, access.range.endExclusive, branchId, employeeId];
   const result = await pool.query(
     `select
        (select count(*)::int from queue_quality_assessments a

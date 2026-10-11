@@ -359,6 +359,7 @@ test('migration contract uses exact v1 reasons, atomic snapshots, and approximat
   assert.doesNotMatch(sql, /coalesce\(q\.finished_at,\s*terminal_event\.occurred_at\)/i);
   assert.match(sql, /payments_queue_entry_id_idx/i);
   const model = fs.readFileSync(path.join(__dirname, '..', 'src', 'models', 'employeeQuality.js'), 'utf8');
+  assert.match(model, /const params = \[access\.range\.startInclusive, access\.range\.endExclusive, branchId, employeeId\];/);
   assert.match(model, /a\.branch_id = \$4::uuid/);
   assert.match(model, /e\.branch_id = \$5::uuid/);
   assert.match(model, /employee_id: access\.scope\.employeeId \|\| null/);
