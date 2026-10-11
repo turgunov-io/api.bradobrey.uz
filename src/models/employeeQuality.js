@@ -26,6 +26,7 @@ const isMissingQualitySchema = (error) => (
 );
 
 const schemaMissing = (res) => res.status(501).json({
+  code: 'EMPLOYEE_QUALITY_SCHEMA_MISSING',
   error: 'Employee quality schema is not installed',
   hint: 'Apply db/postgres/employee_quality_ranking.sql.',
 });
@@ -354,8 +355,15 @@ class EmployeeQuality {
       });
     } catch (error) {
       if (isMissingQualitySchema(error)) return schemaMissing(res);
-      console.error('Employee quality aggregate failed:', error.message);
-      return res.status(500).json({ error: 'Failed to load employee quality statistics' });
+      console.error('Employee quality aggregate failed:', {
+        code: error?.code || 'UNKNOWN',
+        message: error?.message || 'Unknown error',
+        stack: error?.stack,
+      });
+      return res.status(500).json({
+        code: 'EMPLOYEE_QUALITY_LOAD_FAILED',
+        error: 'Failed to load employee quality statistics',
+      });
     }
   }
 

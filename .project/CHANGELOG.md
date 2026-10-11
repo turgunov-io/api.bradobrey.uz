@@ -91,3 +91,5 @@
 - Ужесточена валидация marketplace no-show settings: allowlist полей и числовые типы минут/дней.
 - Добавлены regression-тесты лишних полей и строковых длительностей.
 - Добавлена обратная совместимость со старыми Dashboard bundles: server-owned `updated_at` отбрасывается только для no-show PATCH до allowlist validation.
+
+- Employee Quality v1: исправлен порядок tie-break по количеству подтверждённых ошибок, добавлен стабильный код ошибки агрегата и безопасное серверное диагностическое логирование. Production schema migration/backfill ещё требуют деплоя.

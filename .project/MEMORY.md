@@ -125,3 +125,9 @@
   endpoint. Создание marketplace-бронирования проверяет `blocked_until`.
 - Backend PM2 `BRADOBREY-BARBER` перезапущен и online; dashboard и остальные
   модули не перезапускались.
+
+## Employee Quality v1 audit (2026-10-11)
+
+- `GET /api/statistics/employees` exists and rejects anonymous requests with 401; production remains blocked by the unapplied PostgreSQL Employee Quality schema and permission backfill, which the model intentionally reports as 501.
+- Ranking tie-breaks now follow the v1 contract: suspicious state/count/rate, trusted completions, then absolute employee-failure count; revenue and neutral outcomes remain non-ranking fields.
+- Aggregate failures now log a safe diagnostic object server-side and return a stable `EMPLOYEE_QUALITY_LOAD_FAILED` code without exposing SQL details. No production DB or deployment was changed; local PostgreSQL was unavailable.

@@ -86,6 +86,16 @@ test('same suspicious count compares exact rates before trusted volume', () => {
   assert.deepEqual(result.map((item) => item.employee.id), ['one-of-100', 'one-of-20']);
 });
 
+test('employee failure count is the deterministic tie-break after trusted volume', () => {
+  const result = rankEmployees([
+    baseRow({ id: 'one-failure', name: 'B', completed: 20, classifiable_completed: 20,
+      authoritative_completed: 20, live_snapshot_count: 20, employee_failure_count: 1 }),
+    baseRow({ id: 'two-failures', name: 'A', completed: 20, classifiable_completed: 20,
+      authoritative_completed: 20, live_snapshot_count: 20, employee_failure_count: 2 }),
+  ]);
+  assert.deepEqual(result.map((item) => item.employee.id), ['one-failure', 'two-failures']);
+});
+
 test('statistical ties share competition rank and neutral outcomes do not affect keys', () => {
   const result = rankEmployees([
     baseRow({ id: 'a', name: 'A', no_show_count: 100, neutral_cancelled_count: 100 }),

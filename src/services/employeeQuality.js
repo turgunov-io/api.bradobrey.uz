@@ -135,11 +135,6 @@ const compareKeys = (left, right) => {
     - BigInt(b.suspicious_count) * BigInt(a.classifiable_completed);
   if (suspiciousRateDifference !== 0n) return suspiciousRateDifference < 0n ? -1 : 1;
   if (a.trusted_completed !== b.trusted_completed) return b.trusted_completed - a.trusted_completed;
-  const aFailureDenominator = a.trusted_completed + a.employee_failure_count;
-  const bFailureDenominator = b.trusted_completed + b.employee_failure_count;
-  const failureRateDifference = BigInt(a.employee_failure_count) * BigInt(bFailureDenominator)
-    - BigInt(b.employee_failure_count) * BigInt(aFailureDenominator);
-  if (failureRateDifference !== 0n) return failureRateDifference < 0n ? -1 : 1;
   if (a.employee_failure_count !== b.employee_failure_count) {
     return a.employee_failure_count - b.employee_failure_count;
   }
