@@ -94,3 +94,7 @@
 
 - Employee Quality v1: исправлен порядок tie-break по количеству подтверждённых ошибок, добавлен стабильный код ошибки агрегата и безопасное серверное диагностическое логирование. Additive production schema migration/backfill применены идемпотентно 2026-10-11; API перезапущен и проверен.
 - Исправлен production 500 в `loadDataQuality`: запрос больше не передаёт лишний bind-параметр PostgreSQL; добавлен regression guard и выполнен API-only restart.
+# 2026-10-11 — barber login geolocation control
+
+- Added server-side login geolocation verification, branch policy endpoints, audit events, and outside-radius notifications. Migration is prepared but unapplied; production deployment was not performed.
+

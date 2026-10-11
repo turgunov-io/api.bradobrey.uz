@@ -10,6 +10,7 @@ const { settlePendingReferralBonuses } = require('../services/referralBonus');
 const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
+const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -1620,19 +1621,42 @@ class Barbers {
             });
         }
 
-        if (!branch_id) return res.status(400).json({ error: 'Branch ID is required' });
+        if (!branch_id && !userData.branch_id) return res.status(400).json({ error: 'Branch ID is required' });
+
+        if (LOCATION_ROLES.has(userData.role) && !userData.branch_id) {
+            return res.status(403).json({ code: 'EMPLOYEE_BRANCH_NOT_ASSIGNED', error: 'Employee is not assigned to a branch' });
+        }
+
+        const effectiveBranchId = userData.branch_id || branch_id;
+        if (userData.branch_id && branch_id && String(userData.branch_id) !== String(branch_id)) {
+            return res.status(403).json({ error: 'Employee is not assigned to the selected branch' });
+        }
+
+        if (LOCATION_ROLES.has(userData.role)) {
+            if (!req.body?.location) return res.status(403).json({ code: 'LOCATION_REQUIRED', error: 'Current location is required to sign in' });
+            const locationCheck = await verifyAndRecordLoginLocation({
+                barberId: userData.id,
+                branchId: effectiveBranchId,
+                location: req.body.location,
+            });
+            if (!locationCheck.ok) return res.status(locationCheck.statusCode).json({ code: locationCheck.code, error: 'Unable to verify workplace location' });
+            if (locationCheck.outsideRadius) {
+                const { createLocationWarningNotifications } = require('./notifications');
+                await createLocationWarningNotifications({ barberId: userData.id, branchId: effectiveBranchId, event: locationCheck.event });
+            }
+        }
 
         await db
             .from('users')
-            .update({ branch_id })
+            .update({ branch_id: effectiveBranchId })
             .eq('id', userData.id);
         await db
             .from('barbers')
-            .update({ branch_id, is_on_shift: true })
+            .update({ branch_id: effectiveBranchId, is_on_shift: true })
             .eq('id', userData.id);
 
         const token = signUserToken({
-            branch_id,
+            branch_id: effectiveBranchId,
             id: userData.id,
             login: userData.login,
             role: userData.role,
@@ -1642,7 +1666,7 @@ class Barbers {
             actorId: userData.id,
             actorRole: userData.role,
             barberId: userData.id,
-            branchId: branch_id,
+            branchId: effectiveBranchId,
             eventType: 'login',
             io: req.app.get('io'),
             metadata: { login: userData.login },
@@ -1967,7 +1991,7 @@ class Barbers {
                     service_id,
                     service_ids,
                     payment_method,
-                    branch_id,
+                    branch_id: effectiveBranchId,
                     client:clients ( id, name, phone )
                 `)
                 .eq('barber_id', barberId)

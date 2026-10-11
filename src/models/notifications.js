@@ -147,6 +147,25 @@ async function createSuspiciousOrderNotifications(entry) {
     }
 }
 
+async function createLocationWarningNotifications({ barberId, branchId, event }) {
+    const [{ data: barber }, { data: branch }, { data: recipients, error }] = await Promise.all([
+        db.from('barbers').select('name').eq('id', barberId).maybeSingle(),
+        db.from('branches').select('name').eq('id', branchId).maybeSingle(),
+        db.from('users').select('id, role, branch_id').in('role', EMPLOYEE_ROLES),
+    ]);
+    if (error) throw new Error(error.message);
+    const title = 'Барбер вошёл вне рабочего места';
+    const body = `Барбер ${barber?.name || 'Неизвестный барбер'} выполнил вход вне радиуса филиала ${branch?.name || branchId}.`;
+    const rows = (recipients || []).filter(user => ['admin_network', 'admin', 'super-manager'].includes(user.role) || String(user.branch_id) === String(branchId));
+    for (const recipient of rows) {
+        await db.query(`
+          insert into notifications (recipient_user_id, type, title, body, branch_id, data)
+          values ($1, 'barber_location_warning', $2, $3, $4, $5::jsonb)
+          on conflict do nothing
+        `, [recipient.id, title, body, branchId, JSON.stringify({ barber_id: barberId, event_id: event?.id || null, distance_meters: event?.distance_meters || null })]);
+    }
+}
+
 async function sendPushToUser(userId, payload) {
     if (!configureWebPush()) throw new Error('VAPID keys are not configured');
     const result = await db.query('select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1', [userId]);
@@ -255,6 +274,7 @@ class Notifications {
 module.exports = {
     notifications: new Notifications(),
     createSuspiciousOrderNotifications,
+    createLocationWarningNotifications,
     ensureNotificationsTable,
     _private: { normalizePersistedQualityAssessment },
 };

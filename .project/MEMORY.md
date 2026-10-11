@@ -132,3 +132,9 @@
 - Ranking tie-breaks now follow the v1 contract: suspicious state/count/rate, trusted completions, then absolute employee-failure count; revenue and neutral outcomes remain non-ranking fields.
 - Aggregate failures now log a safe diagnostic object server-side and return a stable `EMPLOYEE_QUALITY_LOAD_FAILED` code without exposing SQL details. Production API and dashboard smoke checks completed after deployment; authenticated ranking data still requires a real user session for end-to-end verification.
 - On 2026-10-11 a production 500 was traced to `loadDataQuality()` binding five PostgreSQL parameters for a query using four placeholders; the extra failure-reasons parameter was removed, covered by a regression assertion, and deployed with an API-only restart.
+# Barber login geolocation control (2026-10-11)
+
+- Added additive, unapplied migration `db/postgres/barber_location_control.sql` for per-branch location policy and PII-minimized login audit events.
+- Barber/super-barber login now requires fresh location, rejects stale/low-accuracy/mock data, verifies the server-side assigned branch and radius, records an event, and creates outside-radius notifications. Unassigned barbers fail closed.
+- No production deployment or migration was performed in this task.
+
