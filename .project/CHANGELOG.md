@@ -93,3 +93,4 @@
 - Добавлена обратная совместимость со старыми Dashboard bundles: server-owned `updated_at` отбрасывается только для no-show PATCH до allowlist validation.
 
 - Employee Quality v1: исправлен порядок tie-break по количеству подтверждённых ошибок, добавлен стабильный код ошибки агрегата и безопасное серверное диагностическое логирование. Additive production schema migration/backfill применены идемпотентно 2026-10-11; API перезапущен и проверен.
+- Исправлен production 500 в `loadDataQuality`: запрос больше не передаёт лишний bind-параметр PostgreSQL; добавлен regression guard и выполнен API-only restart.
