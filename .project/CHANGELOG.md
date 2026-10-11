@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-11
+
+- Fixed no-show restrictions for automatic queue closures and stale queue
+  cleanup by registering every newly confirmed no-show.
+- Added the missing production `marketplace_no_show_violations` table and
+  client/date index without modifying existing records.
+- Kept the change scoped to marketplace no-show processing; only the backend
+  marketplace process was restarted.
+
 ## 2026-10-07
 
 - Switched Telegram onboarding to Telegram Contact as the sole phone source:
@@ -81,3 +90,4 @@
 
 - Ужесточена валидация marketplace no-show settings: allowlist полей и числовые типы минут/дней.
 - Добавлены regression-тесты лишних полей и строковых длительностей.
+- Добавлена обратная совместимость со старыми Dashboard bundles: server-owned `updated_at` отбрасывается только для no-show PATCH до allowlist validation.

@@ -104,4 +104,13 @@ async function registerConfirmedNoShow(queueEntryId) {
   }
 }
 
-module.exports = { registerConfirmedNoShow, DEFAULTS };
+async function registerConfirmedNoShows(queueEntryIds) {
+  const ids = Array.from(new Set((Array.isArray(queueEntryIds) ? queueEntryIds : []).filter(Boolean)));
+  const results = [];
+  for (const queueEntryId of ids) {
+    results.push(await registerConfirmedNoShow(queueEntryId));
+  }
+  return results;
+}
+
+module.exports = { registerConfirmedNoShow, registerConfirmedNoShows, DEFAULTS };

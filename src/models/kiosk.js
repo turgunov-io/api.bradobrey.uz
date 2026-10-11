@@ -3,6 +3,7 @@ const { toAbsolutePublicUrl } = require("../config/uploads");
 const jwt = require("jsonwebtoken");
 const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
+const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 
 const {
     applyPromoDiscount,
@@ -179,13 +180,17 @@ const groupServicesByCategory = (services = []) => {
 const cleanupStaleQueuesForBranch = async (branchId) => {
     if (!branchId) return null;
     const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
-    return db
+    const result = await db
         .from('queue_entries')
         .update({ status: 'no_show', finished_at: new Date().toISOString() })
         .eq('branch_id', branchId)
         .lte('created_at', cutoffIso)
         .in('status', ['waiting', 'called', 'swapped'])
         .select('id');
+    if (!result.error && Array.isArray(result.data)) {
+        await registerConfirmedNoShows(result.data.map((row) => row.id));
+    }
+    return result;
 };
 
 const serviceItem = (req, service) => {

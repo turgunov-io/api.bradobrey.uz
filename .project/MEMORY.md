@@ -110,3 +110,18 @@
 - Dashboard no-show composable должен передавать Bearer auth header; `skipAuth: true` несовместим с settings controller, который требует JWT роли `admin`/`admin_network`.
 - Backend validator отклоняет лишние поля и строковые числовые значения для no-show settings.
 - PostgreSQL integration verification была недоступна: `127.0.0.1:5432` отказал в соединении 2026-10-11; записи в БД не выполнялись.
+- Production compatibility: the settings controller discards only legacy `updated_at` metadata for `no_show_restrictions` before strict validation, so cached older Dashboard bundles do not fail with 400; arbitrary fields remain rejected.
+
+## Исправление no-show блокировок (2026-10-11)
+
+- Причина отсутствия блокировки: production не содержал таблицу
+  `marketplace_no_show_violations`, а сервис пропускал ограничение при ошибке
+  отсутствующей миграции; автоматические пути очереди также не вызывали сервис
+  регистрации no-show.
+- В production создана только additive-структура
+  `marketplace_no_show_violations` и индекс по клиенту/дате; существующие записи
+  не изменялись. Настройка `no_show_restrictions` активна.
+- Автоматические no-show пути теперь регистрируют нарушения так же, как ручной
+  endpoint. Создание marketplace-бронирования проверяет `blocked_until`.
+- Backend PM2 `BRADOBREY-BARBER` перезапущен и online; dashboard и остальные
+  модули не перезапускались.

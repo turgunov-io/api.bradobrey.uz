@@ -9,7 +9,7 @@ const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback"
 const { settlePendingReferralBonuses } = require('../services/referralBonus');
 const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
-const { registerConfirmedNoShow } = require('../services/marketplaceNoShowRestriction');
+const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -511,6 +511,7 @@ const markEntriesNoShow = async ({ barberId, branchId, cutoffIso }) => {
     const { data, error } = await query.select('id');
     if (!error && Array.isArray(data)) {
         data.forEach((row) => clearCallTimer(row.id));
+        await registerConfirmedNoShows(data.map((row) => row.id));
     }
     return { data, error };
 };
