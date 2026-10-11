@@ -138,3 +138,9 @@
 - Barber/super-barber login now requires fresh location, rejects stale/low-accuracy/mock data, verifies the server-side assigned branch and radius, records an event, and creates outside-radius notifications. Unassigned barbers fail closed.
 - No production deployment or migration was performed in this task.
 
+# Production geolocation verification (2026-10-11)
+
+- `test1` is assigned to `Главный филиал` (`c6ec78aa-78c7-4b78-a0f3-9e538e19e54c`); the mobile-selected branch is not authoritative for barber login.
+- Configured that branch with latitude `41.3151186`, longitude `69.3292591`, radius `1000m`, enabled. A real production login returned HTTP 200 and recorded an `inside_radius` event with accuracy `11.02m`.
+- API geolocation audit passed: migration indexes exist, PM2 is online, health is 200, and the server remains fail-closed for missing configuration/stale/mock/low-accuracy/out-of-radius input.
+
