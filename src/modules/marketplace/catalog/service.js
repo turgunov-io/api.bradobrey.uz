@@ -530,9 +530,17 @@ const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durati
 
   const end = new Date(start.getTime() + Math.max(1, Number(durationMinutes || 0)) * 60 * 1000);
   if (start < effectiveScheduleStart || end > scheduleEnd) {
-    const err = new Error('SERVICE_NOT_AVAILABLE_TODAY');
+    const err = new Error('BOOKING_OUTSIDE_WORK_HOURS');
     err.statusCode = 400;
-    err.code = 'SERVICE_NOT_AVAILABLE_TODAY';
+    err.code = 'BOOKING_OUTSIDE_WORK_HOURS';
+    err.details = {
+      branch_id: branch.id,
+      barber_id: barberId,
+      timezone,
+      starts_at: start.toISOString(),
+      schedule_start: startHHMM,
+      schedule_end: endHHMM,
+    };
     throw err;
   }
 };

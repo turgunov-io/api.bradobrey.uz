@@ -542,12 +542,15 @@ class Kiosk {
         } = req.body || {};
         const effectivePaymentMethod = payment_method || (certificate_code ? 'certificate' : null);
 
-        if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids)) || !customer_name || !phone_number) {
-            return res.status(400).json({ error: "branch_id, barber_id, service_id/service_ids, customer_name, and phone_number are required" });
+        if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids))) {
+            return res.status(400).json({ error: "branch_id, barber_id, and service_id/service_ids are required" });
         }
 
-        const normalizedPhone = normalizePhone(phone_number);
-        if (!normalizedPhone || !isValidE164(normalizedPhone)) {
+        const allowedSources = ['point', 'site', 'admin'];
+        const normalizedSource = allowedSources.includes(source) ? source : 'point';
+        let normalizedPhone = normalizePhone(phone_number);
+        let effectiveCustomerName = normalizeText(customer_name);
+        if (normalizedSource !== 'site' && (!effectiveCustomerName || !normalizedPhone || !isValidE164(normalizedPhone))) {
             return res.status(400).json({ error: "phone_number must be in E.164 format, e.g. +998991234567" });
         }
 
@@ -556,9 +559,6 @@ class Kiosk {
             : service_id
                 ? [service_id]
                 : [];
-
-        const allowedSources = ['point', 'site', 'admin'];
-        const normalizedSource = allowedSources.includes(source) ? source : 'point';
 
         const useCashback =
             use_cashback === true ||
@@ -598,7 +598,7 @@ class Kiosk {
                 .from('marketplace_clients')
                 // Keep booking creation compatible with databases that have
                 // not applied the optional marketplace compliance columns yet.
-                .select('id, phone, is_active, blocked_until')
+                .select('id, phone, display_name, first_name, last_name, is_active, blocked_until')
                 .eq('id', actorId)
                 .maybeSingle();
             if (mpError) return res.status(500).json({ error: mpError.message });
@@ -613,8 +613,14 @@ class Kiosk {
                     message: 'New bookings are temporarily unavailable because of a confirmed no-show.',
                 });
             }
-            if (!mpClient.phone || String(mpClient.phone) !== String(normalizedPhone)) {
-                return res.status(403).json({ error: 'Phone mismatch for marketplace booking' });
+            normalizedPhone = normalizePhone(mpClient.phone);
+            effectiveCustomerName = normalizeText(mpClient.display_name)
+                || [mpClient.last_name, mpClient.first_name].filter(Boolean).join(' ').trim();
+            if (!normalizedPhone || !isValidE164(normalizedPhone)) {
+                return res.status(428).json({ code: 'PHONE_REQUIRED', error: 'PHONE_REQUIRED' });
+            }
+            if (!effectiveCustomerName) {
+                return res.status(428).json({ code: 'PROFILE_NAME_REQUIRED', error: 'PROFILE_NAME_REQUIRED' });
             }
             marketplaceClient = mpClient;
         }
@@ -837,12 +843,12 @@ class Kiosk {
         if (existingClient) {
             clientId = existingClient.id;
             if (!existingClient.name) {
-                await db.from('clients').update({ name: customer_name }).eq('id', clientId);
+                await db.from('clients').update({ name: effectiveCustomerName }).eq('id', clientId);
             }
         } else {
             const { data: newClient, error: clientCreateError } = await db
                 .from('clients')
-                .insert({ name: customer_name, phone: normalizedPhone })
+                .insert({ name: effectiveCustomerName, phone: normalizedPhone })
                 .select('id')
                 .maybeSingle();
             if (clientCreateError) return res.status(500).json({ error: clientCreateError.message });
@@ -1186,7 +1192,7 @@ class Kiosk {
                 .insert({
                     booking_id: createdBooking.id,
                     person_index: 1,
-                    display_name: customer_name,
+                    display_name: effectiveCustomerName,
                     barber_id,
                     queue_entry_id: entry.id,
                 })
@@ -1308,7 +1314,7 @@ class Kiosk {
                 .insert({
                     promo_code_id: promo.id,
                     user_id: null,
-                    user_name: customer_name,
+                    user_name: effectiveCustomerName,
                     phone: normalizedPhone,
                     order_id: entry.id,
                 })

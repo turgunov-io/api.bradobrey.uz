@@ -23,6 +23,15 @@ class MarketplaceCatalogController {
       });
       return res.json(result);
     } catch (error) {
+      if (error?.code || error?.statusCode) {
+        console.info('[marketplace-booking-rejected]', JSON.stringify({
+          code: error.code || error.message,
+          status: error.statusCode || error.status || 500,
+          branch_id: req.body?.branch_id || null,
+          barber_id: req.body?.barber_id || null,
+          service_count: Array.isArray(req.body?.service_ids) ? req.body.service_ids.length : 0,
+        }));
+      }
       console.error(error);
       return handleError(res, error);
     }
