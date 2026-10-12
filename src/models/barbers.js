@@ -957,7 +957,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
     const completedEntries = Array.isArray(entries) ? entries : [];
     const entryIds = completedEntries.map(entry => entry.id).filter(Boolean);
     const serviceIds = Array.from(new Set(completedEntries.flatMap(serviceIdsForEntry).filter(Boolean)));
-    const [paymentsResult, servicesResult, branchesResult, eventsResult] = await Promise.all([
+    const [paymentsResult, servicesResult, branchesResult, eventsResult, financeResult] = await Promise.all([
         entryIds.length
             ? db.from('payments').select('queue_entry_id, amount').in('queue_entry_id', entryIds)
             : { data: [], error: null },
@@ -972,6 +972,9 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
             .gte('occurred_at', range.from)
             .lt('occurred_at', range.to)
             .order('occurred_at', { ascending: true }),
+        db.from('finance_snapshots')
+            .select('branch_id, payload')
+            .eq('period', range.period),
     ]);
 
     if (paymentsResult.error && !isMissingPaymentsTable(paymentsResult.error)) throw new Error(paymentsResult.error.message);
@@ -1023,7 +1026,43 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
     }
     for (const [key, row] of rows) row.worked_days = (daySets.get(key) || new Set()).size;
 
+    const financeBranches = [];
+    if (!financeResult.error || !isMissingFinanceSnapshotTable(financeResult.error)) {
+        if (financeResult.error) throw new Error(financeResult.error.message);
+        for (const snapshot of financeResult.data || []) {
+            const employees = snapshot?.payload?.employees && typeof snapshot.payload.employees === 'object'
+                ? snapshot.payload.employees
+                : {};
+            const draft = normalizeFinanceDraft(employees[barberId]);
+            if (!Object.values(draft).some(value => value > 0)) continue;
+            const commission = commissionForFinance({
+                bonusProfitPercent: draft.bonus_profit_percent,
+                goal: draft.salary,
+                profit: draft.profit,
+                profitPercent: draft.profit_percent,
+            });
+            financeBranches.push({
+                branch_id: snapshot.branch_id,
+                branch_name: branchNames.get(String(snapshot.branch_id)) || String(snapshot.branch_id),
+                goal: roundFinanceAmount(draft.salary),
+                profit: roundFinanceAmount(draft.profit),
+                advances: roundFinanceAmount(draft.advances),
+                penalty: roundFinanceAmount(draft.penalty),
+                commission,
+                payout: roundFinanceAmount(commission - draft.advances - draft.penalty),
+            });
+        }
+    }
+
     const branchBreakdown = [...rows.values()].map(row => ({ ...row, revenue: roundFinanceAmount(row.revenue) }));
+    const financeTotals = financeBranches.reduce((total, row) => ({
+        goal: total.goal + row.goal,
+        profit: total.profit + row.profit,
+        advances: total.advances + row.advances,
+        penalty: total.penalty + row.penalty,
+        commission: total.commission + row.commission,
+        payout: total.payout + row.payout,
+    }), { goal: 0, profit: 0, advances: 0, penalty: 0, commission: 0, payout: 0 });
     return {
         period: range.period,
         totals: {
@@ -1034,6 +1073,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
             worked_minutes: branchBreakdown.reduce((sum, row) => sum + row.worked_minutes, 0),
         },
         branches: branchBreakdown,
+        finance: { totals: financeTotals, branches: financeBranches },
     };
 };
 
