@@ -153,7 +153,13 @@
 # Active employee branch context (2026-10-12)
 
 - `users.branch_id` and `barbers.branch_id` remain the permanent/default assignment; they are no longer overwritten by employee login or shift start.
-- `db/postgres/employee_branches.sql` adds `employee_branch_access` (allowed branches, backfilled from the legacy assignment) and `employee_active_branches` (one persisted current work branch and shift state per employee).
-- Employee login accepts `branch_id`. With multiple allowed branches and no selection it returns `409 BRANCH_SELECTION_REQUIRED` with branch metadata; an unauthorized branch returns `403 BRANCH_ACCESS_DENIED`.
+- `db/postgres/employee_branches.sql` adds `employee_branch_access` (legacy assignment plus explicit deny rows) and `employee_active_branches` (one persisted current work branch and shift state per employee).
+- Employee login accepts `branch_id`. With multiple active branches and no selection it returns `409 BRANCH_SELECTION_REQUIRED` with branch metadata; inactive or explicitly denied branches return `403 BRANCH_ACCESS_DENIED`.
 - JWT `branchId`, Verifix events, kiosk visibility, and marketplace booking validation use the active branch. Apply the SQL migration before deploying the API changes; old single-branch data remains compatible through the legacy fallback.
 - `POST /api/barbers/me/branch` validates access server-side, switches the active context, and records branch-specific shift boundaries. `/api/barbers/me` also returns available branches and period statistics with queue revenue, services, shifts, worked minutes, and separate finance snapshot totals/payouts by branch.
+
+# Cross-branch selection correction (2026-10-12)
+
+- The initial implementation incorrectly treated active `employee_branch_access` rows as the complete allow-list. Because the additive backfill creates only the legacy `users.branch_id` row, a barber permanently assigned to A could not select active branch B.
+- `listEmployeeBranches` now returns active branches by default and excludes only branches with an explicit inactive access row. This preserves server-side denial and closed-branch checks without making the legacy home row a manual prerequisite for every temporary workplace.
+- Added `test/employeeBranchSwitch.e2e.test.js`: an isolated no-production-data contract covering login selection, persisted active branch, kiosk visibility, branch-scoped booking/shift IDs, switching back, inactive branches, and explicit denial.

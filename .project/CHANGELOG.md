@@ -3,6 +3,8 @@
 ## 2026-10-12
 
 - Allowed barber/super-barber login for branches without an enabled `branch_locations` policy; geolocation enforcement remains active for configured branches.
+- Corrected cross-branch employee selection: active branches are available by default, while explicit inactive access rows and inactive branches remain denied. Permanent `users.branch_id`/`barbers.branch_id` is not overwritten.
+- Added an isolated cross-branch E2E contract test covering login, active branch, kiosk visibility, shift/booking branch IDs, switching back, and denial cases.
 
 ## 2026-10-11
 

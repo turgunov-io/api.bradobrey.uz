@@ -13,16 +13,39 @@ const normalizeId = (value) => {
   return id || null;
 };
 
+const selectEmployeeBranches = (branches = [], accessRows = []) => {
+  const deniedBranchIds = new Set(
+    accessRows
+      .filter((row) => row?.is_active === false)
+      .map((row) => String(row.branch_id))
+  );
+
+  return branches.filter((branch) => (
+    branch?.is_active !== false && !deniedBranchIds.has(String(branch.id))
+  ));
+};
+
 async function listEmployeeBranches(employeeId, fallbackBranchId = null) {
   const id = normalizeId(employeeId);
   const fallback = normalizeId(fallbackBranchId);
   if (!id) return [];
 
+  // A barber's users.branch_id is the permanent/home branch, not today's
+  // workplace. Active branches are therefore selectable by default. The
+  // access table is kept as an explicit deny list (`is_active = false`) so
+  // administrators can still revoke a specific branch without turning the
+  // legacy backfilled home-branch row into a hidden allow-list barrier.
   const result = await db.query(`
     select b.id, b.name, b.address, b.city, b.timezone
-      from employee_branch_access a
-      join branches b on b.id = a.branch_id
-     where a.employee_id = $1 and a.is_active = true and b.is_active = true
+      from branches b
+     where b.is_active = true
+       and not exists (
+         select 1
+           from employee_branch_access a
+          where a.employee_id = $1
+            and a.branch_id = b.id
+            and a.is_active = false
+       )
      order by b.name asc, b.id asc
   `, [id]).catch((error) => ({ rows: [], error }));
 
@@ -98,5 +121,6 @@ module.exports = {
   listEmployeeBranches,
   normalizeId,
   resolveEmployeeBranch,
+  selectEmployeeBranches,
   setActiveEmployeeBranch,
 };

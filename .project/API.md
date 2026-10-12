@@ -128,8 +128,8 @@ The legacy `POST /api/marketplace/auth/phone/request-otp` and
 `TELEGRAM_AUTH_REQUIRED`; they do not create or verify fallback OTPs.
 # Employee branch context
 
-`POST /api/barbers/login` accepts optional `branch_id` for workspace employees. When credentials are valid but more than one active `employee_branch_access` row exists and `branch_id` is absent, the response is `409` with `code: BRANCH_SELECTION_REQUIRED` and a PII-free `branches` array. A branch outside the employee's access returns `403 BRANCH_ACCESS_DENIED`.
+`POST /api/barbers/login` accepts optional `branch_id` for workspace employees. When credentials are valid but more than one active branch is available and `branch_id` is absent, the response is `409` with `code: BRANCH_SELECTION_REQUIRED` and a PII-free `branches` array. Active branches are selectable by default; an explicit inactive `employee_branch_access` row is a server-side deny. A closed/inactive branch or denied branch returns `403 BRANCH_ACCESS_DENIED`.
 
-The selected branch is persisted in `employee_active_branches` and is reflected in JWT `branchId`, `/api/barbers/me` as `active_branch_id`, Verifix events, kiosk employee visibility, and queue bookings. `users.branch_id`/`barbers.branch_id` remain the permanent assignment. Apply `db/postgres/employee_branches.sql` before enabling multi-branch assignments.
+The selected branch is persisted in `employee_active_branches` and is reflected in JWT `branchId`, `/api/barbers/me` as `active_branch_id`, Verifix events, kiosk employee visibility, and queue bookings. `users.branch_id`/`barbers.branch_id` remain the permanent assignment. Apply `db/postgres/employee_branches.sql` before enabling multi-branch assignments; the migration is additive and does not rewrite permanent assignments.
 
 `POST /api/barbers/me/branch` switches an authorized workspace employee's active branch. If the employee is on shift, the API records a `shift_end` in the previous branch and a `shift_start` in the new branch; historical queue entries and payments remain attached to their original `queue_entries.branch_id`.
