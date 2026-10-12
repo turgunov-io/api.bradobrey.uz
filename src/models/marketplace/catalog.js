@@ -145,7 +145,24 @@ const getVisibleBarbers = async (branchId) => {
 
   if (barbersError) throw barbersError;
 
-  const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
+  const { data: activeBarbers, error: activeBarbersError } = await db
+    .from('employee_active_branches')
+    .select('employee_id, branch_id, is_on_shift')
+    .eq('branch_id', branchId)
+    .eq('is_on_shift', true);
+  if (activeBarbersError && !String(activeBarbersError.message || '').includes('employee_active_branches')) throw activeBarbersError;
+  const activeById = new Map((activeBarbers || []).map((row) => [String(row.employee_id), row]));
+  const { data: assignedBarbers, error: assignedBarbersError } = await db
+    .from('barbers')
+    .select('id, name, branch_id, photo_url, specialization, is_on_shift, is_active')
+    .in('id', Array.from(activeById.keys()));
+  if (assignedBarbersError) throw assignedBarbersError;
+  const mergedBarbers = [...(barbers || [])];
+  for (const barber of assignedBarbers || []) {
+    if (!mergedBarbers.some((item) => String(item.id) === String(barber.id))) mergedBarbers.push(barber);
+  }
+
+  const barberIds = mergedBarbers.map((barber) => barber.id).filter(Boolean);
   if (!barberIds.length) return [];
 
   const { data: users, error: usersError } = await db
@@ -157,9 +174,14 @@ const getVisibleBarbers = async (branchId) => {
   if (usersError) throw usersError;
 
   const allowedBarberIds = new Set((users || []).map((user) => user.id));
-  const visibleBarbers = (barbers || []).filter((barber) => (
-    allowedBarberIds.has(barber.id) && barber.is_active !== false
-  ));
+  const visibleBarbers = mergedBarbers.filter((barber) => (
+    allowedBarberIds.has(barber.id) && barber.is_active !== false &&
+    (String(barber.branch_id) === String(branchId) || activeById.has(String(barber.id)))
+  )).map((barber) => ({
+    ...barber,
+    branch_id: branchId,
+    is_on_shift: activeById.get(String(barber.id))?.is_on_shift ?? barber.is_on_shift,
+  }));
 
   const { data: queues, error: queueError } = await db
     .from('queue_entries')
@@ -601,8 +623,13 @@ class MarketplaceCatalog {
         .maybeSingle();
 
       if (barberError) return res.status(500).json({ error: barberError.message });
-      if (!barber || barber.branch_id !== branchId || barber.is_active === false) {
-        return res.status(400).json({ error: 'Selected barber is not available for this branch' });
+      if (!barber || barber.is_active === false) return res.status(400).json({ error: 'Selected barber is not available for this branch' });
+      if (String(barber.branch_id) !== String(branchId)) {
+        const { data: activeAssignment, error: activeError } = await db.from('employee_active_branches').select('employee_id, branch_id, is_on_shift').eq('employee_id', barberId).maybeSingle();
+        if (activeError) return res.status(500).json({ error: activeError.message });
+        if (!activeAssignment || String(activeAssignment.branch_id) !== String(branchId) || activeAssignment.is_on_shift !== true) {
+          return res.status(400).json({ error: 'Selected barber is not available for this branch' });
+        }
       }
 
       const { data: barberUser, error: barberUserError } = await db

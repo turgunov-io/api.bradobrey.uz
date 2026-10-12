@@ -333,7 +333,28 @@ class Kiosk {
             return res.status(500).json({ error: barbersError.message });
         }
 
-        const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
+        const { data: activeBarbers, error: activeBarbersError } = await db
+            .from('employee_active_branches')
+            .select('employee_id, branch_id, is_on_shift')
+            .eq('branch_id', branch_id)
+            .eq('is_on_shift', true);
+        if (activeBarbersError && !String(activeBarbersError.message || '').includes('employee_active_branches')) {
+            return res.status(500).json({ error: activeBarbersError.message });
+        }
+        const activeById = new Map((activeBarbers || []).map((row) => [String(row.employee_id), row]));
+
+        const { data: assignedBarbers, error: assignedBarbersError } = await db
+            .from('barbers')
+            .select('id, name, branch_id, photo_url, is_on_shift, is_active, is_archived')
+            .in('id', Array.from(activeById.keys()));
+        if (assignedBarbersError) return res.status(500).json({ error: assignedBarbersError.message });
+
+        const mergedBarbers = [...(barbers || [])];
+        for (const barber of assignedBarbers || []) {
+            if (!mergedBarbers.some((item) => String(item.id) === String(barber.id))) mergedBarbers.push(barber);
+        }
+
+        const barberIds = mergedBarbers.map((barber) => barber.id).filter(Boolean);
         let allowedBarberIds = new Set(barberIds);
 
         if (barberIds.length) {
@@ -350,9 +371,14 @@ class Kiosk {
             allowedBarberIds = new Set((users || []).map((user) => user.id));
         }
 
-        const visibleBarbers = (barbers || []).filter((barber) => (
-            allowedBarberIds.has(barber.id) && barber.is_archived !== true
-        ));
+        const visibleBarbers = mergedBarbers.filter((barber) => (
+            allowedBarberIds.has(barber.id) && barber.is_archived !== true &&
+            (String(barber.branch_id) === String(branch_id) || activeById.has(String(barber.id)))
+        )).map((barber) => ({
+            ...barber,
+            branch_id: branch_id,
+            is_on_shift: activeById.get(String(barber.id))?.is_on_shift ?? barber.is_on_shift,
+        }));
 
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
@@ -715,8 +741,14 @@ class Kiosk {
             .maybeSingle();
         if (barberError) return res.status(500).json({ error: barberError.message });
         if (!barber) return res.status(404).json({ error: 'Barber not found' });
-        if (barber.branch_id !== branch_id) {
-            return res.status(400).json({ error: 'Barber does not belong to this branch' });
+        let activeAssignment = null;
+        if (String(barber.branch_id) !== String(branch_id)) {
+            const { data, error } = await db.from('employee_active_branches').select('employee_id, branch_id, is_on_shift').eq('employee_id', barber_id).maybeSingle();
+            if (error && !String(error.message || '').includes('employee_active_branches')) return res.status(500).json({ error: error.message });
+            activeAssignment = data;
+            if (!activeAssignment || String(activeAssignment.branch_id) !== String(branch_id) || activeAssignment.is_on_shift !== true) {
+                return res.status(400).json({ error: 'Barber is not active in this branch' });
+            }
         }
         if (barber.is_archived === true) {
             return res.status(400).json({ error: 'Selected employee is archived' });

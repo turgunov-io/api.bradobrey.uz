@@ -11,6 +11,7 @@ const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
+const { getActiveEmployeeBranch, resolveEmployeeBranch, setActiveEmployeeBranch } = require('../utils/employeeBranches');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -1392,6 +1393,7 @@ class Barbers {
         }
 
         const barberId = payload.sub || payload.id;
+        const activeBranchId = payload.branchId || payload.branch_id;
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
@@ -1413,12 +1415,12 @@ class Barbers {
             breakTimers.delete(barberId);
             const io = req.app.get('io');
             try {
-                await endBreak(barberId, barber.branch_id, io);
+                await endBreak(barberId, activeBranchId || barber.branch_id, io);
                 await logVerifixEvent({
                     actorId: barberId,
                     actorRole: payload.role,
                     barberId,
-                    branchId: barber.branch_id,
+                    branchId: activeBranchId || barber.branch_id,
                     eventType: 'break_end',
                     io,
                     metadata: { ended_early: true },
@@ -1445,10 +1447,10 @@ class Barbers {
         const timer = setTimeout(async () => {
             breakTimers.delete(barberId);
             try {
-                await endBreak(barberId, barber.branch_id, io);
+                await endBreak(barberId, activeBranchId || barber.branch_id, io);
                 await logVerifixEvent({
                     barberId,
-                    branchId: barber.branch_id,
+                    branchId: activeBranchId || barber.branch_id,
                     eventType: 'break_end',
                     io,
                     metadata: { auto_return: true },
@@ -1462,7 +1464,7 @@ class Barbers {
         breakTimers.set(barberId, { timer, startedAt: new Date(), until: untilTs });
 
         if (io) {
-            io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+            io.to(`branch:${activeBranchId || barber.branch_id}`).emit('queue:update', {
                 type: 'barber_status',
                 barberId,
                 is_active: false,
@@ -1473,7 +1475,7 @@ class Barbers {
             actorId: barberId,
             actorRole: payload.role,
             barberId,
-            branchId: barber.branch_id,
+            branchId: activeBranchId || barber.branch_id,
             eventType: 'break_start',
             io,
             metadata: { minutes },
@@ -1502,6 +1504,7 @@ class Barbers {
         }
 
         const barberId = payload.sub || payload.id;
+        const activeBranchId = payload.branchId || payload.branch_id;
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
@@ -1532,7 +1535,7 @@ class Barbers {
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+            io.to(`branch:${activeBranchId || barber.branch_id}`).emit('queue:update', {
                 type: 'barber_status',
                 barberId,
                 is_active: true,
@@ -1543,7 +1546,7 @@ class Barbers {
             actorId: barberId,
             actorRole: payload.role,
             barberId,
-            branchId: barber.branch_id,
+            branchId: activeBranchId || barber.branch_id,
             eventType: 'break_end',
             io,
             metadata: { manual_return: true },
@@ -1621,16 +1624,25 @@ class Barbers {
             });
         }
 
-        if (!branch_id && !userData.branch_id) return res.status(400).json({ error: 'Branch ID is required' });
-
-        if (LOCATION_ROLES.has(userData.role) && !userData.branch_id) {
-            return res.status(403).json({ code: 'EMPLOYEE_BRANCH_NOT_ASSIGNED', error: 'Employee is not assigned to a branch' });
+        let branchSelection;
+        try {
+            branchSelection = await resolveEmployeeBranch({
+                employeeId: userData.id,
+                requestedBranchId: branch_id,
+                fallbackBranchId: userData.branch_id,
+            });
+        } catch (error) {
+            if (error.code === 'BRANCH_SELECTION_REQUIRED') {
+                return res.status(409).json({ code: error.code, error: error.message, branches: error.branches || [] });
+            }
+            if (error.code === 'BRANCH_ACCESS_DENIED') {
+                return res.status(403).json({ code: error.code, error: error.message });
+            }
+            return res.status(500).json({ error: 'Failed to resolve employee branch access' });
         }
 
-        const effectiveBranchId = userData.branch_id || branch_id;
-        if (!LOCATION_ROLES.has(userData.role) && userData.branch_id && branch_id && String(userData.branch_id) !== String(branch_id)) {
-            return res.status(403).json({ error: 'Employee is not assigned to the selected branch' });
-        }
+        const effectiveBranchId = branchSelection.branchId;
+        if (!effectiveBranchId) return res.status(403).json({ code: 'EMPLOYEE_BRANCH_NOT_ASSIGNED', error: 'Employee is not assigned to a branch' });
 
         if (LOCATION_ROLES.has(userData.role)) {
             const locationCheck = await verifyAndRecordLoginLocation({
@@ -1645,13 +1657,10 @@ class Barbers {
             }
         }
 
-        await db
-            .from('users')
-            .update({ branch_id: effectiveBranchId })
-            .eq('id', userData.id);
+        await setActiveEmployeeBranch({ employeeId: userData.id, branchId: effectiveBranchId, isOnShift: true });
         await db
             .from('barbers')
-            .update({ branch_id: effectiveBranchId, is_on_shift: true })
+            .update({ is_on_shift: true })
             .eq('id', userData.id);
 
         const token = signUserToken({
@@ -1677,7 +1686,9 @@ class Barbers {
                 id: userData.id,
                 login: userData.login,
                 role: userData.role,
-                branch_id,
+                branch_id: effectiveBranchId,
+                active_branch_id: effectiveBranchId,
+                branches: branchSelection.branches,
                 permissions: loginPermissions,
             },
         });
@@ -1898,6 +1909,9 @@ class Barbers {
                 return res.status(404).json({ error: 'Barber profile not found' });
             }
 
+            const activeBranch = await getActiveEmployeeBranch(user.id);
+            const effectiveBranchId = activeBranch?.branch_id || barberData.branch_id || user.branch_id || null;
+
             const io = req.app.get('io');
             const breakInfo = breakTimers.get(user.id);
             // auto-finish break if timer elapsed (for safety)
@@ -1905,7 +1919,7 @@ class Barbers {
                 clearTimeout(breakInfo.timer);
                 breakTimers.delete(user.id);
                 try {
-                    await endBreak(user.id, barberData.branch_id, io);
+                    await endBreak(user.id, effectiveBranchId, io);
                     barberData.is_on_shift = true;
                 } catch (e) {
                     // ignore, return current state
@@ -1914,12 +1928,16 @@ class Barbers {
             const updatedBreak = breakTimers.get(user.id);
             const finance = await getBarberProfileFinance({
                 barberId: user.id,
-                branchId: barberData.branch_id || user.branch_id,
+                branchId: effectiveBranchId,
                 period: req.query?.period,
             });
 
             barber = {
                 ...barberData,
+                assigned_branch_id: barberData.branch_id || user.branch_id || null,
+                active_branch_id: effectiveBranchId,
+                branch_id: effectiveBranchId,
+                is_on_shift: activeBranch ? activeBranch.is_on_shift : barberData.is_on_shift,
                 break_started_at: updatedBreak?.startedAt ? updatedBreak.startedAt.toISOString() : null,
                 break_until: updatedBreak?.until ? updatedBreak.until.toISOString() : null,
                 finance,
