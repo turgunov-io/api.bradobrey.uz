@@ -72,6 +72,8 @@ test('server-side branch checks remain wired into the real switch, shift, and ki
   assert.match(branches, /b\.is_active = true/);
   assert.match(branches, /a\.is_active = false/);
   assert.match(barbers, /resolveEmployeeBranch/);
+  assert.match(barbers, /active_branch_id/);
+  assert.match(barbers, /activeBranchesByEmployee/);
   assert.match(verifix, /employeeCanUseBranch/);
   assert.match(kiosk, /employee_active_branches/);
   assert.match(kiosk, /activeById/);

@@ -402,6 +402,7 @@ const uploadEmployeePhoto = async (req, userId) => {
 
 const employeeItem = ({ user, barber, permissions = [] }) => ({
     branch_id: barber?.branch_id || user.branch_id || null,
+    active_branch_id: barber?.active_branch_id || null,
     id: user.id,
     is_active: barber?.is_active ?? null,
     is_archived: barber?.is_archived ?? false,
@@ -422,7 +423,9 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
         .select('id, login, role, branch_id', { count: 'exact' })
         .in('role', Array.from(EMPLOYEE_ROLES));
 
-    if (branchId) query = query.eq('branch_id', branchId);
+    // branch_id is the permanent assignment. A branch-filtered directory must
+    // also include employees whose persisted active work branch is selected.
+    // The active assignment is resolved below after the user ids are known.
     if (role && EMPLOYEE_ROLES.has(role)) query = query.eq('role', role);
 
     const { data: users, error: usersError, count } = await query
@@ -431,7 +434,7 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
     if (usersError) throw new Error(usersError.message);
 
     const userIds = (users || []).map((user) => user.id).filter(Boolean);
-    const [barbersResult, permissionsByUser] = await Promise.all([
+    const [barbersResult, permissionsByUser, activeBranchesResult] = await Promise.all([
         userIds.length
             ? db
                 .from('barbers')
@@ -439,16 +442,34 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
                 .in('id', userIds)
             : Promise.resolve({ data: [], error: null }),
         fetchPermissionsByUserIds(userIds),
+        userIds.length
+            ? db
+                .from('employee_active_branches')
+                .select('employee_id, branch_id, is_on_shift')
+                .in('employee_id', userIds)
+            : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (barbersResult.error) throw new Error(barbersResult.error.message);
+    if (activeBranchesResult.error && !isMissingRelationError(activeBranchesResult.error, 'employee_active_branches')) {
+        throw new Error(activeBranchesResult.error.message);
+    }
 
     const barbersById = new Map((barbersResult.data || []).map((barber) => [String(barber.id), barber]));
+    const activeBranchesByEmployee = new Map((activeBranchesResult.data || []).map((assignment) => [
+        String(assignment.employee_id),
+        assignment,
+    ]));
     const items = (users || []).map((user) => employeeItem({
-        barber: barbersById.get(String(user.id)) || null,
+        barber: {
+            ...(barbersById.get(String(user.id)) || {}),
+            active_branch_id: activeBranchesByEmployee.get(String(user.id))?.branch_id || null,
+        },
         permissions: permissionsByUser.get(String(user.id)) || [],
         user,
     })).filter((item) => {
+        if (branchId && String(item.branch_id || '') !== String(branchId)
+            && String(item.active_branch_id || '') !== String(branchId)) return false;
         const archivedItem = item.is_archived === true;
 
         if (archived === 'only') return archivedItem;

@@ -133,3 +133,5 @@ The legacy `POST /api/marketplace/auth/phone/request-otp` and
 The selected branch is persisted in `employee_active_branches` and is reflected in JWT `branchId`, `/api/barbers/me` as `active_branch_id`, Verifix events, kiosk employee visibility, and queue bookings. `users.branch_id`/`barbers.branch_id` remain the permanent assignment. Apply `db/postgres/employee_branches.sql` before enabling multi-branch assignments; the migration is additive and does not rewrite permanent assignments.
 
 `POST /api/barbers/me/branch` switches an authorized workspace employee's active branch. If the employee is on shift, the API records a `shift_end` in the previous branch and a `shift_start` in the new branch; historical queue entries and payments remain attached to their original `queue_entries.branch_id`.
+
+`GET /api/barbers?mode=employees&branch_id=...` filters by both the permanent assignment and the persisted `active_branch_id`, so an employee temporarily working in another branch appears in that branch's administrative directory without changing the permanent assignment.
