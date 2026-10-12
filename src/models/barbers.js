@@ -1633,7 +1633,6 @@ class Barbers {
         }
 
         if (LOCATION_ROLES.has(userData.role)) {
-            if (!req.body?.location) return res.status(403).json({ code: 'LOCATION_REQUIRED', error: 'Current location is required to sign in' });
             const locationCheck = await verifyAndRecordLoginLocation({
                 barberId: userData.id,
                 branchId: effectiveBranchId,

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-12
+
+- Allowed barber/super-barber login for branches without an enabled `branch_locations` policy; geolocation enforcement remains active for configured branches.
+
 ## 2026-10-11
 
 - Fixed no-show restrictions for automatic queue closures and stale queue

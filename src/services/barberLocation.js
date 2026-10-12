@@ -51,6 +51,8 @@ const loadLocation = async (branchId) => {
   return data || null;
 };
 
+const isLocationControlEnabled = (config) => Boolean(config && config.is_enabled === true);
+
 const insertEvent = async (event) => {
   const result = await db.query(`
     insert into barber_login_location_events
@@ -67,16 +69,19 @@ const insertEvent = async (event) => {
 };
 
 async function verifyAndRecordLoginLocation({ barberId, branchId, location }) {
+  const config = await loadLocation(branchId);
+  if (!isLocationControlEnabled(config)) {
+    return { ok: true, geolocationSkipped: true, config, event: null };
+  }
+
+  if (!location) {
+    return { ok: false, statusCode: 403, code: 'LOCATION_REQUIRED', event: null };
+  }
+
   const normalized = normalizeLocation(location);
   if (normalized.error) {
     const event = await insertEvent({ barberId, branchId, ...normalized.value || {}, status: 'rejected', reason: normalized.error });
     return { ok: false, statusCode: 403, code: normalized.error, event };
-  }
-
-  const config = await loadLocation(branchId);
-  if (!config || config.is_enabled !== true) {
-    const event = await insertEvent({ ...normalized.value, barberId, branchId, status: 'rejected', reason: 'LOCATION_NOT_CONFIGURED' });
-    return { ok: false, statusCode: 403, code: 'LOCATION_NOT_CONFIGURED', event };
   }
 
   const distanceMeters = haversineMeters(normalized.value.latitude, normalized.value.longitude, config.latitude, config.longitude);
@@ -154,6 +159,8 @@ async function listLocationEvents(req, res) {
 
 module.exports = {
   LOCATION_ROLES,
+  isLocationControlEnabled,
+  loadLocation,
   normalizeLocation,
   haversineMeters,
   verifyAndRecordLoginLocation,

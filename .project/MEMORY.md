@@ -145,3 +145,8 @@
 - API geolocation audit passed: migration indexes exist, PM2 is online, health is 200, and the server remains fail-closed for missing configuration/stale/mock/low-accuracy/out-of-radius input.
 - The admin-only location-events response now includes the recorded entry coordinates and configured branch coordinates for Verifix map rendering; mobile login responses and public endpoints remain unchanged.
 
+# Barber login before branch location rollout (2026-10-12)
+
+- Barber/super-barber login now skips geolocation when the assigned branch has no enabled `branch_locations` policy, so branches can be onboarded before coordinates are configured.
+- Enabled branch location policies still require a current location and preserve stale/accuracy/mock/radius validation and audit notifications.
+
