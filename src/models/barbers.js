@@ -11,7 +11,7 @@ const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
-const { getActiveEmployeeBranch, resolveEmployeeBranch, setActiveEmployeeBranch } = require('../utils/employeeBranches');
+const { getActiveEmployeeBranch, listEmployeeBranches, resolveEmployeeBranch, setActiveEmployeeBranch } = require('../utils/employeeBranches');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -819,6 +819,12 @@ const isMissingPriceOverrideColumn = (error) => {
     return /price_override/i.test(message) && /could not find|does not exist|schema cache/i.test(message);
 };
 
+const isMissingPaymentsTable = (error) => {
+    const code = String(error?.code || '').trim();
+    const message = String(error?.message || error?.details || '').toLowerCase();
+    return code === '42P01' || code === 'PGRST205' || (message.includes('payments') && /does not exist|not found|schema cache|could not find/.test(message));
+};
+
 const completedRevenueQuery = ({ barberId, branchId, from, to, select }) => {
     let query = db
         .from('queue_entries')
@@ -924,6 +930,110 @@ const getBarberProfileFinance = async ({ barberId, branchId, period }) => {
         period: range.period,
         profit_percent: draft.profit_percent,
         total_earned: roundFinanceAmount(totalEarned),
+    };
+};
+
+const getBarberWorkStatistics = async ({ barberId, period }) => {
+    const range = periodRange(period);
+    let { data: entries, error: entriesError } = await db
+        .from('queue_entries')
+        .select('id, branch_id, service_id, service_ids, price_override, finished_at')
+        .eq('barber_id', barberId)
+        .eq('status', 'completed')
+        .gte('finished_at', range.from)
+        .lt('finished_at', range.to);
+
+    if (entriesError && isMissingPriceOverrideColumn(entriesError)) {
+        ({ data: entries, error: entriesError } = await db
+            .from('queue_entries')
+            .select('id, branch_id, service_id, service_ids, finished_at')
+            .eq('barber_id', barberId)
+            .eq('status', 'completed')
+            .gte('finished_at', range.from)
+            .lt('finished_at', range.to));
+    }
+    if (entriesError) throw new Error(entriesError.message);
+
+    const completedEntries = Array.isArray(entries) ? entries : [];
+    const entryIds = completedEntries.map(entry => entry.id).filter(Boolean);
+    const serviceIds = Array.from(new Set(completedEntries.flatMap(serviceIdsForEntry).filter(Boolean)));
+    const [paymentsResult, servicesResult, branchesResult, eventsResult] = await Promise.all([
+        entryIds.length
+            ? db.from('payments').select('queue_entry_id, amount').in('queue_entry_id', entryIds)
+            : { data: [], error: null },
+        serviceIds.length
+            ? db.from('services').select('id, base_price').in('id', serviceIds)
+            : { data: [], error: null },
+        db.from('branches').select('id, name'),
+        db.from('barber_activity_events')
+            .select('branch_id, event_type, occurred_at')
+            .eq('barber_id', barberId)
+            .in('event_type', ['shift_start', 'shift_end'])
+            .gte('occurred_at', range.from)
+            .lt('occurred_at', range.to)
+            .order('occurred_at', { ascending: true }),
+    ]);
+
+    if (paymentsResult.error && !isMissingPaymentsTable(paymentsResult.error)) throw new Error(paymentsResult.error.message);
+    if (servicesResult.error) throw new Error(servicesResult.error.message);
+    if (branchesResult.error) throw new Error(branchesResult.error.message);
+    const events = eventsResult.error ? [] : (eventsResult.data || []);
+    const prices = new Map((servicesResult.data || []).map(service => [String(service.id), financeNumber(service.base_price)]));
+    const paymentsByEntry = new Map();
+    for (const payment of paymentsResult.data || []) {
+        paymentsByEntry.set(payment.queue_entry_id, (paymentsByEntry.get(payment.queue_entry_id) || 0) + financeNumber(payment.amount));
+    }
+    const branchNames = new Map((branchesResult.data || []).map(branch => [String(branch.id), branch.name || String(branch.id)]));
+    const rows = new Map();
+    const ensureRow = branchId => {
+        const key = String(branchId || 'unknown');
+        if (!rows.has(key)) rows.set(key, { branch_id: branchId || null, branch_name: branchNames.get(key) || 'Филиал не указан', services: 0, revenue: 0, shifts: 0, worked_days: 0, worked_minutes: 0 });
+        return rows.get(key);
+    };
+    for (const entry of completedEntries) {
+        const row = ensureRow(entry.branch_id);
+        const paymentTotal = paymentsByEntry.get(entry.id) || 0;
+        const override = financeNumber(entry.price_override);
+        const serviceTotal = serviceIdsForEntry(entry).reduce((sum, id) => sum + (prices.get(String(id)) || 0), 0);
+        row.services += 1;
+        row.revenue += paymentTotal || override || serviceTotal;
+    }
+
+    const openShifts = new Map();
+    const daySets = new Map();
+    for (const event of events) {
+        const key = String(event.branch_id || 'unknown');
+        const row = ensureRow(event.branch_id);
+        const occurred = new Date(event.occurred_at);
+        if (event.event_type === 'shift_start') {
+            if (!openShifts.has(key)) {
+                openShifts.set(key, occurred);
+                row.shifts += 1;
+                const days = daySets.get(key) || new Set();
+                days.add(occurred.toISOString().slice(0, 10));
+                daySets.set(key, days);
+            }
+        } else if (event.event_type === 'shift_end') {
+            const started = openShifts.get(key);
+            if (started) {
+                row.worked_minutes += Math.max(0, Math.round((occurred.getTime() - started.getTime()) / 60000));
+                openShifts.delete(key);
+            }
+        }
+    }
+    for (const [key, row] of rows) row.worked_days = (daySets.get(key) || new Set()).size;
+
+    const branchBreakdown = [...rows.values()].map(row => ({ ...row, revenue: roundFinanceAmount(row.revenue) }));
+    return {
+        period: range.period,
+        totals: {
+            revenue: roundFinanceAmount(branchBreakdown.reduce((sum, row) => sum + row.revenue, 0)),
+            services: branchBreakdown.reduce((sum, row) => sum + row.services, 0),
+            shifts: branchBreakdown.reduce((sum, row) => sum + row.shifts, 0),
+            worked_days: branchBreakdown.reduce((sum, row) => sum + row.worked_days, 0),
+            worked_minutes: branchBreakdown.reduce((sum, row) => sum + row.worked_minutes, 0),
+        },
+        branches: branchBreakdown,
     };
 };
 
@@ -1910,6 +2020,7 @@ class Barbers {
             }
 
             const activeBranch = await getActiveEmployeeBranch(user.id);
+            const availableBranches = await listEmployeeBranches(user.id, barberData.branch_id || user.branch_id);
             const effectiveBranchId = activeBranch?.branch_id || barberData.branch_id || user.branch_id || null;
 
             const io = req.app.get('io');
@@ -1931,20 +2042,119 @@ class Barbers {
                 branchId: effectiveBranchId,
                 period: req.query?.period,
             });
+            const statistics = await getBarberWorkStatistics({
+                barberId: user.id,
+                period: req.query?.period,
+            });
 
             barber = {
                 ...barberData,
                 assigned_branch_id: barberData.branch_id || user.branch_id || null,
                 active_branch_id: effectiveBranchId,
+                branches: availableBranches,
                 branch_id: effectiveBranchId,
                 is_on_shift: activeBranch ? activeBranch.is_on_shift : barberData.is_on_shift,
                 break_started_at: updatedBreak?.startedAt ? updatedBreak.startedAt.toISOString() : null,
                 break_until: updatedBreak?.until ? updatedBreak.until.toISOString() : null,
                 finance,
+                statistics,
             };
         }
 
+        if (barber?.branches) user.branches = barber.branches;
         return res.json({ user: { ...user, permissions }, barber });
+    }
+
+    async switchBranch(req, res) {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        if (!token) return res.status(401).json({ error: 'Authorization token is required' });
+
+        let payload;
+        try {
+            payload = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (_error) {
+            return res.status(401).json({ error: 'Invalid or expired token' });
+        }
+
+        if (!BARBER_WORKSPACE_ROLES.has(payload.role)) {
+            return res.status(403).json({ error: 'Only workspace employees can switch branches' });
+        }
+
+        const branchId = normalizeText(req.body?.branch_id);
+        if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
+
+        const employeeId = payload.sub || payload.id;
+        try {
+            const { data: barber, error } = await db
+                .from('barbers')
+                .select('id, name, login, branch_id, is_on_shift, is_authorized, is_active, is_archived, specialization, phone, photo_url')
+                .eq('id', employeeId)
+                .maybeSingle();
+            if (error) return res.status(500).json({ error: error.message });
+            if (!barber || isArchivedEmployee(barber)) return res.status(403).json({ error: 'Employee access has been revoked' });
+
+            const resolved = await resolveEmployeeBranch({
+                employeeId,
+                requestedBranchId: branchId,
+                fallbackBranchId: barber.branch_id,
+            });
+            const current = await getActiveEmployeeBranch(employeeId);
+            const currentBranchId = current?.branch_id || payload.branchId || barber.branch_id || null;
+            const wasOnShift = Boolean(current?.is_on_shift ?? barber.is_on_shift);
+            const io = req.app.get('io');
+
+            if (wasOnShift && currentBranchId && String(currentBranchId) !== String(resolved.branchId)) {
+                await recordActivityEvent({
+                    actorId: employeeId,
+                    actorRole: payload.role,
+                    barberId: employeeId,
+                    branchId: currentBranchId,
+                    eventType: 'shift_end',
+                    io,
+                    metadata: { branch_switch: true, next_branch_id: resolved.branchId },
+                    source: 'dashboard',
+                });
+            }
+
+            await setActiveEmployeeBranch({ employeeId, branchId: resolved.branchId, isOnShift: wasOnShift });
+            const { data: updatedBarber, error: updateError } = await db
+                .from('barbers')
+                .update({ is_on_shift: wasOnShift })
+                .eq('id', employeeId)
+                .select('id, name, branch_id, is_on_shift, is_authorized, is_active, is_archived, specialization, phone, photo_url')
+                .maybeSingle();
+            if (updateError) return res.status(500).json({ error: updateError.message });
+
+            if (wasOnShift && currentBranchId && String(currentBranchId) !== String(resolved.branchId)) {
+                await recordActivityEvent({
+                    actorId: employeeId,
+                    actorRole: payload.role,
+                    barberId: employeeId,
+                    branchId: resolved.branchId,
+                    eventType: 'shift_start',
+                    io,
+                    metadata: { branch_switch: true, previous_branch_id: currentBranchId },
+                    source: 'dashboard',
+                });
+            }
+
+            const nextToken = signUserToken({
+                branch_id: resolved.branchId,
+                id: employeeId,
+                login: payload.login,
+                role: payload.role,
+            });
+
+            return res.json({
+                token: nextToken,
+                user: { id: employeeId, login: payload.login || null, role: payload.role, branch_id: resolved.branchId, active_branch_id: resolved.branchId, branches: resolved.branches },
+                barber: { ...updatedBarber, assigned_branch_id: barber.branch_id, active_branch_id: resolved.branchId, branch_id: resolved.branchId },
+            });
+        } catch (error) {
+            if (error.code === 'BRANCH_ACCESS_DENIED') return res.status(403).json({ code: error.code, error: error.message });
+            return res.status(400).json({ error: error.message || 'Failed to switch branch' });
+        }
     }
 
     async myQueue(req, res) {

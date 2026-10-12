@@ -18,6 +18,7 @@ router.post('/login', (req, res) => barbers.login(req, res));
 router.post('/admin/login', (req, res) => barbers.adminLogin(req, res));
 router.post('/logout', (req, res) => barbers.logout(req, res));
 router.get("/me", (req, res) => barbers.me(req, res));
+router.post("/me/branch", (req, res) => barbers.switchBranch(req, res));
 router.get('/location-events', (req, res) => location.listLocationEvents(req, res));
 router.patch("/me", upload.single('file'), (req, res) => barbers.updateProfile(req, res));
 router.get("/queue", (req, res) => barbers.myQueue(req, res));

@@ -93,6 +93,7 @@ async function employeeCanUseBranch(employeeId, branchId, fallbackBranchId = nul
 
 module.exports = {
   employeeCanUseBranch,
+  listEmployeeBranches,
   getActiveEmployeeBranch,
   listEmployeeBranches,
   normalizeId,
