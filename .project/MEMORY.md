@@ -150,3 +150,10 @@
 - Barber/super-barber login now skips geolocation when the assigned branch has no enabled `branch_locations` policy, so branches can be onboarded before coordinates are configured.
 - Enabled branch location policies still require a current location and preserve stale/accuracy/mock/radius validation and audit notifications.
 
+# Active employee branch context (2026-10-12)
+
+- `users.branch_id` and `barbers.branch_id` remain the permanent/default assignment; they are no longer overwritten by employee login or shift start.
+- `db/postgres/employee_branches.sql` adds `employee_branch_access` (allowed branches, backfilled from the legacy assignment) and `employee_active_branches` (one persisted current work branch and shift state per employee).
+- Employee login accepts `branch_id`. With multiple allowed branches and no selection it returns `409 BRANCH_SELECTION_REQUIRED` with branch metadata; an unauthorized branch returns `403 BRANCH_ACCESS_DENIED`.
+- JWT `branchId`, Verifix events, kiosk visibility, and marketplace booking validation use the active branch. Apply the SQL migration before deploying the API changes; old single-branch data remains compatible through the legacy fallback.
+- `POST /api/barbers/me/branch` validates access server-side, switches the active context, and records branch-specific shift boundaries. `/api/barbers/me` also returns available branches and period statistics with queue revenue, services, shifts, worked minutes, and separate finance snapshot totals/payouts by branch.

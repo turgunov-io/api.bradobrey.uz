@@ -102,3 +102,6 @@
 
 - Added server-side login geolocation verification, branch policy endpoints, audit events, and outside-radius notifications. Migration is prepared but unapplied; production deployment was not performed.
 
+# 2026-10-12
+
+- Fixed employee cross-branch work context: added access and active-branch persistence, branch selection during login, server-side branch authorization, and active-branch-aware kiosk/marketplace booking and Verifix flows.
