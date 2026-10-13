@@ -164,3 +164,10 @@
 - `listEmployeeBranches` now returns active branches by default and excludes only branches with an explicit inactive access row. This preserves server-side denial and closed-branch checks without making the legacy home row a manual prerequisite for every temporary workplace.
 - Added `test/employeeBranchSwitch.e2e.test.js`: an isolated no-production-data contract covering login selection, persisted active branch, kiosk visibility, branch-scoped booking/shift IDs, switching back, inactive branches, and explicit denial.
 - The employee directory now joins `employee_active_branches`; branch-filtered admin lists match either permanent `branch_id` or current `active_branch_id`. The API exposes both fields so UI display does not require rewriting the permanent assignment.
+
+# Production API deployment (2026-10-14)
+
+- Deployed the current `main` commit to `/var/www/api.bradobrey.uz` using an archive overlay; `.env`, `node_modules`, and the dashboard directory were preserved.
+- Confirmed the four active-branch/geolocation tables already exist in production, so no database migration was run.
+- Restarted only PM2 app `BRADOBREY-BARBER`; `bradobrey-dashboard` was not restarted. PM2 reported the API online and `https://api.bradobrey.uz/health` returned HTTP 200.
+- Created rollback backup `/var/backups/api.bradobrey.uz-20261014-deploy.tar` on the server. The production Git worktree still contains historical local divergence and was not reset or force-updated.

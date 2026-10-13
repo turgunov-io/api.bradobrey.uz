@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14
+
+- Deployed the current API `main` code to production and restarted only `BRADOBREY-BARBER`; dashboard remained online and untouched.
+- Verified existing production branch/geolocation schema, PM2 API status, and public `/health` HTTP 200. Created a server-side rollback archive.
+
 ## 2026-10-12
 
 - Allowed barber/super-barber login for branches without an enabled `branch_locations` policy; geolocation enforcement remains active for configured branches.
