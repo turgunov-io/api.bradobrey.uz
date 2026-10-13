@@ -8,6 +8,12 @@ const { startExpiryScheduler, stopExpiryScheduler } = require('./models/queueTra
 const { startMarketplaceNotificationDispatcher } = require('./services/marketplacePush');
 const { startCashbackReconciliationScheduler } = require('./services/cashbackReconciliation');
 const { startReferralBonusScheduler } = require('./services/referralBonus');
+const { db } = require('./config/postgres');
+const {
+  canAccessSocketBranch,
+  isSafeBranchId,
+  verifySocketToken,
+} = require('./socketAuth');
 const server = http.createServer(app);
 
 const corsOrigin = app.get('corsOrigin') || '*';
@@ -16,8 +22,6 @@ const io = new Server(server, {
   cors: { origin: corsOrigin },
 });
 
-const isSafeBranchId = (value) => /^[0-9a-f-]{20,64}$/i.test(String(value || ''));
-
 app.set('io', io);
 startQueueAutoCloseScheduler({ io });
 startExpiryScheduler();
@@ -25,23 +29,94 @@ const stopMarketplaceNotificationDispatcher = startMarketplaceNotificationDispat
 const stopCashbackReconciliationScheduler = startCashbackReconciliationScheduler();
 const stopReferralBonusScheduler = startReferralBonusScheduler();
 
-io.on('connection', (socket) => {
-  const branchId = String(socket.handshake.query.branchId || '');
-  if (isSafeBranchId(branchId)) {
-    socket.join(`branch:${branchId}`);
+async function loadSocketAccessState(userId) {
+  const [{ data: user, error: userError }, { data: barber, error: barberError }, activeResult] = await Promise.all([
+    db.from('users').select('id, role, branch_id').eq('id', userId).maybeSingle(),
+    db.from('barbers').select('id, branch_id, is_archived').eq('id', userId).maybeSingle(),
+    db.from('employee_active_branches').select('branch_id').eq('employee_id', userId),
+  ]);
+
+  if (userError) throw userError;
+  if (barberError) throw barberError;
+  if (activeResult.error && !String(activeResult.error.message || '').includes('employee_active_branches')) {
+    throw activeResult.error;
   }
 
-  const joinBranch = (id) => {
-    const nextBranchId = String(id?.branchId || id || '');
-    if (isSafeBranchId(nextBranchId)) socket.join(`branch:${nextBranchId}`);
+  return {
+    user: user || null,
+    barber: barber || null,
+    activeBranches: (activeResult.data || []).map((row) => row.branch_id).filter(Boolean),
+  };
+}
+
+io.use(async (socket, next) => {
+  try {
+    const { payload } = verifySocketToken(socket, process.env.JWT_SECRET);
+    const state = await loadSocketAccessState(payload.sub || payload.id);
+    if (!state.user || state.barber?.is_archived === true) {
+      const error = new Error('Socket session is no longer valid');
+      error.data = { code: 'SOCKET_SESSION_REVOKED' };
+      return next(error);
+    }
+
+    socket.data.auth = { payload, state };
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+});
+
+io.on('connection', (socket) => {
+  const joinedBranches = new Set();
+  const disconnectAt = Number(socket.data.auth?.payload?.exp || 0) * 1000 - Date.now();
+  if (disconnectAt > 0) {
+    const expiryTimer = setTimeout(() => socket.disconnect(true), disconnectAt);
+    expiryTimer.unref?.();
+    socket.once('disconnect', () => clearTimeout(expiryTimer));
+  }
+
+  const resolveRequestedBranch = (value) => String(value?.branchId || value || '').trim();
+  const reply = (ack, result) => {
+    if (typeof ack === 'function') ack(result);
   };
 
-  const leaveBranch = (id) => {
-    const nextBranchId = String(id?.branchId || id || '');
-    if (isSafeBranchId(nextBranchId)) socket.leave(`branch:${nextBranchId}`);
+  const joinBranch = async (value, ack) => {
+    const branchId = resolveRequestedBranch(value);
+    try {
+      const userId = socket.data.auth?.payload?.sub || socket.data.auth?.payload?.id;
+      const state = await loadSocketAccessState(userId);
+      socket.data.auth.state = state;
+    } catch (_error) {
+      reply(ack, { ok: false, code: 'BRANCH_ACCESS_UNAVAILABLE' });
+      socket.emit('branch_access_denied', { branchId });
+      return;
+    }
+
+    if (!canAccessSocketBranch({ ...socket.data.auth, branchId })) {
+      reply(ack, { ok: false, code: 'BRANCH_ACCESS_DENIED' });
+      socket.emit('branch_access_denied', { branchId });
+      return;
+    }
+
+    for (const previousBranchId of joinedBranches) {
+      if (previousBranchId !== branchId) socket.leave(`branch:${previousBranchId}`);
+      joinedBranches.delete(previousBranchId);
+    }
+    socket.join(`branch:${branchId}`);
+    joinedBranches.add(branchId);
+    reply(ack, { ok: true, branchId });
   };
 
-  // Keep the protocol used by the kiosk and marketplace clients identical.
+  const leaveBranch = (value, ack) => {
+    const branchId = resolveRequestedBranch(value);
+    if (!isSafeBranchId(branchId)) return reply(ack, { ok: false, code: 'INVALID_BRANCH' });
+    socket.leave(`branch:${branchId}`);
+    joinedBranches.delete(branchId);
+    reply(ack, { ok: true, branchId });
+  };
+
+  // Keep the protocol used by the kiosk and marketplace clients identical,
+  // but never trust a client-provided branch without server-side authorization.
   socket.on('join', joinBranch);
   socket.on('join_branch', joinBranch);
   socket.on('leave', leaveBranch);

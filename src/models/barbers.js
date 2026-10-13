@@ -1283,7 +1283,6 @@ const emitCallEvent = (io, entry) => {
         entryId: entry.id,
         barberId: entry.barber_id,
         branchId: entry.branch_id,
-        clientId: entry.client?.id || entry.client_id || null,
         clientName: entry.client?.name || entry.client_name || null,
     };
     const room = io.to(`branch:${entry.branch_id}`);
@@ -1299,7 +1298,6 @@ const emitLifecycleEvent = (io, entry, { type, eventName }) => {
         entryId: entry.id,
         barberId: entry.barber_id,
         branchId: entry.branch_id,
-        clientId: entry.client?.id || entry.client_id || null,
         clientName: entry.client?.name || entry.client_name || null,
         status: entry.status,
     };
