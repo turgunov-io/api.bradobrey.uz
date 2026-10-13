@@ -14,6 +14,7 @@ const {
   isSafeBranchId,
   verifySocketToken,
 } = require('./socketAuth');
+const { verifyKioskSocketTicket } = require('./kioskSocketTicket');
 const server = http.createServer(app);
 
 const corsOrigin = app.get('corsOrigin') || '*';
@@ -51,6 +52,12 @@ async function loadSocketAccessState(userId) {
 
 io.use(async (socket, next) => {
   try {
+    const kioskTicket = socket.handshake?.auth?.kioskTicket;
+    if (kioskTicket) {
+      const payload = verifyKioskSocketTicket(kioskTicket);
+      socket.data.auth = { kind: 'kiosk', payload, state: {} };
+      return next();
+    }
     const { payload } = verifySocketToken(socket, process.env.JWT_SECRET);
     const state = await loadSocketAccessState(payload.sub || payload.id);
     if (!state.user || state.barber?.is_archived === true) {
@@ -68,6 +75,11 @@ io.use(async (socket, next) => {
 
 io.on('connection', (socket) => {
   const joinedBranches = new Set();
+  if (socket.data.auth?.kind === 'kiosk') {
+    const branchId = String(socket.data.auth.payload.branchId);
+    socket.join(`branch:${branchId}`);
+    joinedBranches.add(branchId);
+  }
   const disconnectAt = Number(socket.data.auth?.payload?.exp || 0) * 1000 - Date.now();
   if (disconnectAt > 0) {
     const expiryTimer = setTimeout(() => socket.disconnect(true), disconnectAt);
@@ -82,6 +94,16 @@ io.on('connection', (socket) => {
 
   const joinBranch = async (value, ack) => {
     const branchId = resolveRequestedBranch(value);
+    if (socket.data.auth?.kind === 'kiosk') {
+      const allowedBranchId = String(socket.data.auth.payload.branchId);
+      if (branchId !== allowedBranchId) {
+        reply(ack, { ok: false, code: 'BRANCH_ACCESS_DENIED' });
+        socket.emit('branch_access_denied', { branchId });
+        return;
+      }
+      reply(ack, { ok: true, branchId });
+      return;
+    }
     try {
       const userId = socket.data.auth?.payload?.sub || socket.data.auth?.payload?.id;
       const state = await loadSocketAccessState(userId);

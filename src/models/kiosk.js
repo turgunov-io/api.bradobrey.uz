@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
+const { issueKioskSocketTicket } = require('../kioskSocketTicket');
 
 const {
     applyPromoDiscount,
@@ -307,6 +308,32 @@ class Kiosk {
         }
 
         return res.status(201).json({ branch_id: inserted.branch_id });
+    }
+
+    async socketTicket(req, res) {
+        const { branch_id, device_name } = req.body || {};
+        if (!branch_id || !device_name) return res.status(400).json({ error: "branch_id and device_name are required" });
+
+        const { data: kiosk, error } = await db
+            .from('kiosks')
+            .select('id, branch_id, device_name')
+            .eq('branch_id', branch_id)
+            .eq('device_name', String(device_name).trim())
+            .maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!kiosk) return res.status(403).json({ error: 'Kiosk is not registered for this branch' });
+
+        try {
+            const ticket = issueKioskSocketTicket({
+                kioskId: kiosk.id,
+                branchId: kiosk.branch_id,
+                deviceName: kiosk.device_name,
+            });
+            return res.status(200).json({ ticket, expires_in: 15 * 60 });
+        } catch (ticketError) {
+            if (ticketError.code === 'KIOSK_SOCKET_SECRET_MISSING') return res.status(503).json({ error: 'Kiosk socket is not configured' });
+            return res.status(500).json({ error: 'Failed to issue kiosk socket ticket' });
+        }
     }
 
     async barbers(req, res) {
