@@ -3005,25 +3005,6 @@ class Barbers {
             return res.status(400).json({ error: 'reason is required when editing the final price' });
         }
 
-        if (amountProvided) {
-            // Preserve the existing global price floor for manual overrides.
-            const { data: cheapestService, error: serviceError } = await db
-                .from('services')
-                .select('base_price')
-                .order('base_price', { ascending: true })
-                .limit(1)
-                .maybeSingle();
-
-            if (serviceError) {
-                return res.status(500).json({ error: serviceError.message });
-            }
-
-            const minServicePrice = cheapestService ? Number(cheapestService.base_price) : null;
-            if (minServicePrice && Number.isFinite(minServicePrice) && numericAmount < minServicePrice) {
-                return res.status(400).json({ error: `amount cannot be lower than minimum service price ${minServicePrice}` });
-            }
-        }
-
         const barberId = payload.sub || payload.id;
 
         const { data: entry, error: entryError } = await db

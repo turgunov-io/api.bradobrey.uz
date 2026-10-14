@@ -223,6 +223,36 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete enriches services and em
   }
 });
 
+test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manual amount below catalog price', async () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src/models/barbers.js'), 'utf8');
+  assert.doesNotMatch(source, /amount cannot be lower than minimum service price/);
+
+  const mock = installDbMock({
+    queue_entries: [
+      { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'] }, error: null },
+      { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'], price_override: 1, price_override_reason: 'Округление' }, error: null },
+    ],
+    services: [{ data: [{ id: 'service-1', name: 'Haircut', base_price: 40000, duration_minutes: 20, is_active: true }], error: null }],
+  });
+
+  try {
+    const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+    const res = createResponse();
+    await barbers.editBeforeComplete({
+      app: { get: () => null },
+      body: { amount: 1, reason: 'Округление' },
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: 'queue-low-price' },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.entry.price_override, 1);
+    assert.equal(res.payload.entry.price_override_reason, 'Округление');
+  } finally {
+    mock.restore();
+  }
+});
+
 test('PATCH /api/barbers/queue/:id validates in-progress services and returns enriched totals', async () => {
   const services = [
     { id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 20, is_active: true },
