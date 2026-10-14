@@ -2,6 +2,10 @@
 
 ## 2026-10-14
 
+- Fixed Barber/Kiosk presence consistency: JWT-scoped logout now clears both
+  legacy and active-branch shift state, emits branch-scoped status events, and
+  kiosk visibility requires fresh on-shift presence. Added the authenticated
+  `/api/barbers/presence` heartbeat endpoint and regression coverage.
 - Deployed the current API `main` code to production and restarted only `BRADOBREY-BARBER`; dashboard remained online and untouched.
 - Verified existing production branch/geolocation schema, PM2 API status, and public `/health` HTTP 200. Created a server-side rollback archive.
 

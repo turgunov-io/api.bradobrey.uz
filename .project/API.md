@@ -25,6 +25,12 @@ Each active, assigned queue item includes ordered `transfer_history`. Every even
 
 Queue-derived fields use only `waiting`, `called`, `swapped`, and `in_progress`.
 
+The response contains only non-archived, active, on-shift employees whose
+persisted presence was refreshed within the last 90 seconds. Employees that
+logout, stop their shift, or stop sending heartbeats are excluded from the
+`barbers` array. Kiosk clients should still refetch on `queue:update` with
+`type=barber_status`.
+
 - `is_available` is the authoritative booking flag. It is `true` only when the employee is active, on shift, and has no active queue entries.
 - `availability_status` is `available`, `busy`, `off_shift`, or `inactive`.
 - `active_queue_count`, `has_in_progress`, and `current_service_overdue` describe the current workload.
@@ -32,6 +38,13 @@ Queue-derived fields use only `waiting`, `called`, `swapped`, and `in_progress`.
 - Each client item exposes `estimated_time`, `estimated_remaining_time`, and `is_overdue`.
 
 Queue lifecycle and service edits emit `queue:update` to `branch:<branch_id>` so Kiosk must refetch this endpoint on that event.
+
+### `POST /api/barbers/presence`
+
+Requires the current barber/manager JWT. The active branch is taken from the
+JWT; request body branch or employee identifiers are not trusted. The endpoint
+refreshes the active `employee_active_branches.updated_at` heartbeat. Presence
+expires from kiosk visibility after 90 seconds without a successful heartbeat.
 
 ### `GET /api/barbers/queue/:id/barber-history`
 

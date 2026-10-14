@@ -109,6 +109,23 @@ async function getActiveEmployeeBranch(employeeId) {
   }
 }
 
+async function touchActiveEmployeeBranch({ employeeId, branchId }) {
+  try {
+    const result = await db.query(`
+      update employee_active_branches
+         set updated_at = now()
+       where employee_id = $1
+         and branch_id = $2
+         and is_on_shift = true
+       returning employee_id, branch_id, is_on_shift, updated_at
+    `, [normalizeId(employeeId), normalizeId(branchId)]);
+    return result.rows?.[0] || null;
+  } catch (error) {
+    if (isMissingRelation(error, 'employee_active_branches')) return null;
+    throw error;
+  }
+}
+
 async function employeeCanUseBranch(employeeId, branchId, fallbackBranchId = null) {
   const branches = await listEmployeeBranches(employeeId, fallbackBranchId);
   return branches.some((branch) => String(branch.id) === String(branchId));
@@ -123,4 +140,5 @@ module.exports = {
   resolveEmployeeBranch,
   selectEmployeeBranches,
   setActiveEmployeeBranch,
+  touchActiveEmployeeBranch,
 };

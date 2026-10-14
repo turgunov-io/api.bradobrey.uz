@@ -177,3 +177,18 @@
 - Generated `KIOSK_SOCKET_SECRET` directly on the API server and stored it only in `/var/www/api.bradobrey.uz/.env`; the value is not recorded in Git or project documentation.
 - Restarted only PM2 app `BRADOBREY-BARBER`; the dashboard process was not restarted. A real registered kiosk request to `POST /api/kiosk/socket-ticket` returned HTTP 200 with a ticket.
 - Created the pre-change environment backup at `/var/backups/api.bradobrey.uz-env-20261014-kiosk-secret`.
+
+# Barber/Kiosk presence audit (2026-10-14)
+
+- Audit report: `.project/BARBER_KIOSK_SESSION_AUDIT_2026-10-14.md`.
+- Presence is duplicated between `barbers.is_on_shift` and `employee_active_branches.is_on_shift`; current `POST /api/barbers/logout` updates only `barbers`, leaving a possible stale active-branch row.
+- `GET /api/kiosk/barbers/:branch_id` returns non-archived off-shift employees with `availability_status=off_shift` instead of excluding them. This does not satisfy the product requirement that logged-out/inactive barbers disappear from kiosk.
+- No durable heartbeat/TTL was found for unexpected app termination or network loss. `scheduleShiftAutoOff` is defined in process memory but has no call site.
+- Barber Flutter treats every HTTP 401 as a hard logout; JWT default TTL is 12h and no refresh flow exists. A 5–10 minute logout cadence requires production 401/nginx/PM2 evidence; it is not explained by the default JWT TTL.
+
+## Barber/Kiosk presence remediation (2026-10-14)
+
+- Implemented JWT-scoped `POST /api/barbers/logout`: it clears both legacy and active-branch shift state, clears in-memory timers, and emits status to both relevant branch rooms.
+- Implemented `POST /api/barbers/presence`; Flutter sends it every 30 seconds and on foreground. Kiosk reads only active branch rows with `updated_at` within 90 seconds and excludes off-shift employees.
+- Flutter logout now sends a Bearer token. Transient heartbeat network errors are ignored; only an explicit 401 triggers re-authentication.
+- Local verification passed: backend 102 tests and Flutter `flutter analyze`; production deployment and post-deploy 401 observation remain pending.

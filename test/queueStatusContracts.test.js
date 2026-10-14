@@ -138,8 +138,18 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
         error: null,
       },
     ],
-    barbers: [{ data: [{ id: 'barber-1', name: 'Barber', branch_id: 'branch-1', is_active: true, is_on_shift: true }], error: null }],
-    users: [{ data: [{ id: 'barber-1', role: 'barber' }], error: null }],
+    barbers: [{ data: [
+      { id: 'barber-1', name: 'Barber', branch_id: 'branch-1', is_active: true, is_on_shift: true },
+      { id: 'barber-2', name: 'Off shift', branch_id: 'branch-1', is_active: true, is_on_shift: false },
+    ], error: null }],
+    users: [{ data: [
+      { id: 'barber-1', role: 'barber' },
+      { id: 'barber-2', role: 'barber' },
+    ], error: null }],
+    employee_active_branches: [{ data: [{
+      employee_id: 'barber-1', branch_id: 'branch-1', is_on_shift: true,
+      updated_at: new Date().toISOString(),
+    }], error: null }],
     services: [{ data: [{ id: 'service-1', duration_minutes: 10 }], error: null }],
     clients: [{ data: [], error: null }],
   });
@@ -149,6 +159,7 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
     await kiosk.barbers({ params: { branch_id: 'branch-1' } }, res);
 
     assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.payload.barbers.map((barber) => barber.id), ['barber-1']);
     assert.deepEqual(
       res.payload.barbers[0].clients.map((entry) => entry.status),
       ACTIVE_QUEUE_STATUSES,

@@ -360,14 +360,17 @@ class Kiosk {
             return res.status(500).json({ error: barbersError.message });
         }
 
+        const presenceCutoff = new Date(Date.now() - 90 * 1000).toISOString();
         const { data: activeBarbers, error: activeBarbersError } = await db
             .from('employee_active_branches')
-            .select('employee_id, branch_id, is_on_shift')
+            .select('employee_id, branch_id, is_on_shift, updated_at')
             .eq('branch_id', branch_id)
-            .eq('is_on_shift', true);
+            .eq('is_on_shift', true)
+            .gte('updated_at', presenceCutoff);
         if (activeBarbersError && !String(activeBarbersError.message || '').includes('employee_active_branches')) {
             return res.status(500).json({ error: activeBarbersError.message });
         }
+        const hasActivePresenceTable = !activeBarbersError;
         const activeById = new Map((activeBarbers || []).map((row) => [String(row.employee_id), row]));
 
         const { data: assignedBarbers, error: assignedBarbersError } = await db
@@ -398,13 +401,21 @@ class Kiosk {
             allowedBarberIds = new Set((users || []).map((user) => user.id));
         }
 
-        const visibleBarbers = mergedBarbers.filter((barber) => (
+        const visibleBarbers = mergedBarbers.filter((barber) => {
+            const isOnShift = hasActivePresenceTable
+                ? activeById.get(String(barber.id))?.is_on_shift === true
+                : barber.is_on_shift === true;
+            return (
             allowedBarberIds.has(barber.id) && barber.is_archived !== true &&
+            isOnShift === true &&
             (String(barber.branch_id) === String(branch_id) || activeById.has(String(barber.id)))
-        )).map((barber) => ({
+            );
+        }).map((barber) => ({
             ...barber,
             branch_id: branch_id,
-            is_on_shift: activeById.get(String(barber.id))?.is_on_shift ?? barber.is_on_shift,
+            is_on_shift: hasActivePresenceTable
+                ? activeById.get(String(barber.id))?.is_on_shift === true
+                : barber.is_on_shift,
         }));
 
         const { data: rawQueues, error: queuesError } = await db

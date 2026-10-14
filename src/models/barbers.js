@@ -11,7 +11,7 @@ const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
-const { getActiveEmployeeBranch, listEmployeeBranches, resolveEmployeeBranch, setActiveEmployeeBranch } = require('../utils/employeeBranches');
+const { getActiveEmployeeBranch, listEmployeeBranches, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -3336,7 +3336,12 @@ class Barbers {
 
     async logout(req, res) {
         try {
-            const { barber_id, is_on_shift = false } = req.body;
+            const auth = authenticateBarberWorkspace(req, res, 'Only workspace employees can log out');
+            if (!auth) return;
+
+            const barber_id = auth.barberId;
+            const is_on_shift = false;
+            const activeBranch = await getActiveEmployeeBranch(barber_id);
 
             const { data: updated, error: updateError } = await db
                 .from('barbers')
@@ -3350,18 +3355,61 @@ class Barbers {
             }
 
             if (updated) {
+                const activeBranchId = activeBranch?.branch_id || auth.payload?.branchId || updated.branch_id;
+                await setActiveEmployeeBranch({
+                    employeeId: barber_id,
+                    branchId: activeBranchId,
+                    isOnShift: false,
+                });
+                clearShiftTimer(barber_id);
+                const breakInfo = breakTimers.get(barber_id);
+                if (breakInfo) {
+                    clearTimeout(breakInfo.timer);
+                    breakTimers.delete(barber_id);
+                }
                 await logVerifixEvent({
                     barberId: updated.id,
-                    branchId: updated.branch_id,
+                    branchId: activeBranchId,
                     eventType: 'logout',
                     io: req.app.get('io'),
                     metadata: { is_on_shift },
                 });
+
+                const io = req.app.get('io');
+                const branchIds = new Set([updated.branch_id, activeBranchId].filter(Boolean).map(String));
+                for (const branchId of branchIds) {
+                    io?.to(`branch:${branchId}`).emit('queue:update', {
+                        type: 'barber_status',
+                        barberId: updated.id,
+                        branchId,
+                        is_on_shift: false,
+                        is_active: updated.is_active ?? true,
+                    });
+                }
             }
 
             return res.json({ barber: updated });
         } catch (error) {
             return res.status(500).json({ error: error.message });
+        }
+    }
+
+    async presence(req, res) {
+        const auth = authenticateBarberWorkspace(req, res, 'Only workspace employees can update presence');
+        if (!auth) return;
+
+        try {
+            const branchId = auth.payload?.branchId || auth.payload?.branch_id;
+            if (!branchId) return res.status(409).json({ error: 'Active branch is required' });
+            const activeBranch = await getActiveEmployeeBranch(auth.barberId);
+            if (activeBranch && String(activeBranch.branch_id) !== String(branchId)) {
+                return res.status(409).json({ error: 'Active branch does not match session' });
+            }
+            const touched = await touchActiveEmployeeBranch({ employeeId: auth.barberId, branchId });
+            if (!touched) return res.status(409).json({ error: 'Active shift is not registered' });
+            return res.json({ ok: true, presence: touched });
+        } catch (error) {
+            return res.status(500).json({ error: error.message || 'Failed to update presence' });
         }
     }
 

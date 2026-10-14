@@ -1,0 +1,101 @@
+# Аудит выхода из аккаунта Barber App и актуальности Kiosk
+
+Дата: 14 октября 2026, Asia/Tashkent  
+Объекты: `C:\project\bradobrey_barber`, `C:\project\api.bradobrey.uz`  
+Изначальный режим: аудит. После согласования владельцем внесены исправления
+в backend и Flutter-клиент; production deployment в рамках этой задачи не
+выполнялся.
+
+## Краткий вывод
+
+Обнаружены две независимые цепочки проблем:
+
+1. Состояние присутствия мастера хранится в двух местах (`barbers.is_on_shift` и `employee_active_branches.is_on_shift`), но logout обновляет только первое. Поэтому после выхода активная branch-запись может оставаться включённой, а kiosk продолжает видеть мастера.
+2. Kiosk API намеренно возвращает всех неархивных мастеров филиала, в том числе `off_shift`; он только добавляет `availability_status=off_shift` и `is_available=false`. Это не соответствует требованию “не показывать неактивного мастера”.
+3. При аварийном завершении приложения или потере сети нет надёжного серверного heartbeat/TTL присутствия. `is_on_shift=true` может остаться до ручного logout, break/смены статуса или перезапуска/ручной очистки.
+4. Частый выход из аккаунта технически выполняется на любой HTTP 401: Flutter сразу очищает токен и переводит пользователя на login. JWT по умолчанию живёт 12 часов, поэтому интервал 5–10 минут не является штатным сроком действия JWT; для подтверждения конкретного источника нужны production access/error logs.
+
+## Подтверждённые находки
+
+### HIGH — logout не сбрасывает активную branch-сессию
+
+Доказательства:
+
+- login устанавливает `employee_active_branches.is_on_shift=true` через `setActiveEmployeeBranch`, затем отдельно устанавливает `barbers.is_on_shift=true` (`src/models/barbers.js:1829-1833`);
+- kiosk читает `employee_active_branches` и формирует `activeById` только из записей с `is_on_shift=true` (`src/models/kiosk.js:363-371`);
+- logout обновляет только `barbers` (`src/models/barbers.js:3337-3345`), не вызывая `setActiveEmployeeBranch(..., isOnShift:false)`;
+- kiosk объединяет branch-список с `activeById`, поэтому stale active assignment может переопределить состояние из `barbers` (`src/models/kiosk.js:379-408`).
+
+Следствие: после logout мастер может остаться активным в kiosk, особенно при multi-branch schema.
+
+### HIGH — API kiosk не фильтрует неактивных мастеров
+
+`GET /api/kiosk/barbers/:branch_id` получает всех мастеров с `branch_id`, исключает только архивных и role-недопустимых, но не исключает `is_on_shift=false` (`src/models/kiosk.js:354-408`). Далее endpoint возвращает такие записи со статусом `off_shift` (`src/models/kiosk.js:512-537`).
+
+Следствие: даже при корректном logout UI получит мастера в массиве `barbers`; исчезновение зависит от kiosk frontend. В API-контракте заявлено `is_available`, но это флаг доступности для записи, а не фильтр отображения.
+
+### HIGH — нет durable presence/heartbeat
+
+В backend найден только process-local `scheduleShiftAutoOff` (`src/models/barbers.js:87-127`), причём вызовов этой функции нет. Break timer также process-local. Login ставит shift в true, а штатное снятие выполняется через logout/break/ручной endpoint.
+
+Следствие: force-kill, crash, закрытие процесса, background restriction Android или сетевой обрыв не снимают мастера с kiosk. Это напрямую объясняет “актуальные барберы не отображаются/остаются отображаться”.
+
+### HIGH — любой 401 выглядит для пользователя как принудительный logout
+
+Flutter вызывает `SessionExpirationService.forceReauth()` на каждый HTTP 401 (`lib/data/datasources/barber_remote_data_source.dart:123-140`). Сервис удаляет локальную сессию и открывает login (`lib/core/services/session_expiration_service.dart:13-23`). Refresh token flow отсутствует.
+
+Backend подписывает JWT с `JWT_EXPIRES_IN || '12h'` (`src/models/barbers.js:137-146`). Значит регулярный выход через 5–10 минут означает не штатный JWT TTL, а один из сценариев: кратковременный 401 от API/reverse proxy, неправильный/сменившийся `JWT_SECRET`, повреждённый токен в storage, старый deployment/конфигурация, либо backend rejects session after an access-state change. Сейчас клиент не различает эти причины.
+
+Дополнительный риск: `AuthLocalDataSource.isAuthenticated()` проверяет только непустую строку токена и не проверяет `exp` (`lib/data/datasources/auth_local_data_source.dart:224-227`).
+
+### CRITICAL — logout endpoint не scoped к текущему пользователю
+
+`POST /api/barbers/logout` принимает `barber_id` из body и не выполняет JWT-проверку внутри handler (`src/models/barbers.js:3337-3362`). Это позволяет авторизованному/неавторизованному вызывающему потенциально изменить shift-state другого мастера, если route не закрыт отдельным middleware.
+
+Следствие: security-риск и дополнительная причина рассинхронизации presence. Logout должен брать employee id и branch из проверенного JWT, а body `barber_id` игнорировать или валидировать на совпадение.
+
+### MEDIUM — logout может не сгенерировать корректное событие для active branch
+
+Verifix logout логируется с `updated.branch_id`, то есть постоянным branch из `barbers`, тогда как фактическая active branch может находиться в `employee_active_branches`. При multi-branch работе событие и realtime update могут уйти не в тот branch.
+
+### MEDIUM — realtime contract не гарантирует исчезновение
+
+Backend отправляет `queue:update` с `type: barber_status` при части операций. В найденном Flutter-коде это событие используется для queue refresh, но нет отдельной логики изменения списка kiosk; Flutter `getBarbers` вызывается только отдельными сценариями (например, reassignment/penalties). Исходники kiosk frontend в предоставленных двух репозиториях не найдены, поэтому его обработка socket-события не подтверждена.
+
+## Что проверено
+
+- Backend unit/contract suite: `npm test` — 99 тестов, 99 passed.
+- Flutter static analysis: `flutter analyze` — `No issues found`.
+- Production health: `https://api.bradobrey.uz/health` ответил HTTP 200; это подтверждает доступность процесса, но не корректность auth/presence flow.
+- Поиск тестов показал покрытие socket auth, branch switch и queue status, но нет regression-теста на logout + `employee_active_branches` и нет теста “kiosk response excludes off_shift”.
+
+## Что не удалось подтвердить
+
+- Production DB rows для конкретного мастера: локальная документация фиксирует, что прямое подключение к PostgreSQL ранее не проходило; в рамках аудита destructive/credential actions не выполнялись.
+- Причину конкретных 5–10 минутных 401: access/error logs reverse proxy и PM2 не предоставлены локально.
+- Kiosk UI: его отдельный frontend-репозиторий не был указан, поэтому проверен API-контракт, но не фактическая фильтрация/refresh в UI.
+
+## Рекомендуемый порядок исправлений
+
+1. Ввести один authoritative presence service: logout/shift-end/branch-switch атомарно сбрасывают и `employee_active_branches`, и legacy `barbers`, с одним branch-scoped realtime событием.
+2. Определить контракт отображения: backend должен возвращать kiosk только `is_active=true`, `is_archived=false`, `is_on_shift=true` (busy/available различать внутри этого набора), либо kiosk frontend должен гарантированно фильтровать `off_shift`. Для требования пользователя предпочтительнее серверный фильтр.
+3. Добавить durable presence: `last_presence_at`/session row, heartbeat с TTL и server-side query `last_presence_at >= now()-interval`, с безопасным grace period для background/mobile сети.
+4. Защитить logout JWT-scoped проверкой и покрыть тестами multi-branch и stale row.
+5. Диагностировать 401: добавить безопасные correlation/request ids, HTTP status/error code и время действия JWT в client/backend logs без токенов; проверить nginx/PM2/`JWT_SECRET`/`JWT_EXPIRES_IN` на production.
+6. Добавить regression tests: logout clears both presence stores; kiosk excludes off-shift; stale heartbeat disappears; socket `barber_status` refreshes kiosk immediately; transient network errors do not erase a valid local session.
+
+## Выполненные исправления
+
+- Logout теперь JWT-scoped, сбрасывает обе presence-записи и отправляет
+  `barber_status` в постоянный и активный филиал.
+- Kiosk API возвращает только on-shift мастеров с heartbeat не старше 90 секунд.
+- Добавлен `POST /api/barbers/presence`; Flutter отправляет heartbeat каждые
+  30 секунд и при возврате приложения на foreground.
+- Flutter logout исправлен на корректный `Authorization: Bearer <token>`.
+- Добавлены regression/contract tests.
+
+## Итоговый статус
+
+Исправления реализованы и локально проверены. Для окончательного production
+закрытия остаются deployment миграционного состояния/кода и наблюдение за
+реальными 401 в nginx/PM2 логах после выкладки.
