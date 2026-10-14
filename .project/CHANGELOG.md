@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-15 (manual final price)
+
+- Removed the global catalog-price floor from
+  `PATCH /api/barbers/queue/:id/edit-before-complete`. Manual final amounts
+  may now be any positive number, including `1`, when a reason is supplied.
+  Ownership, status, numeric validation, and required reason checks remain.
+- Added a regression test covering amount `1` against a service priced at
+  `40000`. Queue/status and transfer contract tests pass 23/23.
+- Pushed as commit `dc6a968`. Production received only `src/models/barbers.js`
+  and only `BRADOBREY-BARBER` was restarted; dashboard was not restarted.
+
 ## 2026-10-15 (transfer eligibility follow-up)
 
 - Fixed the remaining reassignment contract mismatch: `PATCH

@@ -243,6 +243,19 @@
   mutate a live customer queue; production service, syntax, and unauthenticated
   route checks were used instead.
 
+# Manual final price override (2026-10-15)
+
+- `PATCH /api/barbers/queue/:id/edit-before-complete` now permits any positive
+  manual amount. The previous comparison against the cheapest catalog service
+  was removed; `amount <= 0` is still rejected and a non-empty reason is still
+  required.
+- Production overlay `dc6a968` replaced only
+  `/var/www/api.bradobrey.uz/src/models/barbers.js` after saving a backup
+  outside the repository. Only `BRADOBREY-BARBER` was restarted.
+- Regression and queue/transfer contract tests pass 23/23. An authenticated
+  live edit was not replayed against a customer order; the production API
+  process and deployed file hash were verified instead.
+
 - Direct `PATCH /api/barbers/queue/:id/reassign` must be owner-scoped even when
   JWT contains `branchId`; branch scope is not ownership permission.
 - Candidate discovery now merges permanent `barbers.branch_id` with fresh,
