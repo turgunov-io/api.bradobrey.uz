@@ -10,6 +10,11 @@
 - `employee_branches.sql` must remain in `scripts/apply-schema.sh` after
   `branches.sql`/`barbers.sql`; omitting it makes cross-branch switching fail
   on a fresh database while the code-level contract tests can still pass.
+- On 2026-10-14 the reassignment and schema-runner fixes were pushed to
+  `origin/main` as `9951d89` and `bdc31d7`. Production overlay/restart was not
+  possible because non-interactive SSH to `95.46.96.213` was rejected for both
+  `root` and `ubuntu`; `/health` only confirmed the existing public liveness
+  endpoint and must not be treated as deployment verification.
 
 - For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
 

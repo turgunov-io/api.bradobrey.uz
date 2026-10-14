@@ -9,6 +9,11 @@
   contract test. Full local backend suite: 105/105.
 - Added `employee_branches.sql` to the dependency-ordered schema runner so
   active-branch switching is reproducible on new/staging databases.
+- Both fixes were pushed to `origin/main` (`9951d89`, `bdc31d7`). Production
+  deployment was not performed in this run: SSH access for the documented
+  server was rejected for both tested deployment users. Public `/health`
+  returned 200, but no new-code or authenticated smoke verification was
+  claimed.
 
 ## 2026-10-14
 
