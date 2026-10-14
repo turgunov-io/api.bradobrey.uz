@@ -8,6 +8,9 @@
   `audit-reports/barber-switch/20261015-000234/`.
 - Runtime PostgreSQL/Flutter/production проверки остаются отдельными release
   gates и не объявляются выполненными без подтверждения.
+- Commit `0d8e154` pushed to `origin/main`. Production overlay/restart и
+  authenticated smoke заблокированы: SSH к `95.46.96.213` отклонён для
+  `root`, `ubuntu` и `admin`; public `/health` 200 подтверждает только liveness.
 
 ## 2026-10-14
 

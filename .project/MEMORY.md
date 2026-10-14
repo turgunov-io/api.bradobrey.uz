@@ -228,3 +228,6 @@
 - Audit evidence and limitations are in
   `audit-reports/barber-switch/20261015-000234/`; PostgreSQL integration and
   authenticated production smoke were unavailable in the local run.
+- Commit `0d8e154` is pushed to `origin/main`. Production deployment remains
+  blocked because SSH to `95.46.96.213` was rejected for `root`, `ubuntu`, and
+  `admin`; public `/health` 200 does not prove the new code is deployed.
