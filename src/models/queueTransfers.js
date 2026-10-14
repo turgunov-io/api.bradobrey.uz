@@ -8,6 +8,35 @@ const STALE_QUEUE_HOURS = 9;
 const timeoutMinutes = Math.max(1, Number(process.env.QUEUE_TRANSFER_TIMEOUT_MINUTES || 10));
 let expiryTimer = null;
 
+async function targetBarberIsEligible(client, targetId, branchId) {
+  const relation = await client.query("select to_regclass('public.employee_active_branches') as relation");
+  const hasActiveBranchPresence = Boolean(relation.rows[0]?.relation);
+
+  if (hasActiveBranchPresence) {
+    const result = await client.query(`select b.id
+      from barbers b
+      join users u on u.id = b.id
+      join employee_active_branches eab on eab.employee_id = b.id
+      where b.id=$1 and eab.branch_id=$2
+        and eab.is_on_shift is true
+        and eab.updated_at >= now() - interval '90 seconds'
+        and u.role in ('barber', 'super-barber', 'manager', 'super-manager')
+        and b.is_active is true and b.is_archived is false`, [targetId, branchId]);
+    return Boolean(result.rows[0]);
+  }
+
+  // Backward-compatible fallback for installations that have not applied the
+  // additive presence migration yet. Once the table exists, the authoritative
+  // active-branch presence check above is mandatory.
+  const result = await client.query(`select b.id
+    from barbers b
+    join users u on u.id = b.id
+    where b.id=$1 and b.branch_id=$2
+      and b.is_active is true and b.is_archived is false and b.is_on_shift is true
+      and u.role in ('barber', 'super-barber', 'manager', 'super-manager')`, [targetId, branchId]);
+  return Boolean(result.rows[0]);
+}
+
 function identity(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
@@ -104,12 +133,8 @@ async function request(req, res) {
       return res.status(409).json({ error: 'Queue entry is already awaiting another transfer decision' });
     }
     if (!canInitiateTransfer(entry, actor.id, targetId)) { await client.query('rollback'); return res.status(409).json({ error: 'Queue entry cannot be transferred in its current state' }); }
-    const candidate = await client.query(`select b.id from barbers b
-      join users u on u.id = b.id
-      where b.id=$1 and b.branch_id=$2
-        and b.is_active is true and b.is_archived is false and b.is_on_shift is true
-        and u.role in ('barber', 'super-barber', 'manager', 'super-manager')`, [targetId, entry.branch_id]);
-    if (!candidate.rows[0]) { await client.query('rollback'); return res.status(400).json({ error: 'Selected barber is not available in this branch' }); }
+    const candidateIsEligible = await targetBarberIsEligible(client, targetId, entry.branch_id);
+    if (!candidateIsEligible) { await client.query('rollback'); return res.status(400).json({ error: 'Selected barber is not available in this branch' }); }
     const transfer = await client.query(`insert into queue_transfer_events
       (queue_entry_id, from_barber_id, to_barber_id, client_id, status, original_status, requested_by, expires_at, idempotency_key)
       values ($1,$2,$3,$4,'pending',$5,$2,now()+($6::text||' minutes')::interval,$7) returning *`,

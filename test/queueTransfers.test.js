@@ -71,3 +71,16 @@ test('reassignment availability merges active temporary-branch employees', () =>
   assert.match(availability, /hasActiveBranchTable/);
   assert.match(availability, /branch_id: branchId/);
 });
+
+test('PATCH transfer eligibility uses the same fresh active-branch presence contract', () => {
+  const source = fs.readFileSync(path.join(root, 'src/models/queueTransfers.js'), 'utf8');
+
+  assert.match(source, /targetBarberIsEligible/);
+  assert.match(source, /to_regclass\('public\.employee_active_branches'\)/);
+  assert.match(source, /join employee_active_branches eab on eab\.employee_id = b\.id/);
+  assert.match(source, /eab\.branch_id=\$2/);
+  assert.match(source, /eab\.is_on_shift is true/);
+  assert.match(source, /eab\.updated_at >= now\(\) - interval '90 seconds'/);
+  assert.match(source, /const candidateIsEligible = await targetBarberIsEligible/);
+  assert.match(source, /b\.branch_id=\$2/);
+});
