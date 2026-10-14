@@ -133,4 +133,12 @@ TTL очищал очередь, но фильтр карточек смотре
 transaction commit/rollback. Результаты локальной проверки этого дополнения:
 backend `npm test` — 104/104; весь kiosk Flutter suite — 39 passed; весь Barber
 App Flutter suite — 46 passed; `flutter analyze` обоих приложений — без
-проблем. Проверка production после данного follow-up не выполнялась.
+проблем. API follow-up commit `f95a8ac` опубликован и развернут: применены
+только четыре относящихся к присутствию backend-файла, создан backup
+`/var/backups/api.bradobrey.uz-presence-followup-20261014.tar.gz`, перезапущен
+только API PM2 process. `/health` — HTTP 200; API и dashboard остались online;
+logout без токена ожидаемо вернул 401. Реальный logout с аутентифицированным
+барбером и физическим kiosk не проверялся. Kiosk и Barber App commits
+`5ce8cca`/`463a481` опубликованы, но мобильные обновления ещё должны пройти
+подписанный release/install workflow; доступного device/release pipeline в
+репозитории нет.

@@ -3,6 +3,7 @@
 ## 2026-10-14
 
 - Follow-up kiosk presence fix: made backend logout atomic across legacy and active-branch rows; narrowed fallback to a genuinely missing presence table. Kiosk now removes a barber immediately on the logout status event and never renders a stale cached barber list after refresh failure. Barber App preserves its session and surfaces an error if server logout is not confirmed. Regression tests added.
+- Pushed API `f95a8ac`, Kiosk `5ce8cca`, and Barber App `463a481`. Deployed only the four presence-related API source files to production after creating `/var/backups/api.bradobrey.uz-presence-followup-20261014.tar.gz`; restarted only `BRADOBREY-BARBER`. API health returned 200; API and dashboard PM2 processes remained online. Mobile client changes still need the signed app release/install path.
 - Fixed Barber/Kiosk presence consistency: JWT-scoped logout now clears both
   legacy and active-branch shift state, emits branch-scoped status events, and
   kiosk visibility requires fresh on-shift presence. Added the authenticated
