@@ -11,6 +11,7 @@ const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
 const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
+const queueTransfers = require('./queueTransfers');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -2668,17 +2669,14 @@ class Barbers {
             return res.status(404).json({ error: 'Queue entry not found' });
         }
         if (!REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) {
-            return res.status(400).json({ error: 'Only waiting or called queue entries can be reassigned' });
+            return res.status(400).json({ error: 'Only waiting, called, or swapped queue entries can be reassigned' });
         }
 
         try {
             const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
             if (isStaleActiveEntry(entry, cutoffIso)) {
-                await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
                 return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
             }
-
-            await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
 
             const candidates = await getBranchBarberAvailability({
                 branchId: entry.branch_id,
@@ -2697,6 +2695,7 @@ class Barbers {
     }
 
     async reassignQueue(req, res) {
+        return queueTransfers.request(req, res);
         const { id } = req.params || {};
         const targetBarberId = normalizeId(req.body?.barber_id);
         const auth = authenticateBarberWorkspace(req, res, 'Only barbers can reassign queue entries');

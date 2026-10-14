@@ -53,8 +53,8 @@ CONFIRM_PRODUCTION=YES RESTART_PM2=1 PM2_APP_NAME=bradobrey bash ./scripts/apply
 - `GET /api/verifix/events` — barber activity log with lateness fields
 - `POST /api/verifix/events` — record kiosk activity (`login`, `logout`, `shift_start`, `shift_end`, `break_start`, `break_end`)
 - `GET|POST|PATCH|DELETE /api/verifix/schedules` — planned work schedules for branches or individual barbers
-- `GET /api/barbers/queue/:id/reassign-options` — available barbers for queue reassignment, sorted from most available to busiest
-- `PATCH /api/barbers/queue/:id/reassign` — move a queue entry to another barber, or auto-pick the most available barber
+- `GET /api/barbers/queue/:id/reassign-options` — queue-scoped eligible barbers, sorted from most available to busiest; the read is side-effect free
+- `PATCH /api/barbers/queue/:id/reassign` — request a durable transfer with `{ "barber_id": "<target>" }`; returns `202`/`transfer_pending`, followed by target accept/reject at `/api/barbers/queue/transfers/:transferId/{accept|reject}`
 - `POST /api/queue/:id/{call|start|reject|complete|pause}` — status transitions; `complete` auto-calculates amount from service price(s) if not provided
 - `GET /api/monitor/barbers?branch_id=...` — barbers on a branch + queues (client initials)
 - `POST /api/monitor/queue` — enqueue client (`barber_id` optional, auto-picks least busy on shift; `service_id` can be an array, first ID stored as primary, full array saved to `service_ids`)

@@ -43,29 +43,20 @@ test('transfer workflow locks the order and transfer before applying state trans
   assert.match(source, /expires_at\)\.getTime\(\) <= Date\.now\(\)/);
 });
 
-test('documented barber reassignment endpoint executes reassignment logic', () => {
-  const source = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
-  const methodStart = source.indexOf('    async reassignQueue(req, res) {');
-  const methodEnd = source.indexOf('\n    async callNext(req, res) {', methodStart);
-  assert.ok(methodStart >= 0 && methodEnd > methodStart);
-  const method = source.slice(methodStart, methodEnd);
+test('active transfer request keeps stale and recipient eligibility checks in the durable path', () => {
+  const transferSource = fs.readFileSync(path.join(root, 'src/models/queueTransfers.js'), 'utf8');
+  const barberSource = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
+  const optionsStart = barberSource.indexOf('async queueReassignOptions');
+  const requestStart = barberSource.indexOf('async reassignQueue');
+  const optionsHandler = barberSource.slice(optionsStart, requestStart);
+  const requestHandler = barberSource.slice(requestStart, barberSource.indexOf('async callNext', requestStart));
 
-  assert.doesNotMatch(method, /return queueTransfers\.request\(req, res\)/);
-  assert.match(method, /getBranchBarberAvailability/);
-  assert.match(method, /update\(\{[\s\S]*barber_id: selectedBarber\.id/);
-  assert.match(method, /queue_reassigned/);
-  assert.match(method, /barber_changed/);
-});
-
-test('direct reassignment is owner-scoped even when the JWT carries a branch claim', () => {
-  const source = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
-  const methodStart = source.indexOf('    async reassignQueue(req, res) {');
-  const methodEnd = source.indexOf('\n    async callNext(req, res) {', methodStart);
-  const method = source.slice(methodStart, methodEnd);
-
-  assert.match(method, /\.eq\('id', id\)\s*\.eq\('barber_id', auth\.barberId\)/);
-  assert.match(method, /updateQuery\.eq\('barber_id', auth\.barberId\)/);
-  assert.doesNotMatch(method, /else\s*\{\s*updateQuery\.eq\('barber_id', auth\.barberId\)/);
+  assert.match(transferSource, /created_at/);
+  assert.match(transferSource, /STALE_QUEUE_HOURS/);
+  assert.match(transferSource, /join users u on u\.id = b\.id/);
+  assert.match(transferSource, /u\.role in \('barber'/);
+  assert.doesNotMatch(optionsHandler, /markEntriesNoShow/);
+  assert.match(requestHandler, /return queueTransfers\.request\(req, res\)/);
 });
 
 test('reassignment availability merges active temporary-branch employees', () => {

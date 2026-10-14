@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-15 (continued)
+
+- Aligned the production API reassignment path with the Flutter client: the
+  queue-scoped options endpoint is side-effect free, PATCH uses the durable
+  `202`/`transfer_pending` workflow, stale entries are rejected, and selected
+  recipients must have an allowed workspace role in the same active branch.
+- Production API overlay and PM2 restart were verified on `95.46.96.213` for
+  `BRADOBREY-BARBER` only; dashboard was not restarted. The transfer schema was
+  already present in PostgreSQL. The source commit was prepared from current
+  `origin/main` to preserve concurrent backend work.
+
 ## 2026-10-15
 
 - Исправлена смена барбера: direct reassignment теперь всегда ownership-scoped,

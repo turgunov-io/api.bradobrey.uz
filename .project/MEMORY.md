@@ -1,5 +1,13 @@
 # Project memory
 
+- Current reassignment contract (2026-10-15): GET
+  `/api/barbers/queue/:id/reassign-options` is the only candidate source for
+  reassignment; PATCH `/api/barbers/queue/:id/reassign` creates a durable
+  `transfer_pending` request and returns `202`. The target accepts or rejects
+  through `/api/barbers/queue/transfers/:transferId/{accept|reject}`. The active
+  path validates owner, branch, status, nine-hour staleness, and target workspace
+  role/availability. Do not restore the legacy immediate handler.
+
 - `PATCH /api/barbers/queue/:id/reassign` is the documented immediate
   reassignment endpoint. A previous transfer workflow change placed
   `return queueTransfers.request(req, res)` before the existing implementation,
