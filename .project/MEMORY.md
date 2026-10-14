@@ -1,5 +1,13 @@
 # Project memory
 
+## Barber order-history audit (2026-10-15)
+
+- Full documented audit: `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.
+- Confirmed data-loss path: production `queue_entries` had 57 orders for test account `test1`; 16 were created in October 2026 and 41 before October. Backend `GET /api/history/barber` returns the barber-scoped history without a current-month filter, but Flutter `BarberRepositoryImpl._filterHistoryItemsWithValidDates` keeps only `date.year == now.year && date.month == now.month`.
+- The same mobile filter is applied to network results, cache fallback, and before rewriting the local cache. Thus refresh permanently replaces the local history snapshot with the current-month subset.
+- The audit was read-only against production. No token, password, or production secret is stored here.
+- Remediation must first remove the implicit month filter and preserve the complete cache snapshot, then add cross-month/mobile contract tests, stable pagination/deduplication, canonical date semantics, payment-array mapping, and self/branch history authorization tests.
+
 - Current reassignment contract (2026-10-15): GET
   `/api/barbers/queue/:id/reassign-options` is the only candidate source for
   reassignment; PATCH `/api/barbers/queue/:id/reassign` creates a durable

@@ -15,6 +15,7 @@
 
 ## P1 — high priority
 
+- [ ] Remediate Barber order-history P0/P1 audit: remove implicit current-month filtering, preserve full cache, add paging/date/payload/payment contract tests, and verify self-vs-branch authorization. See `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.
 - [ ] Исправить `blocked_until` в single/group transaction.
 - [ ] Ввести kiosk device authentication, branch scope и безопасную cancellation authorization.
 - [ ] Сделать push token глобально уникальным, добавить unregister/logout и per-token retry/dead-letter.

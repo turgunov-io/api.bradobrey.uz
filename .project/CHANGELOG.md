@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-15 — Аудит истории заказов Barber
+
+- Завершён документируемый сквозной аудит `PostgreSQL queue_entries → GET
+  /api/history/barber → Flutter Barber history → local cache`.
+- Подтверждена P0-причина исчезновения заказов: mobile repository оставляет
+  только записи текущего года и месяца. Для production-учётной записи `test1`
+  read-only aggregate показал 57 записей в БД, из которых 16 в текущем месяце
+  и 41 старше; backend barber-history endpoint не содержит такого фильтра.
+- Зафиксированы сопутствующие P1-риски: cache overwrite урезанным списком,
+  нестабильная offset-пагинация, смешение дат `created_at`/`finished_at`,
+  silent drop malformed payload/invalid dates, несовпадение `payments[]` и
+  `last_payment`, а также требующий security-теста branch/self scope.
+- Полный отчёт: `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.
+- В рамках аудита код, production database и production runtime не изменялись.
+
 ## 2026-10-15 (manual final price)
 
 - Removed the global catalog-price floor from
