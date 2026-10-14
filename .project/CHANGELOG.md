@@ -14,6 +14,11 @@
   server was rejected for both tested deployment users. Public `/health`
   returned 200, but no new-code or authenticated smoke verification was
   claimed.
+- After owner-provided SSH access, deployed only `src/models/barbers.js` to
+  `/var/www/api.bradobrey.uz`, preserving the active production worktree and
+  all other modules. Backup: `/var/backups/api.bradobrey.uz-barbers-pre-reassign-20261014.js`.
+  Restarted only `BRADOBREY-BARBER`; API health returned 200 and dashboard was
+  left untouched.
 
 ## 2026-10-14
 

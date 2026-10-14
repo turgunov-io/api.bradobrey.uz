@@ -15,6 +15,13 @@
   possible because non-interactive SSH to `95.46.96.213` was rejected for both
   `root` and `ubuntu`; `/health` only confirmed the existing public liveness
   endpoint and must not be treated as deployment verification.
+- On 2026-10-14, after SSH access was supplied by the owner, only
+  `src/models/barbers.js` was overlaid in production. The pre-change file was
+  backed up at `/var/backups/api.bradobrey.uz-barbers-pre-reassign-20261014.js`;
+  the deployed SHA-256 matched the tested local file. Only PM2 app
+  `BRADOBREY-BARBER` was restarted; dashboard stayed online and untouched;
+  `/health` returned 200. The production checkout already had unrelated local
+  divergence, so no `git pull/reset` was performed.
 
 - For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
 
