@@ -14,6 +14,9 @@
   `last_payment`, а также требующий security-теста branch/self scope.
 - Полный отчёт: `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.
 - В рамках аудита код, production database и production runtime не изменялись.
+- При live anonymous smoke дополнительно зафиксирован P1 security finding:
+  `GET /api/barbers` возвращает employee-directory metadata без Bearer token;
+  это не outage, но требует отдельного scope/DTO исправления.
 
 ## 2026-10-15 (manual final price)
 

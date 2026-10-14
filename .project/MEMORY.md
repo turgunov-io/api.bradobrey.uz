@@ -7,6 +7,7 @@
 - The same mobile filter is applied to network results, cache fallback, and before rewriting the local cache. Thus refresh permanently replaces the local history snapshot with the current-month subset.
 - The audit was read-only against production. No token, password, or production secret is stored here.
 - Remediation must first remove the implicit month filter and preserve the complete cache snapshot, then add cross-month/mobile contract tests, stable pagination/deduplication, canonical date semantics, payment-array mapping, and self/branch history authorization tests.
+- Live smoke on 2026-10-15 also confirmed anonymous `GET /api/barbers` returns employee-directory metadata (including login/role/permissions fields) because `enforceEmployeeAccess` passes requests without a token and the list route has no dedicated authorization middleware. Treat as P1 security/privacy finding; do not expose response contents in logs or docs.
 
 - Current reassignment contract (2026-10-15): GET
   `/api/barbers/queue/:id/reassign-options` is the only candidate source for

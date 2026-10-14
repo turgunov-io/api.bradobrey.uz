@@ -119,6 +119,21 @@ Backend не содержит текущего месячного фильтра
 
 `GET /api/history/branch` выбирает строки по `branch_id`. В текущей authorization-цепочке self-scoped пользователь получает self scope для barber endpoint, а branch handler использует branch scope. Это требует отдельного integration/security теста: барбер не должен получить branch-wide историю с PII через branch route. Finding: P1, потенциальное нарушение tenant/employee scope. В рамках аудита чтение данных не изменялось.
 
+### 4.5 Live production smoke: employee directory
+
+15.10.2026 выполнен anonymous read-only smoke против `https://api.bradobrey.uz`.
+`GET /api/barbers` вернул HTTP 200 и employee-directory payload до
+аутентификации. По исходному коду `app.use(enforceEmployeeAccess)` пропускает
+запросы без Bearer token (`next()`), а `src/routers/barbers.js` регистрирует
+`GET /` без отдельной authorization middleware. Ответ содержит поля
+employee-directory, включая `login`, `role`, `permissions`, branch и
+операционные флаги.
+
+Finding: P1 security/privacy, отдельный от исчезновения заказов. Это не
+признак падения production, но публичная выдача staff metadata должна быть
+либо ограничена авторизованным scope, либо заменена на минимальный публичный
+kiosk DTO без login/role/permissions.
+
 ## 5. Дополнительные риски, способные создавать «пропажи» или неверную историю
 
 1. **Нестабильная offset-пагинация (P1).** Сортировка только по `created_at` не гарантирует порядок при одинаковых timestamp; новые записи между запросами могут привести к пропуску или дублю строки. Нужен стабильный `(created_at DESC, id DESC)` либо cursor pagination и dedup по `id` на клиенте.
@@ -140,6 +155,7 @@ Backend не содержит текущего месячного фильтра
 | Мобильный history contract test | отсутствует |
 | Backend history integration/security test | отсутствует |
 | Production code/config/database mutation | не выполнялась |
+| Anonymous live `GET /api/barbers` | HTTP 200; staff metadata exposure требует remediation |
 
 Production aggregate был выполнен только на чтение. Секреты, JWT, пароли и персональные идентификаторы в отчёт не включены.
 
