@@ -56,3 +56,27 @@ test('documented barber reassignment endpoint executes reassignment logic', () =
   assert.match(method, /queue_reassigned/);
   assert.match(method, /barber_changed/);
 });
+
+test('direct reassignment is owner-scoped even when the JWT carries a branch claim', () => {
+  const source = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
+  const methodStart = source.indexOf('    async reassignQueue(req, res) {');
+  const methodEnd = source.indexOf('\n    async callNext(req, res) {', methodStart);
+  const method = source.slice(methodStart, methodEnd);
+
+  assert.match(method, /\.eq\('id', id\)\s*\.eq\('barber_id', auth\.barberId\)/);
+  assert.match(method, /updateQuery\.eq\('barber_id', auth\.barberId\)/);
+  assert.doesNotMatch(method, /else\s*\{\s*updateQuery\.eq\('barber_id', auth\.barberId\)/);
+});
+
+test('reassignment availability merges active temporary-branch employees', () => {
+  const source = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
+  const availabilityStart = source.indexOf('const getBranchBarberAvailability = async');
+  const availabilityEnd = source.indexOf('\nconst getQueueTailCreatedAt', availabilityStart);
+  const availability = source.slice(availabilityStart, availabilityEnd);
+
+  assert.match(availability, /from\('employee_active_branches'\)/);
+  assert.match(availability, /activeByEmployeeId/);
+  assert.match(availability, /activeBarbers/);
+  assert.match(availability, /hasActiveBranchTable/);
+  assert.match(availability, /branch_id: branchId/);
+});

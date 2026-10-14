@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-15
+
+- Исправлена смена барбера: direct reassignment теперь всегда ownership-scoped,
+  а кандидаты учитывают активный временный филиал и свежий presence.
+- Добавлены regression contract tests и полный audit trail в
+  `audit-reports/barber-switch/20261015-000234/`.
+- Runtime PostgreSQL/Flutter/production проверки остаются отдельными release
+  gates и не объявляются выполненными без подтверждения.
+
 ## 2026-10-14
 
 - Fixed `PATCH /api/barbers/queue/:id/reassign`: an unreachable-code regression

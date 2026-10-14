@@ -219,3 +219,12 @@
 - Logout UI no longer clears the barber's local session after a failed/missing server logout request; it reports the failure and allows retry. Kiosk regressions and transaction rollback tests were added.
 - Follow-up verification: backend `npm test` 104/104; all tests and `flutter analyze` pass in both kiosk and Barber App repositories.
 - Follow-up API deployment: commit `f95a8ac`; only the four presence-related API source files were overlaid, the API PM2 process alone was restarted, API health remained HTTP 200, unauthenticated logout correctly returned 401, and both API/dashboard processes were online. Rollback archive: `/var/backups/api.bradobrey.uz-presence-followup-20261014.tar.gz`. No authenticated real-barber logout or kiosk-device end-to-end test was available.
+# Barber reassignment audit (2026-10-15)
+
+- Direct `PATCH /api/barbers/queue/:id/reassign` must be owner-scoped even when
+  JWT contains `branchId`; branch scope is not ownership permission.
+- Candidate discovery now merges permanent `barbers.branch_id` with fresh,
+  on-shift `employee_active_branches` assignments, matching kiosk semantics.
+- Audit evidence and limitations are in
+  `audit-reports/barber-switch/20261015-000234/`; PostgreSQL integration and
+  authenticated production smoke were unavailable in the local run.

@@ -151,6 +151,15 @@ const normalizeId = (value) => {
     return text || null;
 };
 
+const isMissingActiveEmployeeBranches = (error) => {
+    const message = [error?.code, error?.message, error?.details, error?.hint]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    return message.includes('employee_active_branches')
+        && (message.includes('does not exist') || message.includes('not found') || message.includes('schema cache'));
+};
+
 const normalizeArchiveFilter = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     return EMPLOYEE_ARCHIVE_FILTERS.has(normalized) ? normalized : 'active';
@@ -1107,12 +1116,45 @@ const isStaleActiveEntry = (entry, cutoffIso) => {
 };
 
 const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, excludeEntryId = null, requireOnShift = true }) => {
-    const { data: barbers, error: barbersError } = await db
+    const { data: assignedBarbers, error: barbersError } = await db
         .from('barbers')
         .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, is_archived')
         .eq('branch_id', branchId);
 
     if (barbersError) throw new Error(barbersError.message);
+
+    // `barbers.branch_id` is the permanent/home branch. A barber can be
+    // working in another branch for the current shift, so merge the same
+    // authoritative active-branch presence used by the kiosk endpoint.
+    const { data: activeAssignments, error: activeAssignmentsError } = await db
+        .from('employee_active_branches')
+        .select('employee_id, branch_id, is_on_shift, updated_at')
+        .eq('branch_id', branchId)
+        .eq('is_on_shift', true)
+        .gte('updated_at', new Date(Date.now() - 90 * 1000).toISOString());
+    if (activeAssignmentsError && !isMissingActiveEmployeeBranches(activeAssignmentsError)) {
+        throw new Error(activeAssignmentsError.message);
+    }
+
+    const hasActiveBranchTable = !activeAssignmentsError;
+    const activeByEmployeeId = new Map(
+        (activeAssignments || []).map((assignment) => [String(assignment.employee_id), assignment])
+    );
+    const activeEmployeeIds = Array.from(activeByEmployeeId.keys());
+    let activeBarbers = [];
+    if (activeEmployeeIds.length) {
+        const { data, error } = await db
+            .from('barbers')
+            .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, is_archived')
+            .in('id', activeEmployeeIds);
+        if (error) throw new Error(error.message);
+        activeBarbers = data || [];
+    }
+
+    const barbers = [...(assignedBarbers || [])];
+    for (const barber of activeBarbers) {
+        if (!barbers.some((item) => String(item.id) === String(barber.id))) barbers.push(barber);
+    }
 
     const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
     let allowedBarberIds = new Set();
@@ -1132,7 +1174,10 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
         .filter((barber) => allowedBarberIds.has(barber.id))
         .filter((barber) => !excludeBarberId || barber.id !== excludeBarberId)
         .filter((barber) => barber.is_active !== false && barber.is_archived !== true)
-        .filter((barber) => !requireOnShift || barber.is_on_shift === true);
+        .filter((barber) => !hasActiveBranchTable || activeByEmployeeId.has(String(barber.id)))
+        .filter((barber) => !requireOnShift || (hasActiveBranchTable
+            ? activeByEmployeeId.get(String(barber.id))?.is_on_shift === true
+            : barber.is_on_shift === true));
 
     const candidateIds = new Set(candidates.map((barber) => barber.id));
     const statsByBarber = new Map();
@@ -1199,9 +1244,11 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
                 id: barber.id,
                 name: barber.name,
                 photo: barber.photo_url || null,
-                branch_id: barber.branch_id,
+                branch_id: branchId,
                 is_active: barber.is_active ?? null,
-                is_on_shift: barber.is_on_shift ?? null,
+                is_on_shift: hasActiveBranchTable
+                    ? activeByEmployeeId.get(String(barber.id))?.is_on_shift === true
+                    : barber.is_on_shift ?? null,
                 current_clients: stats.current_clients,
                 estimated_waiting_time: stats.estimated_waiting_time,
             };
@@ -2661,17 +2708,16 @@ class Barbers {
 
         const branchId = normalizeId(auth.payload?.branchId);
 
-        // Branch-scoped: any barber in the same branch may reassign an entry,
-        // not just its current owner. Fall back to owner-only for legacy tokens
-        // that carry no branch claim.
+        // Ownership is mandatory even for branch-scoped JWTs. The branch claim
+        // scopes the session, but must never grant access to another barber's
+        // queue entry.
         const entryQuery = db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, created_at')
-            .eq('id', id);
+            .eq('id', id)
+            .eq('barber_id', auth.barberId);
         if (branchId) {
             entryQuery.eq('branch_id', branchId);
-        } else {
-            entryQuery.eq('barber_id', auth.barberId);
         }
 
         const { data: entry, error: entryError } = await entryQuery.maybeSingle();
@@ -2736,9 +2782,8 @@ class Barbers {
                 .in('status', REASSIGNABLE_QUEUE_STATUSES);
             if (branchId) {
                 updateQuery.eq('branch_id', branchId);
-            } else {
-                updateQuery.eq('barber_id', auth.barberId);
             }
+            updateQuery.eq('barber_id', auth.barberId);
 
             const { data: updated, error: updateError } = await updateQuery
                 .select('id, status, swapped_flag, created_at, started_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
