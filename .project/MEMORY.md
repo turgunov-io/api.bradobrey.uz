@@ -1,5 +1,13 @@
 # Project memory
 
+- `PATCH /api/barbers/queue/:id/reassign` is the documented immediate
+  reassignment endpoint. A previous transfer workflow change placed
+  `return queueTransfers.request(req, res)` before the existing implementation,
+  making the direct reassignment code unreachable and returning
+  `transfer_pending` to clients that expect an updated queue entry. The direct
+  path was restored on 2026-10-14 and is covered by `queueTransfers.test.js`;
+  review any future transfer API change against the Barber client contract.
+
 - For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
 
 ## Долговременные факты

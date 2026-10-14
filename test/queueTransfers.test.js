@@ -42,3 +42,17 @@ test('transfer workflow locks the order and transfer before applying state trans
   assert.match(source, /String\(transfer\.to_barber_id\) !== actor\.id/);
   assert.match(source, /expires_at\)\.getTime\(\) <= Date\.now\(\)/);
 });
+
+test('documented barber reassignment endpoint executes reassignment logic', () => {
+  const source = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
+  const methodStart = source.indexOf('    async reassignQueue(req, res) {');
+  const methodEnd = source.indexOf('\n    async callNext(req, res) {', methodStart);
+  assert.ok(methodStart >= 0 && methodEnd > methodStart);
+  const method = source.slice(methodStart, methodEnd);
+
+  assert.doesNotMatch(method, /return queueTransfers\.request\(req, res\)/);
+  assert.match(method, /getBranchBarberAvailability/);
+  assert.match(method, /update\(\{[\s\S]*barber_id: selectedBarber\.id/);
+  assert.match(method, /queue_reassigned/);
+  assert.match(method, /barber_changed/);
+});

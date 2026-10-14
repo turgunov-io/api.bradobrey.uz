@@ -1,6 +1,5 @@
 ﻿const { db } = require("../config/postgres");
 const bcrypto = require("bcryptjs");
-const queueTransfers = require('./queueTransfers');
 const jwt = require("jsonwebtoken");
 const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
@@ -2651,7 +2650,6 @@ class Barbers {
     }
 
     async reassignQueue(req, res) {
-        return queueTransfers.request(req, res);
         const { id } = req.params || {};
         const targetBarberId = normalizeId(req.body?.barber_id);
         const auth = authenticateBarberWorkspace(req, res, 'Only barbers can reassign queue entries');
