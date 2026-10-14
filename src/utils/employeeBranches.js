@@ -1,4 +1,5 @@
-const { db } = require('../config/postgres');
+const { db, pool } = require('../config/postgres');
+const { applyEmployeeLogoutTransaction } = require('./employeePresenceTransaction');
 
 const isMissingRelation = (error, relation) => {
   const text = [error?.code, error?.message, error?.details, error?.hint]
@@ -126,6 +127,18 @@ async function touchActiveEmployeeBranch({ employeeId, branchId }) {
   }
 }
 
+async function logoutEmployeePresence(employeeId) {
+  const normalizedEmployeeId = normalizeId(employeeId);
+  if (!normalizedEmployeeId) return { barber: null, activeBranchId: null };
+
+  const client = await pool.connect();
+  try {
+    return await applyEmployeeLogoutTransaction(client, normalizedEmployeeId);
+  } finally {
+    client.release();
+  }
+}
+
 async function employeeCanUseBranch(employeeId, branchId, fallbackBranchId = null) {
   const branches = await listEmployeeBranches(employeeId, fallbackBranchId);
   return branches.some((branch) => String(branch.id) === String(branchId));
@@ -135,6 +148,8 @@ module.exports = {
   employeeCanUseBranch,
   listEmployeeBranches,
   getActiveEmployeeBranch,
+  applyEmployeeLogoutTransaction,
+  logoutEmployeePresence,
   listEmployeeBranches,
   normalizeId,
   resolveEmployeeBranch,

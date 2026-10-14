@@ -31,6 +31,11 @@ logout, stop their shift, or stop sending heartbeats are excluded from the
 `barbers` array. Kiosk clients should still refetch on `queue:update` with
 `type=barber_status`.
 
+Logout clears both legacy and active-branch shift records in a single
+PostgreSQL transaction. The kiosk may use legacy-only fallback only when the
+active-presence table is confirmed missing; column, permission, and schema
+errors fail closed instead of serving potentially stale legacy shift state.
+
 - `is_available` is the authoritative booking flag. It is `true` only when the employee is active, on shift, and has no active queue entries.
 - `availability_status` is `available`, `busy`, `off_shift`, or `inactive`.
 - `active_queue_count`, `has_in_progress`, and `current_service_overdue` describe the current workload.

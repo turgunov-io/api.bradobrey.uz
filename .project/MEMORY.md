@@ -191,4 +191,7 @@
 - Implemented JWT-scoped `POST /api/barbers/logout`: it clears both legacy and active-branch shift state, clears in-memory timers, and emits status to both relevant branch rooms.
 - Implemented `POST /api/barbers/presence`; Flutter sends it every 30 seconds and on foreground. Kiosk reads only active branch rows with `updated_at` within 90 seconds and excludes off-shift employees.
 - Flutter logout now sends a Bearer token. Transient heartbeat network errors are ignored; only an explicit 401 triggers re-authentication.
-- Local verification passed: backend 102 tests and Flutter `flutter analyze`; production deployment and post-deploy 401 observation remain pending.
+- First remediation was deployed on 2026-10-14; follow-up client/backend fixes described below are local changes and still require their respective release/deployment.
+- Follow-up audit found a kiosk-cache defect: expired cached snapshots remained renderable after refresh errors. Kiosk now hides all cached barber cards whenever the snapshot is stale, consumes `barber_status/is_on_shift=false` to remove and persist the barber immediately, then refreshes from API. API logout now uses one transaction for both shift stores; only a confirmed missing presence relation enables legacy fallback.
+- Logout UI no longer clears the barber's local session after a failed/missing server logout request; it reports the failure and allows retry. Kiosk regressions and transaction rollback tests were added.
+- Follow-up verification: backend `npm test` 104/104; all tests and `flutter analyze` pass in both kiosk and Barber App repositories.

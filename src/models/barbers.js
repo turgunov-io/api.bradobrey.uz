@@ -11,7 +11,7 @@ const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
-const { getActiveEmployeeBranch, listEmployeeBranches, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
+const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -3341,26 +3341,10 @@ class Barbers {
 
             const barber_id = auth.barberId;
             const is_on_shift = false;
-            const activeBranch = await getActiveEmployeeBranch(barber_id);
-
-            const { data: updated, error: updateError } = await db
-                .from('barbers')
-                .update({ is_on_shift })
-                .eq('id', barber_id)
-                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
-                .maybeSingle();
-
-            if (updateError) {
-                return res.status(500).json({ error: updateError.message });
-            }
+            const { barber: updated, activeBranchId } = await logoutEmployeePresence(barber_id);
 
             if (updated) {
-                const activeBranchId = activeBranch?.branch_id || auth.payload?.branchId || updated.branch_id;
-                await setActiveEmployeeBranch({
-                    employeeId: barber_id,
-                    branchId: activeBranchId,
-                    isOnShift: false,
-                });
+                const effectiveBranchId = activeBranchId || auth.payload?.branchId || updated.branch_id;
                 clearShiftTimer(barber_id);
                 const breakInfo = breakTimers.get(barber_id);
                 if (breakInfo) {
@@ -3369,14 +3353,14 @@ class Barbers {
                 }
                 await logVerifixEvent({
                     barberId: updated.id,
-                    branchId: activeBranchId,
+                    branchId: effectiveBranchId,
                     eventType: 'logout',
                     io: req.app.get('io'),
                     metadata: { is_on_shift },
                 });
 
                 const io = req.app.get('io');
-                const branchIds = new Set([updated.branch_id, activeBranchId].filter(Boolean).map(String));
+                const branchIds = new Set([updated.branch_id, effectiveBranchId].filter(Boolean).map(String));
                 for (const branchId of branchIds) {
                     io?.to(`branch:${branchId}`).emit('queue:update', {
                         type: 'barber_status',

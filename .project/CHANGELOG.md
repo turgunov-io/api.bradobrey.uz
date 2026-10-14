@@ -2,6 +2,7 @@
 
 ## 2026-10-14
 
+- Follow-up kiosk presence fix: made backend logout atomic across legacy and active-branch rows; narrowed fallback to a genuinely missing presence table. Kiosk now removes a barber immediately on the logout status event and never renders a stale cached barber list after refresh failure. Barber App preserves its session and surfaces an error if server logout is not confirmed. Regression tests added.
 - Fixed Barber/Kiosk presence consistency: JWT-scoped logout now clears both
   legacy and active-branch shift state, emits branch-scoped status events, and
   kiosk visibility requires fresh on-shift presence. Added the authenticated

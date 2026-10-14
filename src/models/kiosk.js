@@ -23,6 +23,12 @@ const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
 const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
 
+const isMissingActivePresenceTable = (error) => {
+    if (error?.code === '42P01') return true;
+    const message = String(error?.message || '').toLowerCase();
+    return /could not find (?:the )?table .*employee_active_branches.*schema cache/.test(message);
+};
+
 const normalizeText = (value) => {
     if (value === undefined || value === null) return null;
     const text = String(value).trim();
@@ -367,7 +373,7 @@ class Kiosk {
             .eq('branch_id', branch_id)
             .eq('is_on_shift', true)
             .gte('updated_at', presenceCutoff);
-        if (activeBarbersError && !String(activeBarbersError.message || '').includes('employee_active_branches')) {
+        if (activeBarbersError && !isMissingActivePresenceTable(activeBarbersError)) {
             return res.status(500).json({ error: activeBarbersError.message });
         }
         const hasActivePresenceTable = !activeBarbersError;
