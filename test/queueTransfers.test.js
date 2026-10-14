@@ -42,3 +42,26 @@ test('transfer workflow locks the order and transfer before applying state trans
   assert.match(source, /String\(transfer\.to_barber_id\) !== actor\.id/);
   assert.match(source, /expires_at\)\.getTime\(\) <= Date\.now\(\)/);
 });
+
+test('active transfer request keeps stale and recipient eligibility checks in the durable path', () => {
+  const transferSource = fs.readFileSync(
+    path.join(root, 'src/models/queueTransfers.js'),
+    'utf8',
+  );
+  const barberSource = fs.readFileSync(
+    path.join(root, 'src/models/barbers.js'),
+    'utf8',
+  );
+  const optionsStart = barberSource.indexOf('async queueReassignOptions');
+  const requestStart = barberSource.indexOf('async reassignQueue');
+  const optionsHandler = barberSource.slice(optionsStart, requestStart);
+  const requestHandler = barberSource.slice(requestStart, barberSource.indexOf('async callNext', requestStart));
+
+  assert.match(transferSource, /created_at/);
+  assert.match(transferSource, /STALE_QUEUE_HOURS/);
+  assert.match(transferSource, /join users u on u\.id = b\.id/);
+  assert.match(transferSource, /u\.role = any\(\$3::text\[\]\)/);
+  assert.doesNotMatch(optionsHandler, /markEntriesNoShow/);
+  assert.match(requestHandler, /return queueTransfers\.request\(req, res\)/);
+  assert.doesNotMatch(requestHandler, /Selected barber is not available for reassignment/);
+});

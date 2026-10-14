@@ -1039,27 +1039,6 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
         ));
 };
 
-const getQueueTailCreatedAt = async ({ branchId, barberId }) => {
-    const { data: tailEntry, error } = await db
-        .from('queue_entries')
-        .select('id, created_at')
-        .eq('branch_id', branchId)
-        .eq('barber_id', barberId)
-        .in('status', ACTIVE_QUEUE_STATUSES)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-    if (error) throw new Error(error.message);
-
-    const tailTime = tailEntry?.created_at ? new Date(tailEntry.created_at).getTime() : NaN;
-    const nextTime = Number.isFinite(tailTime)
-        ? Math.max(Date.now(), tailTime + 1)
-        : Date.now();
-
-    return new Date(nextTime).toISOString();
-};
-
 const scheduleCallFollowUp = (entry, io) => {
     if (!entry?.id) return;
     clearCallTimer(entry.id);
@@ -2310,17 +2289,14 @@ class Barbers {
             return res.status(404).json({ error: 'Queue entry not found' });
         }
         if (!REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) {
-            return res.status(400).json({ error: 'Only waiting or called queue entries can be reassigned' });
+            return res.status(400).json({ error: 'Only waiting, called, or swapped queue entries can be reassigned' });
         }
 
         try {
             const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
             if (isStaleActiveEntry(entry, cutoffIso)) {
-                await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
                 return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
             }
-
-            await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
 
             const candidates = await getBranchBarberAvailability({
                 branchId: entry.branch_id,
@@ -2340,136 +2316,6 @@ class Barbers {
 
     async reassignQueue(req, res) {
         return queueTransfers.request(req, res);
-        const { id } = req.params || {};
-        const targetBarberId = normalizeId(req.body?.barber_id);
-        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can reassign queue entries');
-
-        if (!auth) return;
-        if (!id) {
-            return res.status(400).json({ error: 'Queue entry id is required' });
-        }
-
-        const branchId = normalizeId(auth.payload?.branchId);
-
-        // Branch-scoped: any barber in the same branch may reassign an entry,
-        // not just its current owner. Fall back to owner-only for legacy tokens
-        // that carry no branch claim.
-        const entryQuery = db
-            .from('queue_entries')
-            .select('id, barber_id, status, branch_id, created_at')
-            .eq('id', id);
-        if (branchId) {
-            entryQuery.eq('branch_id', branchId);
-        } else {
-            entryQuery.eq('barber_id', auth.barberId);
-        }
-
-        const { data: entry, error: entryError } = await entryQuery.maybeSingle();
-
-        if (entryError) {
-            return res.status(500).json({ error: entryError.message });
-        }
-        if (!entry) {
-            return res.status(404).json({ error: 'Queue entry not found' });
-        }
-        if (!REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) {
-            return res.status(400).json({ error: 'Only waiting or called queue entries can be reassigned' });
-        }
-        if (targetBarberId && targetBarberId === entry.barber_id) {
-            return res.status(400).json({ error: 'Queue entry already belongs to this barber' });
-        }
-
-        try {
-            const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
-            if (isStaleActiveEntry(entry, cutoffIso)) {
-                await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
-                return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
-            }
-
-            await markEntriesNoShow({ branchId: entry.branch_id, cutoffIso });
-
-            const candidates = await getBranchBarberAvailability({
-                branchId: entry.branch_id,
-                excludeBarberId: entry.barber_id,
-                excludeEntryId: id,
-                requireOnShift: true,
-            });
-
-            const selectedBarber = targetBarberId
-                ? candidates.find((candidate) => candidate.id === targetBarberId)
-                : candidates[0];
-
-            if (!selectedBarber) {
-                return res.status(400).json({
-                    error: targetBarberId
-                        ? 'Selected barber is not available for reassignment'
-                        : 'No available barber found for reassignment',
-                    candidates,
-                });
-            }
-
-            const nextCreatedAt = await getQueueTailCreatedAt({
-                branchId: entry.branch_id,
-                barberId: selectedBarber.id,
-            });
-
-            const updateQuery = db
-                .from('queue_entries')
-                .update({
-                    barber_id: selectedBarber.id,
-                    created_at: nextCreatedAt,
-                    started_at: null,
-                    status: 'waiting',
-                    swapped_flag: true,
-                })
-                .eq('id', id)
-                .in('status', REASSIGNABLE_QUEUE_STATUSES);
-            if (branchId) {
-                updateQuery.eq('branch_id', branchId);
-            } else {
-                updateQuery.eq('barber_id', auth.barberId);
-            }
-
-            const { data: updated, error: updateError } = await updateQuery
-                .select('id, status, swapped_flag, created_at, started_at, finished_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
-                .maybeSingle();
-
-            if (updateError) {
-                return res.status(500).json({ error: updateError.message });
-            }
-            if (!updated) {
-                return res.status(404).json({ error: 'Queue entry not found' });
-            }
-
-            clearCallTimer(id);
-
-            const io = req.app.get('io');
-            if (io) {
-                const reassignmentPayload = {
-                    type: 'queue_reassigned',
-                    entryId: updated.id,
-                    branchId: entry.branch_id,
-                    fromBarberId: entry.barber_id,
-                    barberId: selectedBarber.id,
-                };
-                io.to(`branch:${entry.branch_id}`).emit('queue:update', reassignmentPayload);
-                io.to(`branch:${entry.branch_id}`).emit('barber_changed', {
-                    ...reassignmentPayload,
-                    type: 'barber_changed',
-                });
-                io.to(`branch:${entry.branch_id}`).emit('queue.barber_changed', {
-                    ...reassignmentPayload,
-                    type: 'barber_changed',
-                });
-            }
-
-            return res.json({
-                entry: updated,
-                target_barber: selectedBarber,
-            });
-        } catch (error) {
-            return res.status(500).json({ error: error.message });
-        }
     }
 
     async callNext(req, res) {

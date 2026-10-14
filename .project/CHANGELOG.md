@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-10-15
+
+- Audited barber reassignment end-to-end with the Flutter client. The client was
+  reading the branch-wide kiosk barber list, while the transfer API validates a
+  narrower queue-scoped candidate set; this allowed a displayed barber ID to
+  receive HTTP 400. The mobile client now uses
+  `/api/barbers/queue/:id/reassign-options`.
+- Made the durable transfer workflow authoritative in the backend: PATCH stale
+  protection and recipient workspace-role validation now run in the active
+  `queueTransfers` path, and the read-only options endpoint no longer performs
+  branch-wide no-show mutations. Removed the unreachable legacy immediate
+  reassignment implementation and corrected the documented 202/
+  `transfer_pending` plus accept/reject contract.
+- Deployment remains a release gate: production commit, PM2 restart, and
+  `queue_transfer_history.sql` application were not verified from this checkout.
+
 ## 2026-10-07
 
 - Switched Telegram onboarding to Telegram Contact as the sole phone source:

@@ -192,12 +192,12 @@ Before enabling this workflow against a database, apply
 `scripts/apply-schema.sh` includes this migration and is safe to re-run.
 
 1. Fetch candidates: `GET /api/barbers/queue/:id/reassign-options` with `Authorization: Bearer <barber JWT>`.
-2. Backend checks that the queue entry belongs to the current barber and is still reassignable (`waiting`, `called`, or `swapped`).
-3. Response returns `candidates`, sorted by `estimated_waiting_time`, then `current_clients`, then barber name. Current barber is excluded, inactive and off-shift barbers are excluded.
-4. Reassign manually: `PATCH /api/barbers/queue/:id/reassign` with body `{ "barber_id": "<target barber id>" }`.
-5. Reassign automatically: call the same PATCH endpoint with an empty body; backend picks the first candidate, meaning the most available barber.
-6. Backend updates the entry to `status=waiting`, changes `barber_id`, clears `started_at`, sets `swapped_flag=true`, and moves `created_at` after the target barber's last active queue item so the client appears at the end of the selected barber's list.
-7. Backend emits Socket.io `queue:update` with `type=queue_reassigned`, so clients can refresh both the old and new barber queues.
+2. Backend checks that the queue entry belongs to the current barber and is still reassignable (`waiting`, `called`, or `swapped`). The read does not mutate unrelated queue entries.
+3. Response returns only candidates from the queue branch with an allowed workspace role that are active, non-archived, and on shift. The current barber is excluded. Candidates are sorted by `estimated_waiting_time`, then `current_clients`, then barber name.
+4. Request a manual transfer with `PATCH /api/barbers/queue/:id/reassign`, body `{ "barber_id": "<target barber id>" }`, and an optional `Idempotency-Key`.
+5. A valid request returns `202` and changes the entry to `status=transfer_pending`. The target barber must then call `PATCH /api/barbers/queue/transfers/:transferId/accept` or `/reject`.
+6. On acceptance, the backend assigns the entry to the target barber, restores `status=waiting`, clears `started_at`, sets `swapped_flag=true`, and places the entry after the target barber's active queue tail. Rejection or expiry returns it to the original barber/status.
+7. Backend emits `queue:update` transfer events. Clients must refetch after the response and after reconnect; Socket.IO events are not a durable delivery mechanism.
 
 ## User Journey Map (Blocks 1 and 2)
 

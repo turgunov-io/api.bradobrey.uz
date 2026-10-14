@@ -2,6 +2,18 @@
 
 - For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
 
+- Barber reassignment has one canonical split workflow: GET
+  `/api/barbers/queue/:id/reassign-options` returns queue-scoped eligible
+  targets; PATCH `/api/barbers/queue/:id/reassign` creates a
+  `transfer_pending` request and returns `202`; the target accepts or rejects
+  via `/api/barbers/queue/transfers/:transferId/{accept|reject}`. Do not use
+  `/api/kiosk/barbers/:branchId` as the reassignment candidate source.
+- The active PATCH path validates the queue entry owner, branch, reassignable
+  status, nine-hour stale cutoff, target branch/active/archive/shift state, and
+  linked workspace role. Production verification still requires deployment of
+  the current source, PM2 restart, and application of
+  `db/postgres/queue_transfer_history.sql`.
+
 ## Долговременные факты
 
 - Backend использует Express, PostgreSQL и Socket.IO; Marketplace и kiosk объединены через legacy `queue_entries`.
