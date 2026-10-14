@@ -171,3 +171,9 @@
 - Confirmed the four active-branch/geolocation tables already exist in production, so no database migration was run.
 - Restarted only PM2 app `BRADOBREY-BARBER`; `bradobrey-dashboard` was not restarted. PM2 reported the API online and `https://api.bradobrey.uz/health` returned HTTP 200.
 - Created rollback backup `/var/backups/api.bradobrey.uz-20261014-deploy.tar` on the server. The production Git worktree still contains historical local divergence and was not reset or force-updated.
+
+# Production kiosk socket secret (2026-10-14)
+
+- Generated `KIOSK_SOCKET_SECRET` directly on the API server and stored it only in `/var/www/api.bradobrey.uz/.env`; the value is not recorded in Git or project documentation.
+- Restarted only PM2 app `BRADOBREY-BARBER`; the dashboard process was not restarted. A real registered kiosk request to `POST /api/kiosk/socket-ticket` returned HTTP 200 with a ticket.
+- Created the pre-change environment backup at `/var/backups/api.bradobrey.uz-env-20261014-kiosk-secret`.
