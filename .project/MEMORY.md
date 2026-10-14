@@ -231,3 +231,17 @@
 - Commit `0d8e154` is pushed to `origin/main`. Production deployment remains
   blocked because SSH to `95.46.96.213` was rejected for `root`, `ubuntu`, and
   `admin`; public `/health` 200 does not prove the new code is deployed.
+
+# Barber session/logout QA audit (2026-10-15)
+
+- Local backend `.env` has `JWT_EXPIRES_IN=12h`; `signUserToken` also defaults
+  to `12h`, so the requested 15-hour token policy is not currently configured.
+- Flutter `MidnightLogoutService` is wired from `main.dart` and checks the
+  first local-device midnight after `auth_session_started_at`; it has no
+  dedicated automated tests and uses device timezone rather than explicit
+  Asia/Tashkent conversion.
+- Flutter clears the session on every HTTP 401, including a 401 from the
+  30-second `/barbers/presence` heartbeat. A logout around 30 minutes is not
+  explained by the local TTL and needs production 401 source/log evidence.
+- Flutter analyzer passed and 46 tests passed. Full findings are in
+  `audit-reports/barber-session/20261015-0010/`.
