@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-15 (transfer eligibility follow-up)
+
+- Fixed the remaining reassignment contract mismatch: `PATCH
+  /api/barbers/queue/:id/reassign` now validates the selected barber against
+  the same fresh `employee_active_branches` presence used by reassignment
+  options and kiosk activity (`is_on_shift=true`, heartbeat <= 90 seconds).
+  Temporary active-branch assignments are accepted without requiring the
+  permanent `barbers.branch_id` to match.
+- Added a regression contract test for branch presence, freshness, role,
+  and on-shift validation. Backend queue/transfer tests pass 22/22.
+- Pushed as commit `f3ec201`. Production received only
+  `src/models/queueTransfers.js`; the API process `BRADOBREY-BARBER` was
+  restarted and verified online. The dashboard process was not restarted.
+
 ## 2026-10-15 (continued)
 
 - Aligned the production API reassignment path with the Flutter client: the

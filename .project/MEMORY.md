@@ -229,6 +229,20 @@
 - Follow-up API deployment: commit `f95a8ac`; only the four presence-related API source files were overlaid, the API PM2 process alone was restarted, API health remained HTTP 200, unauthenticated logout correctly returned 401, and both API/dashboard processes were online. Rollback archive: `/var/backups/api.bradobrey.uz-presence-followup-20261014.tar.gz`. No authenticated real-barber logout or kiosk-device end-to-end test was available.
 # Barber reassignment audit (2026-10-15)
 
+- Follow-up fix `f3ec201` aligned the durable PATCH recipient check with the
+  active-branch presence contract. When `employee_active_branches` exists, a
+  target must have a matching branch assignment, `is_on_shift=true`, and an
+  `updated_at` within 90 seconds; permanent/home `barbers.branch_id` is no
+  longer required for temporary branch work. A legacy direct-branch fallback
+  remains only for installations where the additive presence table is absent.
+- Production overlay was completed on 2026-10-15: only
+  `/var/www/api.bradobrey.uz/src/models/queueTransfers.js` was replaced after
+  a backup was saved outside the repository; `BRADOBREY-BARBER` was the only
+  PM2 process restarted and remained online. Dashboard was not touched.
+- The authenticated end-to-end transfer was not executed because it would
+  mutate a live customer queue; production service, syntax, and unauthenticated
+  route checks were used instead.
+
 - Direct `PATCH /api/barbers/queue/:id/reassign` must be owner-scoped even when
   JWT contains `branchId`; branch scope is not ownership permission.
 - Candidate discovery now merges permanent `barbers.branch_id` with fresh,
