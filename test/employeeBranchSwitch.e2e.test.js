@@ -78,3 +78,8 @@ test('server-side branch checks remain wired into the real switch, shift, and ki
   assert.match(kiosk, /employee_active_branches/);
   assert.match(kiosk, /activeById/);
 });
+
+test('branch switching migration is included in the deployment schema runner', () => {
+  const schemaRunner = fs.readFileSync(path.join(__dirname, '..', 'scripts/apply-schema.sh'), 'utf8');
+  assert.match(schemaRunner, /employee_branches\.sql/);
+});

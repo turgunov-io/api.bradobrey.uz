@@ -7,6 +7,9 @@
   `transfer_pending` to clients that expect an updated queue entry. The direct
   path was restored on 2026-10-14 and is covered by `queueTransfers.test.js`;
   review any future transfer API change against the Barber client contract.
+- `employee_branches.sql` must remain in `scripts/apply-schema.sh` after
+  `branches.sql`/`barbers.sql`; omitting it makes cross-branch switching fail
+  on a fresh database while the code-level contract tests can still pass.
 
 - For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
 

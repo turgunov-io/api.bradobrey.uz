@@ -7,6 +7,8 @@
   pending-transfer workflow and return `transfer_pending` instead of moving the
   queue entry. Restored the direct reassignment path and added a regression
   contract test. Full local backend suite: 105/105.
+- Added `employee_branches.sql` to the dependency-ordered schema runner so
+  active-branch switching is reproducible on new/staging databases.
 
 ## 2026-10-14
 
