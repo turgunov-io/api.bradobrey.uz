@@ -10,7 +10,10 @@
   isolation. Full API test suite passes (124/124).
 - Removed committed merge-marker leftovers from queue transfer source/tests and
   retained the durable active-branch eligibility checks so the API test suite
-  can load. Production schema/deployment was not changed or verified.
+  can load. Production `employee_branches.sql` was applied additively and the
+  API-only overlay was restarted; API health returned HTTP 200 and the
+  dashboard process remained online. Physical kiosk-device validation remains
+  outstanding.
 
 ## 2026-10-15
 
