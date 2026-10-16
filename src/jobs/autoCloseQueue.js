@@ -1,4 +1,5 @@
 const { db } = require('../config/postgres');
+const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 
 const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const OPEN_NO_SHOW_STATUSES = ['waiting', 'called', 'swapped'];
@@ -104,6 +105,7 @@ async function closePreviousDayOpenQueueEntries({ io = null, now = new Date(), t
     }
 
     const rows = Array.isArray(data) ? data : [];
+    await registerConfirmedNoShows(rows.map((row) => row.id));
     const branchIds = Array.from(new Set(rows.map((row) => row.branch_id).filter(Boolean)));
 
     if (io) {

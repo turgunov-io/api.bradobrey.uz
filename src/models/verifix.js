@@ -350,8 +350,9 @@ async function recordActivityEvent({
     throw new Error('Branch not found');
   }
 
-  if (barber.branch_id && finalBranchId && barber.branch_id !== finalBranchId) {
-    throw new Error('Barber does not belong to this branch');
+  const { employeeCanUseBranch } = require('../utils/employeeBranches');
+  if (!(await employeeCanUseBranch(barber.id, finalBranchId, barber.branch_id))) {
+    throw new Error('Barber is not allowed to work in this branch');
   }
 
   const timeZone = normalizeTimeZone(branch.timezone);
@@ -590,14 +591,18 @@ class Verifix {
       const currentBarber = await getBarber(barberId);
       if (!currentBarber) return res.status(404).json({ error: 'Barber not found' });
 
-      const branchId = normalizeId(body.branch_id) || currentBarber.branch_id || auth.branchId;
+      const branchId = normalizeId(body.branch_id) || auth.branchId || currentBarber.branch_id;
       if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
 
       const branch = await getBranch(branchId);
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
+      const { employeeCanUseBranch, setActiveEmployeeBranch } = require('../utils/employeeBranches');
+      if (!isAdmin && !(await employeeCanUseBranch(barberId, branchId, currentBarber.branch_id))) {
+        return res.status(403).json({ error: 'Employee is not allowed to work in this branch' });
+      }
+
       const barberUpdate = { is_on_shift: isOnShift };
-      if (branchId !== currentBarber.branch_id) barberUpdate.branch_id = branchId;
 
       const { data: updatedBarber, error: updateError } = await db
         .from('barbers')
@@ -609,9 +614,7 @@ class Verifix {
       if (updateError) return res.status(500).json({ error: updateError.message });
       if (!updatedBarber) return res.status(404).json({ error: 'Barber not found' });
 
-      if (branchId !== currentBarber.branch_id) {
-        await db.from('users').update({ branch_id: branchId }).eq('id', barberId);
-      }
+      await setActiveEmployeeBranch({ employeeId: barberId, branchId, isOnShift });
 
       const event = await recordActivityEvent({
         actorId: auth.id,

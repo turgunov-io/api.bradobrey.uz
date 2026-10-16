@@ -169,3 +169,7 @@ Phone authentication must use the Telegram challenge/verify flow.
   restart the API, and run a controlled Telegram link/verify test.
 - Status: Backend fixed; Telegram secrets, database migration, restart, and
   end-to-end test remain open deployment steps.
+
+## Employee session persistence
+
+Workspace JWTs carry a random `jti` that is also stored with `session_expires_at` in `employee_active_branches`. The global employee API middleware and Socket.IO handshake validate the persisted session, branch assignment, branch status, archive status, and expiry. Logout revokes the stored session atomically. Heartbeat, app lifecycle, and socket disconnect are not session-revocation signals. Apply the additive employee-branches schema before deploying this API revision; database connectivity must be verified before rollout.

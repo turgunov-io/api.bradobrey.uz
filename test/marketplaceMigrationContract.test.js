@@ -52,6 +52,8 @@ test('marketplace migration configures queue synchronization and platform limits
   assert.match(migration, /max_duration_minutes.*180/);
   assert.match(migration, /cancel_cooldown_minutes.*15/);
   assert.match(migration, /no_show_block_threshold.*5/);
+  assert.match(migration, /marketplace_no_show_violations/);
+  assert.match(migration, /no_show_restrictions/);
 });
 
 test('marketplace migration exposes map coordinates and per-service review edits', () => {

@@ -44,10 +44,21 @@ class MarketplaceSettings {
     const administrator = authenticate(req, res);
     if (!administrator) return;
     const key = String(req.params?.key || '').trim();
-    const value = req.body?.value;
+    const requestValue = req.body?.value;
     if (!ALLOWED_KEYS.has(key)) {
       return res.status(400).json({ error: 'Unsupported platform setting' });
     }
+    // Older Dashboard bundles mirrored the response timestamp into the form
+    // and sent it back on PATCH. It is server-owned metadata, not a setting;
+    // discard only this known legacy field before the strict allowlist check.
+    const value = key === 'no_show_restrictions'
+      && requestValue && typeof requestValue === 'object' && !Array.isArray(requestValue)
+      ? (() => {
+        const { updated_at, ...settingsValue } = requestValue;
+        void updated_at;
+        return settingsValue;
+      })()
+      : requestValue;
     const validationError = validateValue(key, value);
     if (validationError) return res.status(400).json({ error: validationError });
 

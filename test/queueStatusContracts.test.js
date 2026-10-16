@@ -138,8 +138,18 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
         error: null,
       },
     ],
-    barbers: [{ data: [{ id: 'barber-1', name: 'Barber', branch_id: 'branch-1', is_active: true, is_on_shift: true }], error: null }],
-    users: [{ data: [{ id: 'barber-1', role: 'barber' }], error: null }],
+    barbers: [{ data: [
+      { id: 'barber-1', name: 'Barber', branch_id: 'branch-1', is_active: true, is_on_shift: true },
+      { id: 'barber-2', name: 'Off shift', branch_id: 'branch-1', is_active: true, is_on_shift: false },
+    ], error: null }],
+    users: [{ data: [
+      { id: 'barber-1', role: 'barber' },
+      { id: 'barber-2', role: 'barber' },
+    ], error: null }],
+    employee_active_branches: [{ data: [{
+      employee_id: 'barber-1', branch_id: 'branch-1', is_on_shift: true,
+      updated_at: new Date().toISOString(),
+    }], error: null }],
     services: [{ data: [{ id: 'service-1', duration_minutes: 10 }], error: null }],
     clients: [{ data: [], error: null }],
   });
@@ -149,6 +159,7 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
     await kiosk.barbers({ params: { branch_id: 'branch-1' } }, res);
 
     assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.payload.barbers.map((barber) => barber.id), ['barber-1']);
     assert.deepEqual(
       res.payload.barbers[0].clients.map((entry) => entry.status),
       ACTIVE_QUEUE_STATUSES,
@@ -207,6 +218,36 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete enriches services and em
     assert.equal(emitted[0].event, 'queue:update');
     assert.equal(emitted[0].payload.type, 'queue_updated');
     assert.equal(emitted[0].payload.total_duration, 30);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manual amount below catalog price', async () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src/models/barbers.js'), 'utf8');
+  assert.doesNotMatch(source, /amount cannot be lower than minimum service price/);
+
+  const mock = installDbMock({
+    queue_entries: [
+      { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'] }, error: null },
+      { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'], price_override: 1, price_override_reason: 'Округление' }, error: null },
+    ],
+    services: [{ data: [{ id: 'service-1', name: 'Haircut', base_price: 40000, duration_minutes: 20, is_active: true }], error: null }],
+  });
+
+  try {
+    const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+    const res = createResponse();
+    await barbers.editBeforeComplete({
+      app: { get: () => null },
+      body: { amount: 1, reason: 'Округление' },
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: 'queue-low-price' },
+    }, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.entry.price_override, 1);
+    assert.equal(res.payload.entry.price_override_reason, 'Округление');
   } finally {
     mock.restore();
   }

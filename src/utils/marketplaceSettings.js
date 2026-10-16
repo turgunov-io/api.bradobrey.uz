@@ -5,8 +5,18 @@ const ALLOWED_KEYS = new Set([
   'loyalty_levels',
   'referral',
   'cashback',
+  'no_show_restrictions',
 ]);
 const { validateLoyaltyLevels } = require('./loyaltyLevels');
+
+const NO_SHOW_RESTRICTION_FIELDS = new Set([
+  'enabled',
+  'automatic',
+  'first_violation_minutes',
+  'second_violation_minutes',
+  'third_plus_violation_minutes',
+  'lookback_days',
+]);
 
 function validateValue(key, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -51,6 +61,22 @@ function validateValue(key, value) {
     }
     if (start && end && String(start) > String(end)) {
       return 'promotion_end_date must be on or after promotion_start_date';
+    }
+  }
+  if (key === 'no_show_restrictions') {
+    const unknownFields = Object.keys(value).filter((field) => !NO_SHOW_RESTRICTION_FIELDS.has(field));
+    if (unknownFields.length) {
+      return `no_show_restrictions contains unsupported fields: ${unknownFields.join(', ')}`;
+    }
+    if (typeof value.enabled !== 'boolean' || typeof value.automatic !== 'boolean') {
+      return 'enabled and automatic must be boolean';
+    }
+    const durations = [value.first_violation_minutes, value.second_violation_minutes, value.third_plus_violation_minutes];
+    if (durations.some((item) => !Number.isInteger(item) || item < 1 || item > 43200)) {
+      return 'violation durations must be integers between 1 and 43200 minutes';
+    }
+    if (!Number.isInteger(value.lookback_days) || value.lookback_days < 1 || value.lookback_days > 3650) {
+      return 'lookback_days must be an integer between 1 and 3650';
     }
   }
   if (key === 'loyalty_levels') {

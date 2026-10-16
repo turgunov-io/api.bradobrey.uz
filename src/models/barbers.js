@@ -1,7 +1,7 @@
 ﻿const { db } = require("../config/postgres");
 const bcrypto = require("bcryptjs");
-const queueTransfers = require('./queueTransfers');
 const jwt = require("jsonwebtoken");
+const { randomUUID } = require('node:crypto');
 const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
 const { createSuspiciousOrderNotifications } = require('./notifications');
@@ -9,6 +9,11 @@ const { awardCashbackForCompletedQueueEntry } = require("../composable/cashback"
 const { settlePendingReferralBonuses } = require('../services/referralBonus');
 const { recordActivityEvent } = require("./verifix");
 const { isArchivedEmployee } = require('../middleware/employeeAccess');
+const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
+const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
+const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
+const { validatePersistedEmployeeSession } = require('../utils/employeeSession');
+const queueTransfers = require('./queueTransfers');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -131,15 +136,16 @@ const cleanupShiftTimers = () => {
     shiftAutoOffTimers.clear();
 };
 
-const signUserToken = ({ id, login, role, branch_id = null }) => jwt.sign(
+const signUserToken = ({ id, login, role, branch_id = null, sessionId = null, expiresIn = process.env.JWT_EXPIRES_IN || '12h' }) => jwt.sign(
     {
         sub: id,
         login,
         role,
         branchId: branch_id,
+        ...(sessionId ? { jti: sessionId } : {}),
     },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '12h' }
+    { expiresIn }
 );
 
 const isBarberWorkspaceRole = (role) => BARBER_WORKSPACE_ROLES.has(role);
@@ -147,6 +153,15 @@ const isBarberWorkspaceRole = (role) => BARBER_WORKSPACE_ROLES.has(role);
 const normalizeId = (value) => {
     const text = String(value || '').trim();
     return text || null;
+};
+
+const isMissingActiveEmployeeBranches = (error) => {
+    const message = [error?.code, error?.message, error?.details, error?.hint]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    return message.includes('employee_active_branches')
+        && (message.includes('does not exist') || message.includes('not found') || message.includes('schema cache'));
 };
 
 const normalizeArchiveFilter = (value) => {
@@ -256,7 +271,7 @@ const getFinanceSnapshotDraft = async ({ branchId, barberId, period }) => {
     return normalizeFinanceDraft(employees[barberId]);
 };
 
-const authenticateBarberWorkspace = (req, res, forbiddenMessage) => {
+const authenticateBarberWorkspace = async (req, res, forbiddenMessage, { allowRevoked = false } = {}) => {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
@@ -284,7 +299,40 @@ const authenticateBarberWorkspace = (req, res, forbiddenMessage) => {
         return null;
     }
 
-    return { barberId, payload };
+    if (!payload.jti || !payload.branchId) {
+        res.status(401).json({ code: 'SESSION_INVALID', error: 'Session is no longer valid' });
+        return null;
+    }
+
+    try {
+        const session = await validatePersistedEmployeeSession({
+            employeeId: barberId,
+            branchId: payload.branchId,
+            sessionId: payload.jti,
+            role: payload.role,
+        });
+        if (!session.valid) {
+            if (allowRevoked && session.reason === 'revoked') {
+                return { barberId, payload, sessionValid: false };
+            }
+            const expired = session.reason === 'expired';
+            const blocked = ['account_blocked', 'branch_access_revoked'].includes(session.reason);
+            res.status(blocked ? 403 : 401).json({
+                code: expired ? 'SESSION_EXPIRED' : blocked ? 'ACCOUNT_BLOCKED' : 'SESSION_REVOKED',
+                error: blocked ? 'Employee access has been revoked' : 'Session is no longer valid',
+            });
+            return null;
+        }
+    } catch (error) {
+        // Missing schema or database errors must not turn a session into an
+        // authorization bypass. A 503 keeps transient outages distinct from
+        // an invalid token so clients can retry without clearing local auth.
+        console.error('barber session validation unavailable:', error.message);
+        res.status(503).json({ code: 'SESSION_VALIDATION_UNAVAILABLE', error: 'Session validation is temporarily unavailable' });
+        return null;
+    }
+
+    return { barberId, payload, sessionValid: true };
 };
 
 const isMissingRelationError = (error, relation) => {
@@ -399,6 +447,7 @@ const uploadEmployeePhoto = async (req, userId) => {
 
 const employeeItem = ({ user, barber, permissions = [] }) => ({
     branch_id: barber?.branch_id || user.branch_id || null,
+    active_branch_id: barber?.active_branch_id || null,
     id: user.id,
     is_active: barber?.is_active ?? null,
     is_archived: barber?.is_archived ?? false,
@@ -419,7 +468,9 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
         .select('id, login, role, branch_id', { count: 'exact' })
         .in('role', Array.from(EMPLOYEE_ROLES));
 
-    if (branchId) query = query.eq('branch_id', branchId);
+    // branch_id is the permanent assignment. A branch-filtered directory must
+    // also include employees whose persisted active work branch is selected.
+    // The active assignment is resolved below after the user ids are known.
     if (role && EMPLOYEE_ROLES.has(role)) query = query.eq('role', role);
 
     const { data: users, error: usersError, count } = await query
@@ -428,7 +479,7 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
     if (usersError) throw new Error(usersError.message);
 
     const userIds = (users || []).map((user) => user.id).filter(Boolean);
-    const [barbersResult, permissionsByUser] = await Promise.all([
+    const [barbersResult, permissionsByUser, activeBranchesResult] = await Promise.all([
         userIds.length
             ? db
                 .from('barbers')
@@ -436,16 +487,34 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
                 .in('id', userIds)
             : Promise.resolve({ data: [], error: null }),
         fetchPermissionsByUserIds(userIds),
+        userIds.length
+            ? db
+                .from('employee_active_branches')
+                .select('employee_id, branch_id, is_on_shift')
+                .in('employee_id', userIds)
+            : Promise.resolve({ data: [], error: null }),
     ]);
 
     if (barbersResult.error) throw new Error(barbersResult.error.message);
+    if (activeBranchesResult.error && !isMissingRelationError(activeBranchesResult.error, 'employee_active_branches')) {
+        throw new Error(activeBranchesResult.error.message);
+    }
 
     const barbersById = new Map((barbersResult.data || []).map((barber) => [String(barber.id), barber]));
+    const activeBranchesByEmployee = new Map((activeBranchesResult.data || []).map((assignment) => [
+        String(assignment.employee_id),
+        assignment,
+    ]));
     const items = (users || []).map((user) => employeeItem({
-        barber: barbersById.get(String(user.id)) || null,
+        barber: {
+            ...(barbersById.get(String(user.id)) || {}),
+            active_branch_id: activeBranchesByEmployee.get(String(user.id))?.branch_id || null,
+        },
         permissions: permissionsByUser.get(String(user.id)) || [],
         user,
     })).filter((item) => {
+        if (branchId && String(item.branch_id || '') !== String(branchId)
+            && String(item.active_branch_id || '') !== String(branchId)) return false;
         const archivedItem = item.is_archived === true;
 
         if (archived === 'only') return archivedItem;
@@ -510,6 +579,7 @@ const markEntriesNoShow = async ({ barberId, branchId, cutoffIso }) => {
     const { data, error } = await query.select('id');
     if (!error && Array.isArray(data)) {
         data.forEach((row) => clearCallTimer(row.id));
+        await registerConfirmedNoShows(data.map((row) => row.id));
     }
     return { data, error };
 };
@@ -815,6 +885,12 @@ const isMissingPriceOverrideColumn = (error) => {
     return /price_override/i.test(message) && /could not find|does not exist|schema cache/i.test(message);
 };
 
+const isMissingPaymentsTable = (error) => {
+    const code = String(error?.code || '').trim();
+    const message = String(error?.message || error?.details || '').toLowerCase();
+    return code === '42P01' || code === 'PGRST205' || (message.includes('payments') && /does not exist|not found|schema cache|could not find/.test(message));
+};
+
 const completedRevenueQuery = ({ barberId, branchId, from, to, select }) => {
     let query = db
         .from('queue_entries')
@@ -923,6 +999,150 @@ const getBarberProfileFinance = async ({ barberId, branchId, period }) => {
     };
 };
 
+const getBarberWorkStatistics = async ({ barberId, period }) => {
+    const range = periodRange(period);
+    let { data: entries, error: entriesError } = await db
+        .from('queue_entries')
+        .select('id, branch_id, service_id, service_ids, price_override, finished_at')
+        .eq('barber_id', barberId)
+        .eq('status', 'completed')
+        .gte('finished_at', range.from)
+        .lt('finished_at', range.to);
+
+    if (entriesError && isMissingPriceOverrideColumn(entriesError)) {
+        ({ data: entries, error: entriesError } = await db
+            .from('queue_entries')
+            .select('id, branch_id, service_id, service_ids, finished_at')
+            .eq('barber_id', barberId)
+            .eq('status', 'completed')
+            .gte('finished_at', range.from)
+            .lt('finished_at', range.to));
+    }
+    if (entriesError) throw new Error(entriesError.message);
+
+    const completedEntries = Array.isArray(entries) ? entries : [];
+    const entryIds = completedEntries.map(entry => entry.id).filter(Boolean);
+    const serviceIds = Array.from(new Set(completedEntries.flatMap(serviceIdsForEntry).filter(Boolean)));
+    const [paymentsResult, servicesResult, branchesResult, eventsResult, financeResult] = await Promise.all([
+        entryIds.length
+            ? db.from('payments').select('queue_entry_id, amount').in('queue_entry_id', entryIds)
+            : { data: [], error: null },
+        serviceIds.length
+            ? db.from('services').select('id, base_price').in('id', serviceIds)
+            : { data: [], error: null },
+        db.from('branches').select('id, name'),
+        db.from('barber_activity_events')
+            .select('branch_id, event_type, occurred_at')
+            .eq('barber_id', barberId)
+            .in('event_type', ['shift_start', 'shift_end'])
+            .gte('occurred_at', range.from)
+            .lt('occurred_at', range.to)
+            .order('occurred_at', { ascending: true }),
+        db.from('finance_snapshots')
+            .select('branch_id, payload')
+            .eq('period', range.period),
+    ]);
+
+    if (paymentsResult.error && !isMissingPaymentsTable(paymentsResult.error)) throw new Error(paymentsResult.error.message);
+    if (servicesResult.error) throw new Error(servicesResult.error.message);
+    if (branchesResult.error) throw new Error(branchesResult.error.message);
+    const events = eventsResult.error ? [] : (eventsResult.data || []);
+    const prices = new Map((servicesResult.data || []).map(service => [String(service.id), financeNumber(service.base_price)]));
+    const paymentsByEntry = new Map();
+    for (const payment of paymentsResult.data || []) {
+        paymentsByEntry.set(payment.queue_entry_id, (paymentsByEntry.get(payment.queue_entry_id) || 0) + financeNumber(payment.amount));
+    }
+    const branchNames = new Map((branchesResult.data || []).map(branch => [String(branch.id), branch.name || String(branch.id)]));
+    const rows = new Map();
+    const ensureRow = branchId => {
+        const key = String(branchId || 'unknown');
+        if (!rows.has(key)) rows.set(key, { branch_id: branchId || null, branch_name: branchNames.get(key) || 'Филиал не указан', services: 0, revenue: 0, shifts: 0, worked_days: 0, worked_minutes: 0 });
+        return rows.get(key);
+    };
+    for (const entry of completedEntries) {
+        const row = ensureRow(entry.branch_id);
+        const paymentTotal = paymentsByEntry.get(entry.id) || 0;
+        const override = financeNumber(entry.price_override);
+        const serviceTotal = serviceIdsForEntry(entry).reduce((sum, id) => sum + (prices.get(String(id)) || 0), 0);
+        row.services += 1;
+        row.revenue += paymentTotal || override || serviceTotal;
+    }
+
+    const openShifts = new Map();
+    const daySets = new Map();
+    for (const event of events) {
+        const key = String(event.branch_id || 'unknown');
+        const row = ensureRow(event.branch_id);
+        const occurred = new Date(event.occurred_at);
+        if (event.event_type === 'shift_start') {
+            if (!openShifts.has(key)) {
+                openShifts.set(key, occurred);
+                row.shifts += 1;
+                const days = daySets.get(key) || new Set();
+                days.add(occurred.toISOString().slice(0, 10));
+                daySets.set(key, days);
+            }
+        } else if (event.event_type === 'shift_end') {
+            const started = openShifts.get(key);
+            if (started) {
+                row.worked_minutes += Math.max(0, Math.round((occurred.getTime() - started.getTime()) / 60000));
+                openShifts.delete(key);
+            }
+        }
+    }
+    for (const [key, row] of rows) row.worked_days = (daySets.get(key) || new Set()).size;
+
+    const financeBranches = [];
+    if (!financeResult.error || !isMissingFinanceSnapshotTable(financeResult.error)) {
+        if (financeResult.error) throw new Error(financeResult.error.message);
+        for (const snapshot of financeResult.data || []) {
+            const employees = snapshot?.payload?.employees && typeof snapshot.payload.employees === 'object'
+                ? snapshot.payload.employees
+                : {};
+            const draft = normalizeFinanceDraft(employees[barberId]);
+            if (!Object.values(draft).some(value => value > 0)) continue;
+            const commission = commissionForFinance({
+                bonusProfitPercent: draft.bonus_profit_percent,
+                goal: draft.salary,
+                profit: draft.profit,
+                profitPercent: draft.profit_percent,
+            });
+            financeBranches.push({
+                branch_id: snapshot.branch_id,
+                branch_name: branchNames.get(String(snapshot.branch_id)) || String(snapshot.branch_id),
+                goal: roundFinanceAmount(draft.salary),
+                profit: roundFinanceAmount(draft.profit),
+                advances: roundFinanceAmount(draft.advances),
+                penalty: roundFinanceAmount(draft.penalty),
+                commission,
+                payout: roundFinanceAmount(commission - draft.advances - draft.penalty),
+            });
+        }
+    }
+
+    const branchBreakdown = [...rows.values()].map(row => ({ ...row, revenue: roundFinanceAmount(row.revenue) }));
+    const financeTotals = financeBranches.reduce((total, row) => ({
+        goal: total.goal + row.goal,
+        profit: total.profit + row.profit,
+        advances: total.advances + row.advances,
+        penalty: total.penalty + row.penalty,
+        commission: total.commission + row.commission,
+        payout: total.payout + row.payout,
+    }), { goal: 0, profit: 0, advances: 0, penalty: 0, commission: 0, payout: 0 });
+    return {
+        period: range.period,
+        totals: {
+            revenue: roundFinanceAmount(branchBreakdown.reduce((sum, row) => sum + row.revenue, 0)),
+            services: branchBreakdown.reduce((sum, row) => sum + row.services, 0),
+            shifts: branchBreakdown.reduce((sum, row) => sum + row.shifts, 0),
+            worked_days: branchBreakdown.reduce((sum, row) => sum + row.worked_days, 0),
+            worked_minutes: branchBreakdown.reduce((sum, row) => sum + row.worked_minutes, 0),
+        },
+        branches: branchBreakdown,
+        finance: { totals: financeTotals, branches: financeBranches },
+    };
+};
+
 const isStaleActiveEntry = (entry, cutoffIso) => {
     if (!entry?.created_at || !REASSIGNABLE_QUEUE_STATUSES.includes(entry.status)) return false;
 
@@ -933,12 +1153,45 @@ const isStaleActiveEntry = (entry, cutoffIso) => {
 };
 
 const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, excludeEntryId = null, requireOnShift = true }) => {
-    const { data: barbers, error: barbersError } = await db
+    const { data: assignedBarbers, error: barbersError } = await db
         .from('barbers')
         .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, is_archived')
         .eq('branch_id', branchId);
 
     if (barbersError) throw new Error(barbersError.message);
+
+    // `barbers.branch_id` is the permanent/home branch. A barber can be
+    // working in another branch for the current shift, so merge the same
+    // authoritative active-branch presence used by the kiosk endpoint.
+    const { data: activeAssignments, error: activeAssignmentsError } = await db
+        .from('employee_active_branches')
+        .select('employee_id, branch_id, is_on_shift, updated_at')
+        .eq('branch_id', branchId)
+        .eq('is_on_shift', true)
+        .gte('updated_at', new Date(Date.now() - 90 * 1000).toISOString());
+    if (activeAssignmentsError && !isMissingActiveEmployeeBranches(activeAssignmentsError)) {
+        throw new Error(activeAssignmentsError.message);
+    }
+
+    const hasActiveBranchTable = !activeAssignmentsError;
+    const activeByEmployeeId = new Map(
+        (activeAssignments || []).map((assignment) => [String(assignment.employee_id), assignment])
+    );
+    const activeEmployeeIds = Array.from(activeByEmployeeId.keys());
+    let activeBarbers = [];
+    if (activeEmployeeIds.length) {
+        const { data, error } = await db
+            .from('barbers')
+            .select('id, name, branch_id, photo_url, is_authorized, is_on_shift, is_active, is_archived')
+            .in('id', activeEmployeeIds);
+        if (error) throw new Error(error.message);
+        activeBarbers = data || [];
+    }
+
+    const barbers = [...(assignedBarbers || [])];
+    for (const barber of activeBarbers) {
+        if (!barbers.some((item) => String(item.id) === String(barber.id))) barbers.push(barber);
+    }
 
     const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
     let allowedBarberIds = new Set();
@@ -958,7 +1211,10 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
         .filter((barber) => allowedBarberIds.has(barber.id))
         .filter((barber) => !excludeBarberId || barber.id !== excludeBarberId)
         .filter((barber) => barber.is_active !== false && barber.is_archived !== true)
-        .filter((barber) => !requireOnShift || barber.is_on_shift === true);
+        .filter((barber) => !hasActiveBranchTable || activeByEmployeeId.has(String(barber.id)))
+        .filter((barber) => !requireOnShift || (hasActiveBranchTable
+            ? activeByEmployeeId.get(String(barber.id))?.is_on_shift === true
+            : barber.is_on_shift === true));
 
     const candidateIds = new Set(candidates.map((barber) => barber.id));
     const statsByBarber = new Map();
@@ -1025,9 +1281,11 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
                 id: barber.id,
                 name: barber.name,
                 photo: barber.photo_url || null,
-                branch_id: barber.branch_id,
+                branch_id: branchId,
                 is_active: barber.is_active ?? null,
-                is_on_shift: barber.is_on_shift ?? null,
+                is_on_shift: hasActiveBranchTable
+                    ? activeByEmployeeId.get(String(barber.id))?.is_on_shift === true
+                    : barber.is_on_shift ?? null,
                 current_clients: stats.current_clients,
                 estimated_waiting_time: stats.estimated_waiting_time,
             };
@@ -1087,7 +1345,6 @@ const emitCallEvent = (io, entry) => {
         entryId: entry.id,
         barberId: entry.barber_id,
         branchId: entry.branch_id,
-        clientId: entry.client?.id || entry.client_id || null,
         clientName: entry.client?.name || entry.client_name || null,
     };
     const room = io.to(`branch:${entry.branch_id}`);
@@ -1103,7 +1360,6 @@ const emitLifecycleEvent = (io, entry, { type, eventName }) => {
         entryId: entry.id,
         barberId: entry.barber_id,
         branchId: entry.branch_id,
-        clientId: entry.client?.id || entry.client_id || null,
         clientName: entry.client?.name || entry.client_name || null,
         status: entry.status,
     };
@@ -1268,6 +1524,8 @@ class Barbers {
 
             if (archiveError) return res.status(500).json({ error: archiveError.message });
 
+            const { activeBranchId } = await logoutEmployeePresence(id);
+
             if (breakTimers.has(id)) {
                 clearTimeout(breakTimers.get(id).timer);
                 breakTimers.delete(id);
@@ -1282,12 +1540,17 @@ class Barbers {
             });
 
             const io = req.app.get('io');
-            if (io && barber?.branch_id) {
-                io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+            io?.in(`employee:${id}`).disconnectSockets(true);
+            const branchIds = new Set([barber?.branch_id, activeBranchId].filter(Boolean).map(String));
+            for (const branchId of branchIds) {
+                io?.to(`branch:${branchId}`).emit('queue:update', {
                     type: 'barber_status',
                     barberId: id,
+                    branchId,
                     is_active: false,
                     is_on_shift: false,
+                    session_ended: true,
+                    reason: 'account_archived',
                 });
             }
 
@@ -1368,6 +1631,7 @@ class Barbers {
         }
 
         const barberId = payload.sub || payload.id;
+        const activeBranchId = payload.branchId || payload.branch_id;
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
@@ -1389,12 +1653,12 @@ class Barbers {
             breakTimers.delete(barberId);
             const io = req.app.get('io');
             try {
-                await endBreak(barberId, barber.branch_id, io);
+                await endBreak(barberId, activeBranchId || barber.branch_id, io);
                 await logVerifixEvent({
                     actorId: barberId,
                     actorRole: payload.role,
                     barberId,
-                    branchId: barber.branch_id,
+                    branchId: activeBranchId || barber.branch_id,
                     eventType: 'break_end',
                     io,
                     metadata: { ended_early: true },
@@ -1421,10 +1685,10 @@ class Barbers {
         const timer = setTimeout(async () => {
             breakTimers.delete(barberId);
             try {
-                await endBreak(barberId, barber.branch_id, io);
+                await endBreak(barberId, activeBranchId || barber.branch_id, io);
                 await logVerifixEvent({
                     barberId,
-                    branchId: barber.branch_id,
+                    branchId: activeBranchId || barber.branch_id,
                     eventType: 'break_end',
                     io,
                     metadata: { auto_return: true },
@@ -1438,7 +1702,7 @@ class Barbers {
         breakTimers.set(barberId, { timer, startedAt: new Date(), until: untilTs });
 
         if (io) {
-            io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+            io.to(`branch:${activeBranchId || barber.branch_id}`).emit('queue:update', {
                 type: 'barber_status',
                 barberId,
                 is_active: false,
@@ -1449,7 +1713,7 @@ class Barbers {
             actorId: barberId,
             actorRole: payload.role,
             barberId,
-            branchId: barber.branch_id,
+            branchId: activeBranchId || barber.branch_id,
             eventType: 'break_start',
             io,
             metadata: { minutes },
@@ -1478,6 +1742,7 @@ class Barbers {
         }
 
         const barberId = payload.sub || payload.id;
+        const activeBranchId = payload.branchId || payload.branch_id;
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
@@ -1508,7 +1773,7 @@ class Barbers {
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`branch:${barber.branch_id}`).emit('queue:update', {
+            io.to(`branch:${activeBranchId || barber.branch_id}`).emit('queue:update', {
                 type: 'barber_status',
                 barberId,
                 is_active: true,
@@ -1519,7 +1784,7 @@ class Barbers {
             actorId: barberId,
             actorRole: payload.role,
             barberId,
-            branchId: barber.branch_id,
+            branchId: activeBranchId || barber.branch_id,
             eventType: 'break_end',
             io,
             metadata: { manual_return: true },
@@ -1597,29 +1862,70 @@ class Barbers {
             });
         }
 
-        if (!branch_id) return res.status(400).json({ error: 'Branch ID is required' });
+        let branchSelection;
+        try {
+            branchSelection = await resolveEmployeeBranch({
+                employeeId: userData.id,
+                requestedBranchId: branch_id,
+                fallbackBranchId: userData.branch_id,
+            });
+        } catch (error) {
+            if (error.code === 'BRANCH_SELECTION_REQUIRED') {
+                return res.status(409).json({ code: error.code, error: error.message, branches: error.branches || [] });
+            }
+            if (error.code === 'BRANCH_ACCESS_DENIED') {
+                return res.status(403).json({ code: error.code, error: error.message });
+            }
+            return res.status(500).json({ error: 'Failed to resolve employee branch access' });
+        }
 
-        await db
-            .from('users')
-            .update({ branch_id })
-            .eq('id', userData.id);
-        await db
-            .from('barbers')
-            .update({ branch_id, is_on_shift: true })
-            .eq('id', userData.id);
+        const effectiveBranchId = branchSelection.branchId;
+        if (!effectiveBranchId) return res.status(403).json({ code: 'EMPLOYEE_BRANCH_NOT_ASSIGNED', error: 'Employee is not assigned to a branch' });
 
+        if (LOCATION_ROLES.has(userData.role)) {
+            const locationCheck = await verifyAndRecordLoginLocation({
+                barberId: userData.id,
+                branchId: effectiveBranchId,
+                location: req.body.location,
+            });
+            if (!locationCheck.ok) return res.status(locationCheck.statusCode).json({ code: locationCheck.code, error: 'Unable to verify workplace location' });
+            if (locationCheck.outsideRadius) {
+                const { createLocationWarningNotifications } = require('./notifications');
+                await createLocationWarningNotifications({ barberId: userData.id, branchId: effectiveBranchId, event: locationCheck.event });
+            }
+        }
+
+        const sessionId = randomUUID();
         const token = signUserToken({
-            branch_id,
+            branch_id: effectiveBranchId,
             id: userData.id,
             login: userData.login,
             role: userData.role,
+            sessionId,
         });
+        const tokenPayload = jwt.decode(token);
+        const sessionExpiresAt = tokenPayload?.exp
+            ? new Date(tokenPayload.exp * 1000).toISOString()
+            : null;
+        if (!sessionExpiresAt) return res.status(500).json({ error: 'Failed to create employee session' });
+
+        await setActiveEmployeeBranch({
+            employeeId: userData.id,
+            branchId: effectiveBranchId,
+            isOnShift: true,
+            sessionId,
+            sessionExpiresAt,
+        });
+        await db
+            .from('barbers')
+            .update({ is_on_shift: true })
+            .eq('id', userData.id);
 
         await logVerifixEvent({
             actorId: userData.id,
             actorRole: userData.role,
             barberId: userData.id,
-            branchId: branch_id,
+            branchId: effectiveBranchId,
             eventType: 'login',
             io: req.app.get('io'),
             metadata: { login: userData.login },
@@ -1631,7 +1937,9 @@ class Barbers {
                 id: userData.id,
                 login: userData.login,
                 role: userData.role,
-                branch_id,
+                branch_id: effectiveBranchId,
+                active_branch_id: effectiveBranchId,
+                branches: branchSelection.branches,
                 permissions: loginPermissions,
             },
         });
@@ -1852,6 +2160,10 @@ class Barbers {
                 return res.status(404).json({ error: 'Barber profile not found' });
             }
 
+            const activeBranch = await getActiveEmployeeBranch(user.id);
+            const availableBranches = await listEmployeeBranches(user.id, barberData.branch_id || user.branch_id);
+            const effectiveBranchId = activeBranch?.branch_id || barberData.branch_id || user.branch_id || null;
+
             const io = req.app.get('io');
             const breakInfo = breakTimers.get(user.id);
             // auto-finish break if timer elapsed (for safety)
@@ -1859,7 +2171,7 @@ class Barbers {
                 clearTimeout(breakInfo.timer);
                 breakTimers.delete(user.id);
                 try {
-                    await endBreak(user.id, barberData.branch_id, io);
+                    await endBreak(user.id, effectiveBranchId, io);
                     barberData.is_on_shift = true;
                 } catch (e) {
                     // ignore, return current state
@@ -1868,19 +2180,125 @@ class Barbers {
             const updatedBreak = breakTimers.get(user.id);
             const finance = await getBarberProfileFinance({
                 barberId: user.id,
-                branchId: barberData.branch_id || user.branch_id,
+                branchId: effectiveBranchId,
+                period: req.query?.period,
+            });
+            const statistics = await getBarberWorkStatistics({
+                barberId: user.id,
                 period: req.query?.period,
             });
 
             barber = {
                 ...barberData,
+                assigned_branch_id: barberData.branch_id || user.branch_id || null,
+                active_branch_id: effectiveBranchId,
+                branches: availableBranches,
+                branch_id: effectiveBranchId,
+                is_on_shift: activeBranch ? activeBranch.is_on_shift : barberData.is_on_shift,
                 break_started_at: updatedBreak?.startedAt ? updatedBreak.startedAt.toISOString() : null,
                 break_until: updatedBreak?.until ? updatedBreak.until.toISOString() : null,
                 finance,
+                statistics,
             };
         }
 
+        if (barber?.branches) user.branches = barber.branches;
         return res.json({ user: { ...user, permissions }, barber });
+    }
+
+    async switchBranch(req, res) {
+        const auth = await authenticateBarberWorkspace(req, res, 'Only workspace employees can switch branches');
+        if (!auth) return;
+        const payload = auth.payload;
+
+        const branchId = normalizeText(req.body?.branch_id);
+        if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
+
+        const employeeId = auth.barberId;
+        try {
+            const { data: barber, error } = await db
+                .from('barbers')
+                .select('id, name, login, branch_id, is_on_shift, is_authorized, is_active, is_archived, specialization, phone, photo_url')
+                .eq('id', employeeId)
+                .maybeSingle();
+            if (error) return res.status(500).json({ error: error.message });
+            if (!barber || isArchivedEmployee(barber)) return res.status(403).json({ error: 'Employee access has been revoked' });
+
+            const resolved = await resolveEmployeeBranch({
+                employeeId,
+                requestedBranchId: branchId,
+                fallbackBranchId: barber.branch_id,
+            });
+            const current = await getActiveEmployeeBranch(employeeId);
+            const currentBranchId = current?.branch_id || payload.branchId || barber.branch_id || null;
+            const wasOnShift = Boolean(current?.is_on_shift ?? barber.is_on_shift);
+            const io = req.app.get('io');
+
+            if (wasOnShift && currentBranchId && String(currentBranchId) !== String(resolved.branchId)) {
+                await recordActivityEvent({
+                    actorId: employeeId,
+                    actorRole: payload.role,
+                    barberId: employeeId,
+                    branchId: currentBranchId,
+                    eventType: 'shift_end',
+                    io,
+                    metadata: { branch_switch: true, next_branch_id: resolved.branchId },
+                    source: 'dashboard',
+                });
+            }
+
+            const nextSessionId = randomUUID();
+            const nextToken = signUserToken({
+                branch_id: resolved.branchId,
+                id: employeeId,
+                login: payload.login,
+                role: payload.role,
+                sessionId: nextSessionId,
+                expiresIn: Math.max(1, Number(payload.exp) - Math.floor(Date.now() / 1000)),
+            });
+            const nextTokenPayload = jwt.decode(nextToken);
+            const sessionExpiresAt = nextTokenPayload?.exp
+                ? new Date(nextTokenPayload.exp * 1000).toISOString()
+                : null;
+            if (!sessionExpiresAt) return res.status(500).json({ error: 'Failed to refresh employee session' });
+
+            await setActiveEmployeeBranch({
+                employeeId,
+                branchId: resolved.branchId,
+                isOnShift: wasOnShift,
+                sessionId: nextSessionId,
+                sessionExpiresAt,
+            });
+            const { data: updatedBarber, error: updateError } = await db
+                .from('barbers')
+                .update({ is_on_shift: wasOnShift })
+                .eq('id', employeeId)
+                .select('id, name, branch_id, is_on_shift, is_authorized, is_active, is_archived, specialization, phone, photo_url')
+                .maybeSingle();
+            if (updateError) return res.status(500).json({ error: updateError.message });
+
+            if (wasOnShift && currentBranchId && String(currentBranchId) !== String(resolved.branchId)) {
+                await recordActivityEvent({
+                    actorId: employeeId,
+                    actorRole: payload.role,
+                    barberId: employeeId,
+                    branchId: resolved.branchId,
+                    eventType: 'shift_start',
+                    io,
+                    metadata: { branch_switch: true, previous_branch_id: currentBranchId },
+                    source: 'dashboard',
+                });
+            }
+
+            return res.json({
+                token: nextToken,
+                user: { id: employeeId, login: payload.login || null, role: payload.role, branch_id: resolved.branchId, active_branch_id: resolved.branchId, branches: resolved.branches },
+                barber: { ...updatedBarber, assigned_branch_id: barber.branch_id, active_branch_id: resolved.branchId, branch_id: resolved.branchId },
+            });
+        } catch (error) {
+            if (error.code === 'BRANCH_ACCESS_DENIED') return res.status(403).json({ code: error.code, error: error.message });
+            return res.status(400).json({ error: error.message || 'Failed to switch branch' });
+        }
     }
 
     async myQueue(req, res) {
@@ -1944,7 +2362,7 @@ class Barbers {
                     service_id,
                     service_ids,
                     payment_method,
-                    branch_id,
+                    branch_id: effectiveBranchId,
                     client:clients ( id, name, phone )
                 `)
                 .eq('barber_id', barberId)
@@ -2260,7 +2678,7 @@ class Barbers {
 
     async queueReassignOptions(req, res) {
         const { id } = req.params || {};
-        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can view queue reassign options');
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can view queue reassign options');
 
         if (!auth) return;
         if (!id) {
@@ -2316,6 +2734,7 @@ class Barbers {
 
     async reassignQueue(req, res) {
         return queueTransfers.request(req, res);
+
     }
 
     async callNext(req, res) {
@@ -2495,25 +2914,6 @@ class Barbers {
 
         if (amountProvided && (!reason || !reason.trim())) {
             return res.status(400).json({ error: 'reason is required when editing the final price' });
-        }
-
-        if (amountProvided) {
-            // Preserve the existing global price floor for manual overrides.
-            const { data: cheapestService, error: serviceError } = await db
-                .from('services')
-                .select('base_price')
-                .order('base_price', { ascending: true })
-                .limit(1)
-                .maybeSingle();
-
-            if (serviceError) {
-                return res.status(500).json({ error: serviceError.message });
-            }
-
-            const minServicePrice = cheapestService ? Number(cheapestService.base_price) : null;
-            if (minServicePrice && Number.isFinite(minServicePrice) && numericAmount < minServicePrice) {
-                return res.status(400).json({ error: `amount cannot be lower than minimum service price ${minServicePrice}` });
-            }
         }
 
         const barberId = payload.sub || payload.id;
@@ -2870,27 +3270,44 @@ class Barbers {
 
     async logout(req, res) {
         try {
-            const { barber_id, is_on_shift = false } = req.body;
+            const auth = await authenticateBarberWorkspace(req, res, 'Only workspace employees can log out', { allowRevoked: true });
+            if (!auth) return;
+            if (!auth.sessionValid) return res.json({ barber: null, idempotent: true });
 
-            const { data: updated, error: updateError } = await db
-                .from('barbers')
-                .update({ is_on_shift })
-                .eq('id', barber_id)
-                .select('id, name, photo_url, branch_id, is_authorized, is_on_shift, specialization')
-                .maybeSingle();
-
-            if (updateError) {
-                return res.status(500).json({ error: updateError.message });
-            }
+            const barber_id = auth.barberId;
+            const is_on_shift = false;
+            const { barber: updated, activeBranchId } = await logoutEmployeePresence(barber_id);
 
             if (updated) {
+                const effectiveBranchId = activeBranchId || auth.payload?.branchId || updated.branch_id;
+                clearShiftTimer(barber_id);
+                const breakInfo = breakTimers.get(barber_id);
+                if (breakInfo) {
+                    clearTimeout(breakInfo.timer);
+                    breakTimers.delete(barber_id);
+                }
                 await logVerifixEvent({
                     barberId: updated.id,
-                    branchId: updated.branch_id,
+                    branchId: effectiveBranchId,
                     eventType: 'logout',
                     io: req.app.get('io'),
                     metadata: { is_on_shift },
                 });
+
+                const io = req.app.get('io');
+                io?.in(`employee:${updated.id}`).disconnectSockets(true);
+                const branchIds = new Set([updated.branch_id, effectiveBranchId].filter(Boolean).map(String));
+                for (const branchId of branchIds) {
+                    io?.to(`branch:${branchId}`).emit('queue:update', {
+                        type: 'barber_status',
+                        barberId: updated.id,
+                        branchId,
+                        is_on_shift: false,
+                        is_active: updated.is_active ?? true,
+                        session_ended: true,
+                        reason: 'logout',
+                    });
+                }
             }
 
             return res.json({ barber: updated });
@@ -2899,11 +3316,30 @@ class Barbers {
         }
     }
 
+    async presence(req, res) {
+        const auth = await authenticateBarberWorkspace(req, res, 'Only workspace employees can update presence');
+        if (!auth) return;
+
+        try {
+            const branchId = auth.payload?.branchId || auth.payload?.branch_id;
+            if (!branchId) return res.status(409).json({ error: 'Active branch is required' });
+            const activeBranch = await getActiveEmployeeBranch(auth.barberId);
+            if (activeBranch && String(activeBranch.branch_id) !== String(branchId)) {
+                return res.status(409).json({ error: 'Active branch does not match session' });
+            }
+            const touched = await touchActiveEmployeeBranch({ employeeId: auth.barberId, branchId });
+            if (!touched) return res.status(409).json({ error: 'Active shift is not registered' });
+            return res.json({ ok: true, presence: touched });
+        } catch (error) {
+            return res.status(500).json({ error: error.message || 'Failed to update presence' });
+        }
+    }
+
     async markNoShow(req, res) {
         const { id } = req.params || {};
         const { no_show = true } = req.body || {};
 
-        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can mark no-show');
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can mark no-show');
         if (!auth) return;
         if (!id) return res.status(400).json({ error: 'Queue entry id is required' });
 
@@ -2962,13 +3398,19 @@ class Barbers {
             });
         }
 
+        if (no_show) {
+            try { await registerConfirmedNoShow(updated.id); } catch (restrictionError) {
+                console.error('[marketplace-no-show] restriction update failed:', restrictionError.message);
+            }
+        }
+
         return res.json({ queue_entry: updated, idempotent: false });
     }
 
     async markNotInTime(req, res) {
         const { id } = req.params || {};
 
-        const auth = authenticateBarberWorkspace(req, res, 'Only barbers can mark not-in-time');
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can mark not-in-time');
         if (!auth) return;
         if (!id) return res.status(400).json({ error: 'Queue entry id is required' });
 

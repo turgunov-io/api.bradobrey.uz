@@ -175,6 +175,36 @@ async function loyalty(req, res) {
   return res.json({ status_points: points, level: current, next_level: next, blocked_until: client.blocked_until || null });
 }
 
+async function restrictionStatus(req, res) {
+  const clientId = authClient(req, res);
+  if (!clientId) return;
+  const client = await getClient(clientId);
+  if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
+  const active = client.blocked_until && new Date(client.blocked_until) > new Date();
+  let violationCount = 0;
+  try {
+    const violations = await pool.query(
+      `select count(*)::int as count
+         from marketplace_no_show_violations
+        where marketplace_client_id = $1
+          and created_at >= now() - ($2::int * interval '1 day')`,
+      [clientId, Number((await getPlatformSetting('no_show_restrictions', {})).lookback_days || 365)],
+    );
+    violationCount = Number(violations.rows[0]?.count || 0);
+  } catch (error) {
+    if (error?.code !== '42P01' && error?.code !== '42703') throw error;
+  }
+  const blockedUntil = active ? new Date(client.blocked_until) : null;
+  return res.json({
+    restricted: Boolean(active),
+    blocked_until: blockedUntil?.toISOString() || null,
+    remaining_seconds: blockedUntil ? Math.max(0, Math.ceil((blockedUntil.getTime() - Date.now()) / 1000)) : 0,
+    violation_count: violationCount,
+    can_create_bookings: !active,
+    reason: active ? 'NO_SHOW' : null,
+  });
+}
+
 async function referral(req, res) {
   const clientId = authClient(req, res);
   if (!clientId) return;
@@ -719,6 +749,7 @@ async function updateReview(req, res) {
 module.exports = {
   activeBooking,
   loyalty,
+  restrictionStatus,
   referral,
   createReview,
   updateReview,

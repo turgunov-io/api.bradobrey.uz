@@ -3,6 +3,8 @@ const { toAbsolutePublicUrl } = require("../config/uploads");
 const jwt = require("jsonwebtoken");
 const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
+const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
+const { issueKioskSocketTicket } = require('../kioskSocketTicket');
 
 const {
     applyPromoDiscount,
@@ -20,6 +22,12 @@ const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
 const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
+
+const isMissingActivePresenceTable = (error) => {
+    if (error?.code === '42P01') return true;
+    const message = String(error?.message || '').toLowerCase();
+    return /could not find (?:the )?table .*employee_active_branches.*schema cache/.test(message);
+};
 
 const normalizeText = (value) => {
     if (value === undefined || value === null) return null;
@@ -179,13 +187,17 @@ const groupServicesByCategory = (services = []) => {
 const cleanupStaleQueuesForBranch = async (branchId) => {
     if (!branchId) return null;
     const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
-    return db
+    const result = await db
         .from('queue_entries')
         .update({ status: 'no_show', finished_at: new Date().toISOString() })
         .eq('branch_id', branchId)
         .lte('created_at', cutoffIso)
         .in('status', ['waiting', 'called', 'swapped'])
         .select('id');
+    if (!result.error && Array.isArray(result.data)) {
+        await registerConfirmedNoShows(result.data.map((row) => row.id));
+    }
+    return result;
 };
 
 const serviceItem = (req, service) => {
@@ -304,6 +316,32 @@ class Kiosk {
         return res.status(201).json({ branch_id: inserted.branch_id });
     }
 
+    async socketTicket(req, res) {
+        const { branch_id, device_name } = req.body || {};
+        if (!branch_id || !device_name) return res.status(400).json({ error: "branch_id and device_name are required" });
+
+        const { data: kiosk, error } = await db
+            .from('kiosks')
+            .select('id, branch_id, device_name')
+            .eq('branch_id', branch_id)
+            .eq('device_name', String(device_name).trim())
+            .maybeSingle();
+        if (error) return res.status(500).json({ error: error.message });
+        if (!kiosk) return res.status(403).json({ error: 'Kiosk is not registered for this branch' });
+
+        try {
+            const ticket = issueKioskSocketTicket({
+                kioskId: kiosk.id,
+                branchId: kiosk.branch_id,
+                deviceName: kiosk.device_name,
+            });
+            return res.status(200).json({ ticket, expires_in: 15 * 60 });
+        } catch (ticketError) {
+            if (ticketError.code === 'KIOSK_SOCKET_SECRET_MISSING') return res.status(503).json({ error: 'Kiosk socket is not configured' });
+            return res.status(500).json({ error: 'Failed to issue kiosk socket ticket' });
+        }
+    }
+
     async barbers(req, res) {
         const { branch_id } = req.params || {};
 
@@ -328,7 +366,42 @@ class Kiosk {
             return res.status(500).json({ error: barbersError.message });
         }
 
-        const barberIds = (barbers || []).map((barber) => barber.id).filter(Boolean);
+        const { data: activeBarbers, error: activeBarbersError } = await db
+            .from('employee_active_branches')
+            .select('employee_id, branch_id, is_on_shift, session_id, session_expires_at')
+            .eq('branch_id', branch_id)
+            .gt('session_expires_at', new Date().toISOString());
+        if (activeBarbersError && isMissingActivePresenceTable(activeBarbersError)) {
+            return res.status(503).json({ code: 'EMPLOYEE_SESSION_SCHEMA_UNAVAILABLE', error: 'Employee session storage is not configured' });
+        }
+        if (activeBarbersError) {
+            return res.status(500).json({ error: activeBarbersError.message });
+        }
+        const { data: deniedBranchAccess, error: deniedBranchAccessError } = await db
+            .from('employee_branch_access')
+            .select('employee_id')
+            .eq('branch_id', branch_id)
+            .eq('is_active', false);
+        if (deniedBranchAccessError) {
+            return res.status(503).json({ code: 'EMPLOYEE_SESSION_SCHEMA_UNAVAILABLE', error: 'Employee branch access is not available' });
+        }
+        const deniedEmployeeIds = new Set((deniedBranchAccess || []).map((row) => String(row.employee_id)));
+        const activeById = new Map((activeBarbers || [])
+            .filter((row) => row.session_id && row.session_expires_at && !deniedEmployeeIds.has(String(row.employee_id)))
+            .map((row) => [String(row.employee_id), row]));
+
+        const { data: assignedBarbers, error: assignedBarbersError } = await db
+            .from('barbers')
+            .select('id, name, branch_id, photo_url, is_on_shift, is_active, is_archived')
+            .in('id', Array.from(activeById.keys()));
+        if (assignedBarbersError) return res.status(500).json({ error: assignedBarbersError.message });
+
+        const mergedBarbers = [...(barbers || [])];
+        for (const barber of assignedBarbers || []) {
+            if (!mergedBarbers.some((item) => String(item.id) === String(barber.id))) mergedBarbers.push(barber);
+        }
+
+        const barberIds = mergedBarbers.map((barber) => barber.id).filter(Boolean);
         let allowedBarberIds = new Set(barberIds);
 
         if (barberIds.length) {
@@ -345,9 +418,20 @@ class Kiosk {
             allowedBarberIds = new Set((users || []).map((user) => user.id));
         }
 
-        const visibleBarbers = (barbers || []).filter((barber) => (
-            allowedBarberIds.has(barber.id) && barber.is_archived !== true
-        ));
+        const visibleBarbers = mergedBarbers.filter((barber) => {
+            const hasValidSession = activeById.has(String(barber.id));
+            return (
+            allowedBarberIds.has(barber.id) && barber.is_archived !== true &&
+            hasValidSession === true &&
+            (String(barber.branch_id) === String(branch_id) || activeById.has(String(barber.id)))
+            );
+        }).map((barber) => ({
+            ...barber,
+            branch_id: branch_id,
+            // A valid authenticated session keeps the kiosk card present even
+            // when the user is temporarily off-shift or misses heartbeats.
+            is_on_shift: activeById.has(String(barber.id)),
+        }));
 
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
@@ -537,12 +621,15 @@ class Kiosk {
         } = req.body || {};
         const effectivePaymentMethod = payment_method || (certificate_code ? 'certificate' : null);
 
-        if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids)) || !customer_name || !phone_number) {
-            return res.status(400).json({ error: "branch_id, barber_id, service_id/service_ids, customer_name, and phone_number are required" });
+        if (!branch_id || !barber_id || (!service_id && !Array.isArray(service_ids))) {
+            return res.status(400).json({ error: "branch_id, barber_id, and service_id/service_ids are required" });
         }
 
-        const normalizedPhone = normalizePhone(phone_number);
-        if (!normalizedPhone || !isValidE164(normalizedPhone)) {
+        const allowedSources = ['point', 'site', 'admin'];
+        const normalizedSource = allowedSources.includes(source) ? source : 'point';
+        let normalizedPhone = normalizePhone(phone_number);
+        let effectiveCustomerName = normalizeText(customer_name);
+        if (normalizedSource !== 'site' && (!effectiveCustomerName || !normalizedPhone || !isValidE164(normalizedPhone))) {
             return res.status(400).json({ error: "phone_number must be in E.164 format, e.g. +998991234567" });
         }
 
@@ -551,9 +638,6 @@ class Kiosk {
             : service_id
                 ? [service_id]
                 : [];
-
-        const allowedSources = ['point', 'site', 'admin'];
-        const normalizedSource = allowedSources.includes(source) ? source : 'point';
 
         const useCashback =
             use_cashback === true ||
@@ -593,17 +677,29 @@ class Kiosk {
                 .from('marketplace_clients')
                 // Keep booking creation compatible with databases that have
                 // not applied the optional marketplace compliance columns yet.
-                .select('id, phone, is_active')
+                .select('id, phone, display_name, first_name, last_name, is_active, blocked_until')
                 .eq('id', actorId)
                 .maybeSingle();
             if (mpError) return res.status(500).json({ error: mpError.message });
             if (!mpClient) return res.status(404).json({ error: 'Marketplace client not found' });
             if (mpClient.is_active === false) return res.status(403).json({ error: 'Account is disabled' });
             if (mpClient.blocked_until && new Date(mpClient.blocked_until) > new Date()) {
-                return res.status(403).json({ error: 'ACCOUNT_BLOCKED' });
+                return res.status(403).json({
+                    code: 'BOOKING_RESTRICTED',
+                    error: 'BOOKING_RESTRICTED',
+                    blocked_until: new Date(mpClient.blocked_until).toISOString(),
+                    reason: 'NO_SHOW',
+                    message: 'New bookings are temporarily unavailable because of a confirmed no-show.',
+                });
             }
-            if (!mpClient.phone || String(mpClient.phone) !== String(normalizedPhone)) {
-                return res.status(403).json({ error: 'Phone mismatch for marketplace booking' });
+            normalizedPhone = normalizePhone(mpClient.phone);
+            effectiveCustomerName = normalizeText(mpClient.display_name)
+                || [mpClient.last_name, mpClient.first_name].filter(Boolean).join(' ').trim();
+            if (!normalizedPhone || !isValidE164(normalizedPhone)) {
+                return res.status(428).json({ code: 'PHONE_REQUIRED', error: 'PHONE_REQUIRED' });
+            }
+            if (!effectiveCustomerName) {
+                return res.status(428).json({ code: 'PROFILE_NAME_REQUIRED', error: 'PROFILE_NAME_REQUIRED' });
             }
             marketplaceClient = mpClient;
         }
@@ -698,8 +794,14 @@ class Kiosk {
             .maybeSingle();
         if (barberError) return res.status(500).json({ error: barberError.message });
         if (!barber) return res.status(404).json({ error: 'Barber not found' });
-        if (barber.branch_id !== branch_id) {
-            return res.status(400).json({ error: 'Barber does not belong to this branch' });
+        let activeAssignment = null;
+        if (String(barber.branch_id) !== String(branch_id)) {
+            const { data, error } = await db.from('employee_active_branches').select('employee_id, branch_id, is_on_shift').eq('employee_id', barber_id).maybeSingle();
+            if (error && !String(error.message || '').includes('employee_active_branches')) return res.status(500).json({ error: error.message });
+            activeAssignment = data;
+            if (!activeAssignment || String(activeAssignment.branch_id) !== String(branch_id) || activeAssignment.is_on_shift !== true) {
+                return res.status(400).json({ error: 'Barber is not active in this branch' });
+            }
         }
         if (barber.is_archived === true) {
             return res.status(400).json({ error: 'Selected employee is archived' });
@@ -826,12 +928,12 @@ class Kiosk {
         if (existingClient) {
             clientId = existingClient.id;
             if (!existingClient.name) {
-                await db.from('clients').update({ name: customer_name }).eq('id', clientId);
+                await db.from('clients').update({ name: effectiveCustomerName }).eq('id', clientId);
             }
         } else {
             const { data: newClient, error: clientCreateError } = await db
                 .from('clients')
-                .insert({ name: customer_name, phone: normalizedPhone })
+                .insert({ name: effectiveCustomerName, phone: normalizedPhone })
                 .select('id')
                 .maybeSingle();
             if (clientCreateError) return res.status(500).json({ error: clientCreateError.message });
@@ -1175,7 +1277,7 @@ class Kiosk {
                 .insert({
                     booking_id: createdBooking.id,
                     person_index: 1,
-                    display_name: customer_name,
+                    display_name: effectiveCustomerName,
                     barber_id,
                     queue_entry_id: entry.id,
                 })
@@ -1297,7 +1399,7 @@ class Kiosk {
                 .insert({
                     promo_code_id: promo.id,
                     user_id: null,
-                    user_name: customer_name,
+                    user_name: effectiveCustomerName,
                     phone: normalizedPhone,
                     order_id: entry.id,
                 })

@@ -14,6 +14,7 @@ router.post('/notifications/:id/read', (req, res, next) => compliance.markNotifi
 router.post('/push-tokens', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-push-token' }), (req, res, next) => compliance.registerPushToken(req, res).catch(next));
 router.post('/:id/cancel', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-cancel' }), (req, res, next) => compliance.cancelBooking(req, res).catch(next));
 router.get('/loyalty', (req, res, next) => compliance.loyalty(req, res).catch(next));
+router.get('/restriction', (req, res, next) => compliance.restrictionStatus(req, res).catch(next));
 router.get('/referral', (req, res, next) => compliance.referral(req, res).catch(next));
 router.post('/reviews', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-review' }), (req, res, next) => compliance.createReview(req, res).catch(next));
 router.patch('/reviews/:id', rateLimit({ windowMs: 60 * 60 * 1000, max: 10, keyPrefix: 'marketplace-review-edit' }), (req, res, next) => compliance.updateReview(req, res).catch(next));

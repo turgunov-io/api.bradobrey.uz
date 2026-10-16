@@ -35,6 +35,7 @@ FILES=(
   user_permissions.sql
   branches.sql
   barbers.sql
+  employee_branches.sql
   clients.sql
   client_ranks.sql
   service_categories.sql

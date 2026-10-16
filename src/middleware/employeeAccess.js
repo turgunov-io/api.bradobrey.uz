@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 
 const { db } = require('../config/postgres');
+const { validatePersistedEmployeeSession } = require('../utils/employeeSession');
 
 const EMPLOYEE_ACCESS_ROLES = new Set([
   'admin_network',
@@ -85,7 +86,39 @@ async function enforceEmployeeAccess(req, res, next) {
       return;
     }
 
-    req.employeeAccess = { barber, payload, user };
+    if (['barber', 'super-barber', 'manager', 'super-manager'].includes(role)) {
+      let session;
+      try {
+        session = await validatePersistedEmployeeSession({
+          employeeId: userId,
+          branchId: payload?.branchId,
+          sessionId: payload?.jti,
+          role,
+        });
+      } catch (_error) {
+        res.status(503).json({ code: 'SESSION_VALIDATION_UNAVAILABLE', error: 'Session validation is temporarily unavailable' });
+        return;
+      }
+
+      if (!session.valid) {
+        const blocked = ['account_blocked', 'branch_access_revoked'].includes(session.reason);
+        const isLogoutReplay = req.method === 'POST'
+          && String(req.originalUrl || req.path || '').split('?')[0].endsWith('/api/barbers/logout')
+          && session.reason === 'revoked';
+        if (isLogoutReplay) {
+          req.employeeAccess = { barber, payload, user, sessionValid: false };
+          next();
+          return;
+        }
+        const code = session.reason === 'expired'
+          ? 'SESSION_EXPIRED'
+          : blocked ? 'ACCOUNT_BLOCKED' : 'SESSION_REVOKED';
+        res.status(blocked ? 403 : 401).json({ code, error: 'Employee session is no longer valid' });
+        return;
+      }
+    }
+
+    req.employeeAccess = { barber, payload, user, sessionValid: true };
     next();
   } catch (error) {
     res.status(500).json({ error: error.message || 'Failed to validate employee access' });

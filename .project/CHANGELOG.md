@@ -1,5 +1,6 @@
 # Changelog
 
+<<<<<<< HEAD
 ## 2026-10-15
 
 - Audited barber reassignment end-to-end with the Flutter client. The client was
@@ -15,6 +16,120 @@
   `transfer_pending` plus accept/reject contract.
 - Deployment remains a release gate: production commit, PM2 restart, and
   `queue_transfer_history.sql` application were not verified from this checkout.
+=======
+## 2026-10-15 — Аудит истории заказов Barber
+
+- Завершён документируемый сквозной аудит `PostgreSQL queue_entries → GET
+  /api/history/barber → Flutter Barber history → local cache`.
+- Подтверждена P0-причина исчезновения заказов: mobile repository оставляет
+  только записи текущего года и месяца. Для production-учётной записи `test1`
+  read-only aggregate показал 57 записей в БД, из которых 16 в текущем месяце
+  и 41 старше; backend barber-history endpoint не содержит такого фильтра.
+- Зафиксированы сопутствующие P1-риски: cache overwrite урезанным списком,
+  нестабильная offset-пагинация, смешение дат `created_at`/`finished_at`,
+  silent drop malformed payload/invalid dates, несовпадение `payments[]` и
+  `last_payment`, а также требующий security-теста branch/self scope.
+- Полный отчёт: `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.
+- В рамках аудита код, production database и production runtime не изменялись.
+- При live anonymous smoke дополнительно зафиксирован P1 security finding:
+  `GET /api/barbers` возвращает employee-directory metadata без Bearer token;
+  это не outage, но требует отдельного scope/DTO исправления.
+
+## 2026-10-15 (manual final price)
+
+- Removed the global catalog-price floor from
+  `PATCH /api/barbers/queue/:id/edit-before-complete`. Manual final amounts
+  may now be any positive number, including `1`, when a reason is supplied.
+  Ownership, status, numeric validation, and required reason checks remain.
+- Added a regression test covering amount `1` against a service priced at
+  `40000`. Queue/status and transfer contract tests pass 23/23.
+- Pushed as commit `dc6a968`. Production received only `src/models/barbers.js`
+  and only `BRADOBREY-BARBER` was restarted; dashboard was not restarted.
+
+## 2026-10-15 (transfer eligibility follow-up)
+
+- Fixed the remaining reassignment contract mismatch: `PATCH
+  /api/barbers/queue/:id/reassign` now validates the selected barber against
+  the same fresh `employee_active_branches` presence used by reassignment
+  options and kiosk activity (`is_on_shift=true`, heartbeat <= 90 seconds).
+  Temporary active-branch assignments are accepted without requiring the
+  permanent `barbers.branch_id` to match.
+- Added a regression contract test for branch presence, freshness, role,
+  and on-shift validation. Backend queue/transfer tests pass 22/22.
+- Pushed as commit `f3ec201`. Production received only
+  `src/models/queueTransfers.js`; the API process `BRADOBREY-BARBER` was
+  restarted and verified online. The dashboard process was not restarted.
+
+## 2026-10-15 (continued)
+
+- Aligned the production API reassignment path with the Flutter client: the
+  queue-scoped options endpoint is side-effect free, PATCH uses the durable
+  `202`/`transfer_pending` workflow, stale entries are rejected, and selected
+  recipients must have an allowed workspace role in the same active branch.
+- Production API overlay and PM2 restart were verified on `95.46.96.213` for
+  `BRADOBREY-BARBER` only; dashboard was not restarted. The transfer schema was
+  already present in PostgreSQL. The source commit was prepared from current
+  `origin/main` to preserve concurrent backend work.
+
+## 2026-10-15
+
+- Исправлена смена барбера: direct reassignment теперь всегда ownership-scoped,
+  а кандидаты учитывают активный временный филиал и свежий presence.
+- Добавлены regression contract tests и полный audit trail в
+  `audit-reports/barber-switch/20261015-000234/`.
+- Runtime PostgreSQL/Flutter/production проверки остаются отдельными release
+  gates и не объявляются выполненными без подтверждения.
+- Commit `0d8e154` pushed to `origin/main`. Production overlay/restart и
+  authenticated smoke заблокированы: SSH к `95.46.96.213` отклонён для
+  `root`, `ubuntu` и `admin`; public `/health` 200 подтверждает только liveness.
+
+## 2026-10-14
+
+- Fixed `PATCH /api/barbers/queue/:id/reassign`: an unreachable-code regression
+  was causing the documented direct barber reassignment flow to delegate to the
+  pending-transfer workflow and return `transfer_pending` instead of moving the
+  queue entry. Restored the direct reassignment path and added a regression
+  contract test. Full local backend suite: 105/105.
+- Added `employee_branches.sql` to the dependency-ordered schema runner so
+  active-branch switching is reproducible on new/staging databases.
+- Both fixes were pushed to `origin/main` (`9951d89`, `bdc31d7`). Production
+  deployment was not performed in this run: SSH access for the documented
+  server was rejected for both tested deployment users. Public `/health`
+  returned 200, but no new-code or authenticated smoke verification was
+  claimed.
+- After owner-provided SSH access, deployed only `src/models/barbers.js` to
+  `/var/www/api.bradobrey.uz`, preserving the active production worktree and
+  all other modules. Backup: `/var/backups/api.bradobrey.uz-barbers-pre-reassign-20261014.js`.
+  Restarted only `BRADOBREY-BARBER`; API health returned 200 and dashboard was
+  left untouched.
+
+## 2026-10-14
+
+- Follow-up kiosk presence fix: made backend logout atomic across legacy and active-branch rows; narrowed fallback to a genuinely missing presence table. Kiosk now removes a barber immediately on the logout status event and never renders a stale cached barber list after refresh failure. Barber App preserves its session and surfaces an error if server logout is not confirmed. Regression tests added.
+- Pushed API `f95a8ac`, Kiosk `5ce8cca`, and Barber App `463a481`. Deployed only the four presence-related API source files to production after creating `/var/backups/api.bradobrey.uz-presence-followup-20261014.tar.gz`; restarted only `BRADOBREY-BARBER`. API health returned 200; API and dashboard PM2 processes remained online. Mobile client changes still need the signed app release/install path.
+- Fixed Barber/Kiosk presence consistency: JWT-scoped logout now clears both
+  legacy and active-branch shift state, emits branch-scoped status events, and
+  kiosk visibility requires fresh on-shift presence. Added the authenticated
+  `/api/barbers/presence` heartbeat endpoint and regression coverage.
+- Deployed the current API `main` code to production and restarted only `BRADOBREY-BARBER`; dashboard remained online and untouched.
+- Verified existing production branch/geolocation schema, PM2 API status, and public `/health` HTTP 200. Created a server-side rollback archive.
+
+## 2026-10-12
+
+- Allowed barber/super-barber login for branches without an enabled `branch_locations` policy; geolocation enforcement remains active for configured branches.
+- Corrected cross-branch employee selection: active branches are available by default, while explicit inactive access rows and inactive branches remain denied. Permanent `users.branch_id`/`barbers.branch_id` is not overwritten.
+- Added an isolated cross-branch E2E contract test covering login, active branch, kiosk visibility, shift/booking branch IDs, switching back, and denial cases.
+- Fixed the admin employee directory to include employees by current active branch and return `active_branch_id` separately from the permanent branch.
+
+## 2026-10-11
+
+- Fixed no-show restrictions for automatic queue closures and stale queue
+  cleanup by registering every newly confirmed no-show.
+- Added the missing production `marketplace_no_show_violations` table and
+  client/date index without modifying existing records.
+- Kept the change scoped to marketplace no-show processing; only the backend
+  marketplace process was restarted.
+>>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
 
 ## 2026-10-07
 
@@ -92,3 +207,19 @@
 - Зафиксированы P0/P1 findings, release acceptance suite и remediation backlog.
 - OTP `0000` зарегистрирован как временно принятое исключение только до подключения SMS; для production оставлен обязательным release gate.
 - БД и deployment не изменялись.
+
+## 2026-10-11
+
+- Ужесточена валидация marketplace no-show settings: allowlist полей и числовые типы минут/дней.
+- Добавлены regression-тесты лишних полей и строковых длительностей.
+- Добавлена обратная совместимость со старыми Dashboard bundles: server-owned `updated_at` отбрасывается только для no-show PATCH до allowlist validation.
+
+- Employee Quality v1: исправлен порядок tie-break по количеству подтверждённых ошибок, добавлен стабильный код ошибки агрегата и безопасное серверное диагностическое логирование. Additive production schema migration/backfill применены идемпотентно 2026-10-11; API перезапущен и проверен.
+- Исправлен production 500 в `loadDataQuality`: запрос больше не передаёт лишний bind-параметр PostgreSQL; добавлен regression guard и выполнен API-only restart.
+# 2026-10-11 — barber login geolocation control
+
+- Added server-side login geolocation verification, branch policy endpoints, audit events, and outside-radius notifications. Migration is prepared but unapplied; production deployment was not performed.
+
+# 2026-10-12
+
+- Fixed employee cross-branch work context: added access and active-branch persistence, branch selection during login, server-side branch authorization, and active-branch-aware kiosk/marketplace booking and Verifix flows.

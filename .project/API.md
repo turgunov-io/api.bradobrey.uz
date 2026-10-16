@@ -25,6 +25,25 @@ Each active, assigned queue item includes ordered `transfer_history`. Every even
 
 Queue-derived fields use only `waiting`, `called`, `swapped`, and `in_progress`.
 
+The response contains only non-archived employees with a persisted
+`employee_active_branches` session whose `session_expires_at` is in the
+future. Active/inactive and queue availability are displayed as card state;
+they do not control authenticated card visibility. Heartbeat age and Socket.IO connectivity do not affect card
+visibility. The session survives API restarts and network interruptions, and
+is ended by explicit logout, expiry, or administrative/account revocation.
+Kiosk clients refetch this endpoint on `queue:update` and after every socket
+connect/reconnect.
+
+`queue:update` with `type=barber_status` includes `session_ended=true` and a
+`reason` only after confirmed logout or administrative archive. Expiry cleanup
+uses `session_expired=true`. Kiosk may remove that barber immediately from its
+branch-local cache; an ordinary `is_on_shift=false` event is not a session end.
+
+Logout clears both legacy and active-branch shift records in a single
+PostgreSQL transaction. The kiosk may use legacy-only fallback only when the
+active-presence table is confirmed missing; column, permission, and schema
+errors fail closed instead of serving potentially stale legacy shift state.
+
 - `is_available` is the authoritative booking flag. It is `true` only when the employee is active, on shift, and has no active queue entries.
 - `availability_status` is `available`, `busy`, `off_shift`, or `inactive`.
 - `active_queue_count`, `has_in_progress`, and `current_service_overdue` describe the current workload.
@@ -32,6 +51,17 @@ Queue-derived fields use only `waiting`, `called`, `swapped`, and `in_progress`.
 - Each client item exposes `estimated_time`, `estimated_remaining_time`, and `is_overdue`.
 
 Queue lifecycle and service edits emit `queue:update` to `branch:<branch_id>` so Kiosk must refetch this endpoint on that event.
+
+### `POST /api/barbers/presence`
+
+Requires the current barber/manager JWT. The active branch is taken from the
+JWT; request body branch or employee identifiers are not trusted. The endpoint
+refreshes diagnostic `employee_active_branches.updated_at`. A heartbeat does
+not create, extend, or expire the login session and does not control kiosk
+visibility. Login stores a random signed-session `jti` and the JWT expiry in
+the active-branch row. Protected barber workspace routes validate the same
+branch, session ID, account state, and expiry against PostgreSQL. Apply the
+additive `db/postgres/employee_branches.sql` schema before deploying this API.
 
 ### `GET /api/barbers/queue/:id/barber-history`
 
@@ -126,3 +156,12 @@ of `send-code` for compatibility. Legacy `/phone/*` routes remain disabled.
 The legacy `POST /api/marketplace/auth/phone/request-otp` and
 `POST /api/marketplace/auth/phone/verify` endpoints return HTTP 410 with
 `TELEGRAM_AUTH_REQUIRED`; they do not create or verify fallback OTPs.
+# Employee branch context
+
+`POST /api/barbers/login` accepts optional `branch_id` for workspace employees. When credentials are valid but more than one active branch is available and `branch_id` is absent, the response is `409` with `code: BRANCH_SELECTION_REQUIRED` and a PII-free `branches` array. Active branches are selectable by default; an explicit inactive `employee_branch_access` row is a server-side deny. A closed/inactive branch or denied branch returns `403 BRANCH_ACCESS_DENIED`.
+
+The selected branch is persisted in `employee_active_branches` and is reflected in JWT `branchId`, `/api/barbers/me` as `active_branch_id`, Verifix events, kiosk employee visibility, and queue bookings. `users.branch_id`/`barbers.branch_id` remain the permanent assignment. Apply `db/postgres/employee_branches.sql` before enabling multi-branch assignments; the migration is additive and does not rewrite permanent assignments.
+
+`POST /api/barbers/me/branch` switches an authorized workspace employee's active branch. If the employee is on shift, the API records a `shift_end` in the previous branch and a `shift_start` in the new branch; historical queue entries and payments remain attached to their original `queue_entries.branch_id`.
+
+`GET /api/barbers?mode=employees&branch_id=...` filters by both the permanent assignment and the persisted `active_branch_id`, so an employee temporarily working in another branch appears in that branch's administrative directory without changing the permanent assignment.

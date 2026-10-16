@@ -8,6 +8,35 @@ const STALE_QUEUE_HOURS = 9;
 const timeoutMinutes = Math.max(1, Number(process.env.QUEUE_TRANSFER_TIMEOUT_MINUTES || 10));
 let expiryTimer = null;
 
+async function targetBarberIsEligible(client, targetId, branchId) {
+  const relation = await client.query("select to_regclass('public.employee_active_branches') as relation");
+  const hasActiveBranchPresence = Boolean(relation.rows[0]?.relation);
+
+  if (hasActiveBranchPresence) {
+    const result = await client.query(`select b.id
+      from barbers b
+      join users u on u.id = b.id
+      join employee_active_branches eab on eab.employee_id = b.id
+      where b.id=$1 and eab.branch_id=$2
+        and eab.is_on_shift is true
+        and eab.updated_at >= now() - interval '90 seconds'
+        and u.role in ('barber', 'super-barber', 'manager', 'super-manager')
+        and b.is_active is true and b.is_archived is false`, [targetId, branchId]);
+    return Boolean(result.rows[0]);
+  }
+
+  // Backward-compatible fallback for installations that have not applied the
+  // additive presence migration yet. Once the table exists, the authoritative
+  // active-branch presence check above is mandatory.
+  const result = await client.query(`select b.id
+    from barbers b
+    join users u on u.id = b.id
+    where b.id=$1 and b.branch_id=$2
+      and b.is_active is true and b.is_archived is false and b.is_on_shift is true
+      and u.role in ('barber', 'super-barber', 'manager', 'super-manager')`, [targetId, branchId]);
+  return Boolean(result.rows[0]);
+}
+
 function identity(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
@@ -81,11 +110,23 @@ async function request(req, res) {
         await client.query('commit'); return res.json({ transfer: prior.rows[0], idempotent: true });
       }
     }
+<<<<<<< HEAD
     const result = await client.query(`select id, client_id, barber_id, branch_id, status, created_at
       from queue_entries where id=$1 for update`, [orderId]);
+=======
+    const result = await client.query(`select id, client_id, barber_id, branch_id, status, created_at from queue_entries where id=$1 for update`, [orderId]);
+>>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
     const entry = result.rows[0];
     if (!entry || (actor.branchId && String(entry.branch_id) !== actor.branchId)) { await client.query('rollback'); return res.status(404).json({ error: 'Queue entry not found' }); }
     if (String(entry.barber_id) !== actor.id) { await client.query('rollback'); return res.status(403).json({ error: 'Only the assigned barber can transfer this order' }); }
+    if (REASSIGNABLE_QUEUE_STATUSES.has(entry.status)) {
+      const createdAt = new Date(entry.created_at).getTime();
+      const cutoffAt = Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000;
+      if (!Number.isFinite(createdAt) || createdAt < cutoffAt) {
+        await client.query('rollback');
+        return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
+      }
+    }
     if (entry.status === 'transfer_pending') {
       const pendingTransfer = await client.query(`select * from queue_transfer_events where queue_entry_id=$1
         and from_barber_id=$2 and to_barber_id=$3 and status='pending' order by requested_at desc limit 1`, [orderId, actor.id, targetId]);
@@ -107,6 +148,7 @@ async function request(req, res) {
       return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
     }
     if (!canInitiateTransfer(entry, actor.id, targetId)) { await client.query('rollback'); return res.status(409).json({ error: 'Queue entry cannot be transferred in its current state' }); }
+<<<<<<< HEAD
     const candidate = await client.query(`select b.id
       from barbers b
       join users u on u.id = b.id
@@ -118,6 +160,10 @@ async function request(req, res) {
       Array.from(BARBER_ROLES),
     ]);
     if (!candidate.rows[0]) { await client.query('rollback'); return res.status(400).json({ error: 'Selected barber is not available in this branch' }); }
+=======
+    const candidateIsEligible = await targetBarberIsEligible(client, targetId, entry.branch_id);
+    if (!candidateIsEligible) { await client.query('rollback'); return res.status(400).json({ error: 'Selected barber is not available in this branch' }); }
+>>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
     const transfer = await client.query(`insert into queue_transfer_events
       (queue_entry_id, from_barber_id, to_barber_id, client_id, status, original_status, requested_by, expires_at, idempotency_key)
       values ($1,$2,$3,$4,'pending',$5,$2,now()+($6::text||' minutes')::interval,$7) returning *`,

@@ -1,5 +1,45 @@
 # Project memory
 
+## Barber order-history audit (2026-10-15)
+
+- Full documented audit: `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.
+- Confirmed data-loss path: production `queue_entries` had 57 orders for test account `test1`; 16 were created in October 2026 and 41 before October. Backend `GET /api/history/barber` returns the barber-scoped history without a current-month filter, but Flutter `BarberRepositoryImpl._filterHistoryItemsWithValidDates` keeps only `date.year == now.year && date.month == now.month`.
+- The same mobile filter is applied to network results, cache fallback, and before rewriting the local cache. Thus refresh permanently replaces the local history snapshot with the current-month subset.
+- The audit was read-only against production. No token, password, or production secret is stored here.
+- Remediation must first remove the implicit month filter and preserve the complete cache snapshot, then add cross-month/mobile contract tests, stable pagination/deduplication, canonical date semantics, payment-array mapping, and self/branch history authorization tests.
+- Live smoke on 2026-10-15 also confirmed anonymous `GET /api/barbers` returns employee-directory metadata (including login/role/permissions fields) because `enforceEmployeeAccess` passes requests without a token and the list route has no dedicated authorization middleware. Treat as P1 security/privacy finding; do not expose response contents in logs or docs.
+
+- Current reassignment contract (2026-10-15): GET
+  `/api/barbers/queue/:id/reassign-options` is the only candidate source for
+  reassignment; PATCH `/api/barbers/queue/:id/reassign` creates a durable
+  `transfer_pending` request and returns `202`. The target accepts or rejects
+  through `/api/barbers/queue/transfers/:transferId/{accept|reject}`. The active
+  path validates owner, branch, status, nine-hour staleness, and target workspace
+  role/availability. Do not restore the legacy immediate handler.
+
+- `PATCH /api/barbers/queue/:id/reassign` is the documented immediate
+  reassignment endpoint. A previous transfer workflow change placed
+  `return queueTransfers.request(req, res)` before the existing implementation,
+  making the direct reassignment code unreachable and returning
+  `transfer_pending` to clients that expect an updated queue entry. The direct
+  path was restored on 2026-10-14 and is covered by `queueTransfers.test.js`;
+  review any future transfer API change against the Barber client contract.
+- `employee_branches.sql` must remain in `scripts/apply-schema.sh` after
+  `branches.sql`/`barbers.sql`; omitting it makes cross-branch switching fail
+  on a fresh database while the code-level contract tests can still pass.
+- On 2026-10-14 the reassignment and schema-runner fixes were pushed to
+  `origin/main` as `9951d89` and `bdc31d7`. Production overlay/restart was not
+  possible because non-interactive SSH to `95.46.96.213` was rejected for both
+  `root` and `ubuntu`; `/health` only confirmed the existing public liveness
+  endpoint and must not be treated as deployment verification.
+- On 2026-10-14, after SSH access was supplied by the owner, only
+  `src/models/barbers.js` was overlaid in production. The pre-change file was
+  backed up at `/var/backups/api.bradobrey.uz-barbers-pre-reassign-20261014.js`;
+  the deployed SHA-256 matched the tested local file. Only PM2 app
+  `BRADOBREY-BARBER` was restarted; dashboard stayed online and untouched;
+  `/health` returned 200. The production checkout already had unrelated local
+  divergence, so no `git pull/reset` was performed.
+
 - For Statistics/History authorization, an empty `user_permissions` result on `admin`/`admin_network` means no per-user permissions were provisioned and resolves to the full admin preset; non-empty rows remain explicit overrides.
 
 - Barber reassignment has one canonical split workflow: GET
@@ -115,3 +155,160 @@
 - Удалён legacy stdout-log email OTP из
   `src/models/marketplace/auth.js`; Telegram flow уже не логирует token, OTP
   или полный request headers.
+
+## Проверка no-show settings (2026-10-11)
+
+- `PATCH /api/marketplace/admin/settings/no_show_restrictions` принимает `{ value: { enabled, automatic, first_violation_minutes, second_violation_minutes, third_plus_violation_minutes, lookback_days } }`; длительности хранятся в минутах и должны быть JSON-числами.
+- Dashboard no-show composable должен передавать Bearer auth header; `skipAuth: true` несовместим с settings controller, который требует JWT роли `admin`/`admin_network`.
+- Backend validator отклоняет лишние поля и строковые числовые значения для no-show settings.
+- PostgreSQL integration verification была недоступна: `127.0.0.1:5432` отказал в соединении 2026-10-11; записи в БД не выполнялись.
+- Production compatibility: the settings controller discards only legacy `updated_at` metadata for `no_show_restrictions` before strict validation, so cached older Dashboard bundles do not fail with 400; arbitrary fields remain rejected.
+
+## Исправление no-show блокировок (2026-10-11)
+
+- Причина отсутствия блокировки: production не содержал таблицу
+  `marketplace_no_show_violations`, а сервис пропускал ограничение при ошибке
+  отсутствующей миграции; автоматические пути очереди также не вызывали сервис
+  регистрации no-show.
+- В production создана только additive-структура
+  `marketplace_no_show_violations` и индекс по клиенту/дате; существующие записи
+  не изменялись. Настройка `no_show_restrictions` активна.
+- Автоматические no-show пути теперь регистрируют нарушения так же, как ручной
+  endpoint. Создание marketplace-бронирования проверяет `blocked_until`.
+- Backend PM2 `BRADOBREY-BARBER` перезапущен и online; dashboard и остальные
+  модули не перезапускались.
+
+## Employee Quality v1 audit (2026-10-11)
+
+- `GET /api/statistics/employees` exists and rejects anonymous requests with 401. On 2026-10-11 the additive Employee Quality schema and permission backfill were applied idempotently in production; verification reported `review_events=0` and the API process was restarted.
+- Ranking tie-breaks now follow the v1 contract: suspicious state/count/rate, trusted completions, then absolute employee-failure count; revenue and neutral outcomes remain non-ranking fields.
+- Aggregate failures now log a safe diagnostic object server-side and return a stable `EMPLOYEE_QUALITY_LOAD_FAILED` code without exposing SQL details. Production API and dashboard smoke checks completed after deployment; authenticated ranking data still requires a real user session for end-to-end verification.
+- On 2026-10-11 a production 500 was traced to `loadDataQuality()` binding five PostgreSQL parameters for a query using four placeholders; the extra failure-reasons parameter was removed, covered by a regression assertion, and deployed with an API-only restart.
+# Barber login geolocation control (2026-10-11)
+
+- Added additive, unapplied migration `db/postgres/barber_location_control.sql` for per-branch location policy and PII-minimized login audit events.
+- Barber/super-barber login now requires fresh location, rejects stale/low-accuracy/mock data, verifies the server-side assigned branch and radius, records an event, and creates outside-radius notifications. Unassigned barbers fail closed.
+- No production deployment or migration was performed in this task.
+
+# Production geolocation verification (2026-10-11)
+
+- `test1` is assigned to `Главный филиал` (`c6ec78aa-78c7-4b78-a0f3-9e538e19e54c`); the mobile-selected branch is not authoritative for barber login.
+- Configured that branch with latitude `41.3151186`, longitude `69.3292591`, radius `1000m`, enabled. A real production login returned HTTP 200 and recorded an `inside_radius` event with accuracy `11.02m`.
+- API geolocation audit passed: migration indexes exist, PM2 is online, health is 200, and the server remains fail-closed for missing configuration/stale/mock/low-accuracy/out-of-radius input.
+- The admin-only location-events response now includes the recorded entry coordinates and configured branch coordinates for Verifix map rendering; mobile login responses and public endpoints remain unchanged.
+
+# Barber login before branch location rollout (2026-10-12)
+
+- Barber/super-barber login now skips geolocation when the assigned branch has no enabled `branch_locations` policy, so branches can be onboarded before coordinates are configured.
+- Enabled branch location policies still require a current location and preserve stale/accuracy/mock/radius validation and audit notifications.
+
+# Active employee branch context (2026-10-12)
+
+- `users.branch_id` and `barbers.branch_id` remain the permanent/default assignment; they are no longer overwritten by employee login or shift start.
+- `db/postgres/employee_branches.sql` adds `employee_branch_access` (legacy assignment plus explicit deny rows) and `employee_active_branches` (one persisted current work branch and shift state per employee).
+- Employee login accepts `branch_id`. With multiple active branches and no selection it returns `409 BRANCH_SELECTION_REQUIRED` with branch metadata; inactive or explicitly denied branches return `403 BRANCH_ACCESS_DENIED`.
+- JWT `branchId`, Verifix events, kiosk visibility, and marketplace booking validation use the active branch. Apply the SQL migration before deploying the API changes; old single-branch data remains compatible through the legacy fallback.
+- `POST /api/barbers/me/branch` validates access server-side, switches the active context, and records branch-specific shift boundaries. `/api/barbers/me` also returns available branches and period statistics with queue revenue, services, shifts, worked minutes, and separate finance snapshot totals/payouts by branch.
+
+# Cross-branch selection correction (2026-10-12)
+
+- The initial implementation incorrectly treated active `employee_branch_access` rows as the complete allow-list. Because the additive backfill creates only the legacy `users.branch_id` row, a barber permanently assigned to A could not select active branch B.
+- `listEmployeeBranches` now returns active branches by default and excludes only branches with an explicit inactive access row. This preserves server-side denial and closed-branch checks without making the legacy home row a manual prerequisite for every temporary workplace.
+- Added `test/employeeBranchSwitch.e2e.test.js`: an isolated no-production-data contract covering login selection, persisted active branch, kiosk visibility, branch-scoped booking/shift IDs, switching back, inactive branches, and explicit denial.
+- The employee directory now joins `employee_active_branches`; branch-filtered admin lists match either permanent `branch_id` or current `active_branch_id`. The API exposes both fields so UI display does not require rewriting the permanent assignment.
+
+# Production API deployment (2026-10-14)
+
+- Deployed the current `main` commit to `/var/www/api.bradobrey.uz` using an archive overlay; `.env`, `node_modules`, and the dashboard directory were preserved.
+- Confirmed the four active-branch/geolocation tables already exist in production, so no database migration was run.
+- Restarted only PM2 app `BRADOBREY-BARBER`; `bradobrey-dashboard` was not restarted. PM2 reported the API online and `https://api.bradobrey.uz/health` returned HTTP 200.
+- Created rollback backup `/var/backups/api.bradobrey.uz-20261014-deploy.tar` on the server. The production Git worktree still contains historical local divergence and was not reset or force-updated.
+
+# Production kiosk socket secret (2026-10-14)
+
+- Generated `KIOSK_SOCKET_SECRET` directly on the API server and stored it only in `/var/www/api.bradobrey.uz/.env`; the value is not recorded in Git or project documentation.
+- Restarted only PM2 app `BRADOBREY-BARBER`; the dashboard process was not restarted. A real registered kiosk request to `POST /api/kiosk/socket-ticket` returned HTTP 200 with a ticket.
+- Created the pre-change environment backup at `/var/backups/api.bradobrey.uz-env-20261014-kiosk-secret`.
+
+# Barber/Kiosk presence audit (2026-10-14)
+
+- Audit report: `.project/BARBER_KIOSK_SESSION_AUDIT_2026-10-14.md`.
+- Presence is duplicated between `barbers.is_on_shift` and `employee_active_branches.is_on_shift`; current `POST /api/barbers/logout` updates only `barbers`, leaving a possible stale active-branch row.
+- `GET /api/kiosk/barbers/:branch_id` returns non-archived off-shift employees with `availability_status=off_shift` instead of excluding them. This does not satisfy the product requirement that logged-out/inactive barbers disappear from kiosk.
+- No durable heartbeat/TTL was found for unexpected app termination or network loss. `scheduleShiftAutoOff` is defined in process memory but has no call site.
+- Barber Flutter treats every HTTP 401 as a hard logout; JWT default TTL is 12h and no refresh flow exists. A 5–10 minute logout cadence requires production 401/nginx/PM2 evidence; it is not explained by the default JWT TTL.
+
+## Barber/Kiosk presence remediation (2026-10-14)
+
+- Implemented JWT-scoped `POST /api/barbers/logout`: it clears both legacy and active-branch shift state, clears in-memory timers, and emits status to both relevant branch rooms.
+- Implemented `POST /api/barbers/presence`; Flutter sends it every 30 seconds and on foreground. Kiosk reads only active branch rows with `updated_at` within 90 seconds and excludes off-shift employees.
+- Flutter logout now sends a Bearer token. Transient heartbeat network errors are ignored; only an explicit 401 triggers re-authentication.
+- First remediation and the atomic logout/API follow-up were deployed on 2026-10-14. Barber App and Kiosk client source fixes are pushed, but remain subject to the normal signed mobile release/install path.
+- Follow-up audit found a kiosk-cache defect: expired cached snapshots remained renderable after refresh errors. Kiosk now hides all cached barber cards whenever the snapshot is stale, consumes `barber_status/is_on_shift=false` to remove and persist the barber immediately, then refreshes from API. API logout now uses one transaction for both shift stores; only a confirmed missing presence relation enables legacy fallback.
+- Logout UI no longer clears the barber's local session after a failed/missing server logout request; it reports the failure and allows retry. Kiosk regressions and transaction rollback tests were added.
+- Follow-up verification: backend `npm test` 104/104; all tests and `flutter analyze` pass in both kiosk and Barber App repositories.
+- Follow-up API deployment: commit `f95a8ac`; only the four presence-related API source files were overlaid, the API PM2 process alone was restarted, API health remained HTTP 200, unauthenticated logout correctly returned 401, and both API/dashboard processes were online. Rollback archive: `/var/backups/api.bradobrey.uz-presence-followup-20261014.tar.gz`. No authenticated real-barber logout or kiosk-device end-to-end test was available.
+# Barber reassignment audit (2026-10-15)
+
+- Follow-up fix `f3ec201` aligned the durable PATCH recipient check with the
+  active-branch presence contract. When `employee_active_branches` exists, a
+  target must have a matching branch assignment, `is_on_shift=true`, and an
+  `updated_at` within 90 seconds; permanent/home `barbers.branch_id` is no
+  longer required for temporary branch work. A legacy direct-branch fallback
+  remains only for installations where the additive presence table is absent.
+- Production overlay was completed on 2026-10-15: only
+  `/var/www/api.bradobrey.uz/src/models/queueTransfers.js` was replaced after
+  a backup was saved outside the repository; `BRADOBREY-BARBER` was the only
+  PM2 process restarted and remained online. Dashboard was not touched.
+- The authenticated end-to-end transfer was not executed because it would
+  mutate a live customer queue; production service, syntax, and unauthenticated
+  route checks were used instead.
+
+# Manual final price override (2026-10-15)
+
+- `PATCH /api/barbers/queue/:id/edit-before-complete` now permits any positive
+  manual amount. The previous comparison against the cheapest catalog service
+  was removed; `amount <= 0` is still rejected and a non-empty reason is still
+  required.
+- Production overlay `dc6a968` replaced only
+  `/var/www/api.bradobrey.uz/src/models/barbers.js` after saving a backup
+  outside the repository. Only `BRADOBREY-BARBER` was restarted.
+- Regression and queue/transfer contract tests pass 23/23. An authenticated
+  live edit was not replayed against a customer order; the production API
+  process and deployed file hash were verified instead.
+
+- Direct `PATCH /api/barbers/queue/:id/reassign` must be owner-scoped even when
+  JWT contains `branchId`; branch scope is not ownership permission.
+- Candidate discovery now merges permanent `barbers.branch_id` with fresh,
+  on-shift `employee_active_branches` assignments, matching kiosk semantics.
+- Audit evidence and limitations are in
+  `audit-reports/barber-switch/20261015-000234/`; PostgreSQL integration and
+  authenticated production smoke were unavailable in the local run.
+- Commit `0d8e154` is pushed to `origin/main`. Production deployment remains
+  blocked because SSH to `95.46.96.213` was rejected for `root`, `ubuntu`, and
+  `admin`; public `/health` 200 does not prove the new code is deployed.
+
+# Barber session/logout QA audit (2026-10-15)
+
+- Local backend `.env` has `JWT_EXPIRES_IN=12h`; `signUserToken` also defaults
+  to `12h`, so the requested 15-hour token policy is not currently configured.
+- Flutter `MidnightLogoutService` is wired from `main.dart` and checks the
+  first local-device midnight after `auth_session_started_at`; it has no
+  dedicated automated tests and uses device timezone rather than explicit
+  Asia/Tashkent conversion.
+- Flutter clears the session on every HTTP 401, including a 401 from the
+  30-second `/barbers/presence` heartbeat. A logout around 30 minutes is not
+  explained by the local TTL and needs production 401 source/log evidence.
+- Flutter analyzer passed and 46 tests passed. Full findings are in
+  `audit-reports/barber-session/20261015-0010/`.
+
+# Barber kiosk session persistence correction (2026-10-15)
+
+- The earlier 90-second heartbeat visibility cutoff was the exact cause of kiosk cards disappearing after app background/force-close, screen lock, network loss, or socket interruption. Kiosk replaces its barber list from the API; the Barber App only touches diagnostic presence every 30 seconds and on resume.
+- Corrected the contract to persist `session_id` plus JWT `session_expires_at` in the existing `employee_active_branches` row. The signed JWT `jti`, active branch, database expiry, and account state are checked on protected Barber workspace requests. Logout atomically clears session fields and both legacy and active-branch shift state. Heartbeat no longer controls kiosk visibility.
+- `db/postgres/employee_branches.sql` is additive/idempotent for the new columns. It must be applied before deploying this API revision; API/Kiosk production deployment and physical-device validation are not confirmed.
+- Barber App no longer starts the local midnight-triggered logout service; the server JWT expiry remains the session limit. Kiosk fetches current state after socket connect/reconnect and rejects cross-branch call events and stale responses.
+- API working tree already had an in-progress merge and unresolved conflicts in `.project/CHANGELOG.md`, `src/models/barbers.js`, `src/models/queueTransfers.js`, and `test/queueTransfers.test.js`; do not reset/abort that state or claim a clean commit/push.
+- Expired rows are cleared by `src/jobs/employeeSessionCleanup.js` on startup and every minute in one SQL statement that ends both active-branch and legacy shift state; it emits a branch-scoped expiry event. Shift/off-shift changes preserve the session fields. Archived employees revoke the active session and disconnect employee sockets.
+- Repeated logout with a previously revoked but still cryptographically valid JWT is idempotent and cannot clear a newer login's session. The global employee middleware and route both allow only this safe replay case.
+- Kiosk receives terminal session events separately from ordinary status updates. It removes the card/cache only for logout, archive, or expiry and invalidates in-flight API responses so they cannot resurrect a removed card. Socket reconnect triggers a server snapshot refresh.
