@@ -148,7 +148,8 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
     ], error: null }],
     employee_active_branches: [{ data: [{
       employee_id: 'barber-1', branch_id: 'branch-1', is_on_shift: true,
-      updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(), session_id: 'session-1',
+      session_expires_at: new Date(Date.now() + 60_000).toISOString(),
     }], error: null }],
     services: [{ data: [{ id: 'service-1', duration_minutes: 10 }], error: null }],
     clients: [{ data: [], error: null }],
@@ -587,7 +588,22 @@ test('PATCH /api/barbers/queue/:id/no-show is owner-scoped, guarded, idempotent,
     ],
   });
   const emitted = [];
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber', branchId: 'branch-1', jti: 'session-1' }, process.env.JWT_SECRET);
+  const originalPoolQuery = pool.query;
+  const originalPoolConnect = pool.connect;
+  pool.query = async () => ({ rows: [{
+    session_id: 'session-1', session_expires_at: new Date(Date.now() + 60_000).toISOString(),
+    is_expired: false, role: 'barber', is_archived: false, branch_is_active: true,
+    branch_access_revoked: false,
+  }] });
+  pool.connect = async () => ({
+    async query(sql) {
+      if (/select value from platform_settings/i.test(sql)) return { rows: [] };
+      if (/from queue_entries q/i.test(sql)) return { rows: [] };
+      return { rows: [] };
+    },
+    release() {},
+  });
   const req = {
     app: { get: () => ({ to: () => ({ emit: (event, payload) => emitted.push({ event, payload }) }) }) },
     body: {},
@@ -620,6 +636,8 @@ test('PATCH /api/barbers/queue/:id/no-show is owner-scoped, guarded, idempotent,
     assert.ok(mock.calls.some((call) => call.method === 'eq' && call.column === 'barber_id' && call.value === 'barber-1'));
   } finally {
     mock.restore();
+    pool.query = originalPoolQuery;
+    pool.connect = originalPoolConnect;
   }
 });
 
@@ -635,7 +653,13 @@ test('PATCH /api/barbers/queue/:id/not-in-time is owner-scoped, guarded, idempot
     ],
   });
   const emitted = [];
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = jwt.sign({ sub: 'barber-1', role: 'barber', branchId: 'branch-1', jti: 'session-1' }, process.env.JWT_SECRET);
+  const originalPoolQuery = pool.query;
+  pool.query = async () => ({ rows: [{
+    session_id: 'session-1', session_expires_at: new Date(Date.now() + 60_000).toISOString(),
+    is_expired: false, role: 'barber', is_archived: false, branch_is_active: true,
+    branch_access_revoked: false,
+  }] });
   const req = {
     app: { get: () => ({ to: () => ({ emit: (event, payload) => emitted.push({ event, payload }) }) }) },
     body: {},
@@ -673,6 +697,7 @@ test('PATCH /api/barbers/queue/:id/not-in-time is owner-scoped, guarded, idempot
     assert.ok(mock.calls.some((call) => call.method === 'eq' && call.column === 'barber_id' && call.value === 'barber-1'));
   } finally {
     mock.restore();
+    pool.query = originalPoolQuery;
   }
 });
 

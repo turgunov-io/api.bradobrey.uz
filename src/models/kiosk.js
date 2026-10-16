@@ -5,6 +5,7 @@ const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { issueKioskSocketTicket } = require('../kioskSocketTicket');
+const { buildAuthenticatedBarberRoster } = require('../utils/kioskBarberPresence');
 
 const {
     applyPromoDiscount,
@@ -396,12 +397,15 @@ class Kiosk {
             .in('id', Array.from(activeById.keys()));
         if (assignedBarbersError) return res.status(500).json({ error: assignedBarbersError.message });
 
-        const mergedBarbers = [...(barbers || [])];
-        for (const barber of assignedBarbers || []) {
-            if (!mergedBarbers.some((item) => String(item.id) === String(barber.id))) mergedBarbers.push(barber);
-        }
+        const visibleBarbers = buildAuthenticatedBarberRoster({
+            branchId: branch_id,
+            branchBarbers: barbers || [],
+            assignedBarbers: assignedBarbers || [],
+            activeSessions: activeBarbers || [],
+            deniedEmployeeIds: [...deniedEmployeeIds],
+        });
 
-        const barberIds = mergedBarbers.map((barber) => barber.id).filter(Boolean);
+        const barberIds = visibleBarbers.map((barber) => barber.id).filter(Boolean);
         let allowedBarberIds = new Set(barberIds);
 
         if (barberIds.length) {
@@ -418,20 +422,7 @@ class Kiosk {
             allowedBarberIds = new Set((users || []).map((user) => user.id));
         }
 
-        const visibleBarbers = mergedBarbers.filter((barber) => {
-            const hasValidSession = activeById.has(String(barber.id));
-            return (
-            allowedBarberIds.has(barber.id) && barber.is_archived !== true &&
-            hasValidSession === true &&
-            (String(barber.branch_id) === String(branch_id) || activeById.has(String(barber.id)))
-            );
-        }).map((barber) => ({
-            ...barber,
-            branch_id: branch_id,
-            // A valid authenticated session keeps the kiosk card present even
-            // when the user is temporarily off-shift or misses heartbeats.
-            is_on_shift: activeById.has(String(barber.id)),
-        }));
+        const kioskBarbers = visibleBarbers.filter((barber) => allowedBarberIds.has(barber.id));
 
         const { data: rawQueues, error: queuesError } = await db
             .from("queue_entries")
@@ -535,7 +526,7 @@ class Kiosk {
         const overallEstimatedWaitingTime = Object.values(waitingTimeByBarber)
             .reduce((sum, val) => sum + val, 0);
 
-        const response = visibleBarbers.map((barber) => {
+        const response = kioskBarbers.map((barber) => {
             const clients = queuesByBarber[barber.id] || [];
             const state = queueStateByBarber[barber.id] || { has_in_progress: false, current_service_overdue: false };
             const availabilityStatus = barber.is_active === false

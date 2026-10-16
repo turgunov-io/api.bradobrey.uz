@@ -11,10 +11,14 @@ test('logout is JWT-scoped and clears both presence stores transactionally', () 
   const source = read('src/models/barbers.js');
   const helper = read('src/utils/employeePresenceTransaction.js');
   const service = read('src/utils/employeeBranches.js');
+  const logoutHandler = source.slice(source.indexOf('async logout(req, res)'), source.indexOf('async presence(req, res)'));
   assert.match(source, /authenticateBarberWorkspace\(req, res, 'Only workspace employees can log out', \{ allowRevoked: true \}\)/);
   assert.match(source, /allowRevoked: true/);
   assert.match(source, /idempotent: true/);
   assert.match(source, /logoutEmployeePresence\(barber_id\)/);
+  assert.match(logoutHandler, /const barber_id = auth\.barberId/);
+  assert.doesNotMatch(logoutHandler, /req\.body[\s\S]*barber_id/);
+  assert.match(logoutHandler, /if \(!auth\.sessionValid\) return res\.json\(\{ barber: null, idempotent: true \}\)/);
   assert.match(service, /async function logoutEmployeePresence\(employeeId\)/);
   assert.match(service, /applyEmployeeLogoutTransaction\(client, normalizedEmployeeId\)/);
   assert.match(helper, /await client\.query\('begin'\)/);
@@ -27,10 +31,14 @@ test('logout is JWT-scoped and clears both presence stores transactionally', () 
 
 test('kiosk visibility requires a valid persisted session, not a recent heartbeat', () => {
   const source = read('src/models/kiosk.js');
+  const projection = read('src/utils/kioskBarberPresence.js');
   assert.match(source, /session_expires_at/);
   assert.match(source, /\.gt\('session_expires_at'/);
   assert.doesNotMatch(source, /\.gte\('updated_at', presenceCutoff\)/);
-  assert.match(source, /activeById\.has\(String\(barber\.id\)\)/);
+  assert.match(source, /buildAuthenticatedBarberRoster/);
+  assert.match(projection, /session_id/);
+  assert.match(projection, /session_expires_at/);
+  assert.match(projection, /is_on_shift: session\.is_on_shift === true/);
   assert.match(source, /from\('employee_branch_access'\)/);
   assert.match(source, /deniedEmployeeIds/);
   assert.match(source, /isMissingActivePresenceTable\(activeBarbersError\)/);

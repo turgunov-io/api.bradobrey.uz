@@ -110,12 +110,7 @@ async function request(req, res) {
         await client.query('commit'); return res.json({ transfer: prior.rows[0], idempotent: true });
       }
     }
-<<<<<<< HEAD
-    const result = await client.query(`select id, client_id, barber_id, branch_id, status, created_at
-      from queue_entries where id=$1 for update`, [orderId]);
-=======
     const result = await client.query(`select id, client_id, barber_id, branch_id, status, created_at from queue_entries where id=$1 for update`, [orderId]);
->>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
     const entry = result.rows[0];
     if (!entry || (actor.branchId && String(entry.branch_id) !== actor.branchId)) { await client.query('rollback'); return res.status(404).json({ error: 'Queue entry not found' }); }
     if (String(entry.barber_id) !== actor.id) { await client.query('rollback'); return res.status(403).json({ error: 'Only the assigned barber can transfer this order' }); }
@@ -148,22 +143,8 @@ async function request(req, res) {
       return res.status(400).json({ error: 'Queue entry is stale and cannot be reassigned' });
     }
     if (!canInitiateTransfer(entry, actor.id, targetId)) { await client.query('rollback'); return res.status(409).json({ error: 'Queue entry cannot be transferred in its current state' }); }
-<<<<<<< HEAD
-    const candidate = await client.query(`select b.id
-      from barbers b
-      join users u on u.id = b.id
-      where b.id=$1 and b.branch_id=$2
-        and u.role = any($3::text[])
-        and b.is_active is true and b.is_archived is false and b.is_on_shift is true`, [
-      targetId,
-      entry.branch_id,
-      Array.from(BARBER_ROLES),
-    ]);
-    if (!candidate.rows[0]) { await client.query('rollback'); return res.status(400).json({ error: 'Selected barber is not available in this branch' }); }
-=======
     const candidateIsEligible = await targetBarberIsEligible(client, targetId, entry.branch_id);
     if (!candidateIsEligible) { await client.query('rollback'); return res.status(400).json({ error: 'Selected barber is not available in this branch' }); }
->>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
     const transfer = await client.query(`insert into queue_transfer_events
       (queue_entry_id, from_barber_id, to_barber_id, client_id, status, original_status, requested_by, expires_at, idempotency_key)
       values ($1,$2,$3,$4,'pending',$5,$2,now()+($6::text||' minutes')::interval,$7) returning *`,

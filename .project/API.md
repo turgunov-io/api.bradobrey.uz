@@ -34,6 +34,10 @@ is ended by explicit logout, expiry, or administrative/account revocation.
 Kiosk clients refetch this endpoint on `queue:update` and after every socket
 connect/reconnect.
 
+`is_on_shift` is taken from the persisted active-branch row independently of
+session visibility. A valid logged-in barber remains listed when off shift,
+with `availability_status=off_shift` and `is_available=false`.
+
 `queue:update` with `type=barber_status` includes `session_ended=true` and a
 `reason` only after confirmed logout or administrative archive. Expiry cleanup
 uses `session_expired=true`. Kiosk may remove that barber immediately from its

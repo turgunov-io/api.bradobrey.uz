@@ -1,6 +1,17 @@
 # Changelog
 
-<<<<<<< HEAD
+## 2026-10-16 — Kiosk barber session presence
+
+- Kept kiosk card visibility tied to an unexpired persisted employee session;
+  app lifecycle, heartbeat age, Socket.IO disconnect, and API restart do not
+  remove the card. The roster now preserves the independent off-shift state.
+- Added regression scenarios for app/network/socket interruptions, API restart,
+  idempotent reconnect, logout, expiry/revocation, duplicate cards, and branch
+  isolation. Full API test suite passes (124/124).
+- Removed committed merge-marker leftovers from queue transfer source/tests and
+  retained the durable active-branch eligibility checks so the API test suite
+  can load. Production schema/deployment was not changed or verified.
+
 ## 2026-10-15
 
 - Audited barber reassignment end-to-end with the Flutter client. The client was
@@ -16,7 +27,6 @@
   `transfer_pending` plus accept/reject contract.
 - Deployment remains a release gate: production commit, PM2 restart, and
   `queue_transfer_history.sql` application were not verified from this checkout.
-=======
 ## 2026-10-15 — Аудит истории заказов Barber
 
 - Завершён документируемый сквозной аудит `PostgreSQL queue_entries → GET
@@ -129,8 +139,6 @@
   client/date index without modifying existing records.
 - Kept the change scoped to marketplace no-show processing; only the backend
   marketplace process was restarted.
->>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
-
 ## 2026-10-07
 
 - Switched Telegram onboarding to Telegram Contact as the sole phone source:

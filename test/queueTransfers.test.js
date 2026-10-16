@@ -44,7 +44,6 @@ test('transfer workflow locks the order and transfer before applying state trans
 });
 
 test('active transfer request keeps stale and recipient eligibility checks in the durable path', () => {
-<<<<<<< HEAD
   const transferSource = fs.readFileSync(
     path.join(root, 'src/models/queueTransfers.js'),
     'utf8',
@@ -53,10 +52,6 @@ test('active transfer request keeps stale and recipient eligibility checks in th
     path.join(root, 'src/models/barbers.js'),
     'utf8',
   );
-=======
-  const transferSource = fs.readFileSync(path.join(root, 'src/models/queueTransfers.js'), 'utf8');
-  const barberSource = fs.readFileSync(path.join(root, 'src/models/barbers.js'), 'utf8');
->>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
   const optionsStart = barberSource.indexOf('async queueReassignOptions');
   const requestStart = barberSource.indexOf('async reassignQueue');
   const optionsHandler = barberSource.slice(optionsStart, requestStart);
@@ -65,15 +60,10 @@ test('active transfer request keeps stale and recipient eligibility checks in th
   assert.match(transferSource, /created_at/);
   assert.match(transferSource, /STALE_QUEUE_HOURS/);
   assert.match(transferSource, /join users u on u\.id = b\.id/);
-<<<<<<< HEAD
-  assert.match(transferSource, /u\.role = any\(\$3::text\[\]\)/);
+  assert.match(transferSource, /const candidateIsEligible = await targetBarberIsEligible/);
   assert.doesNotMatch(optionsHandler, /markEntriesNoShow/);
   assert.match(requestHandler, /return queueTransfers\.request\(req, res\)/);
   assert.doesNotMatch(requestHandler, /Selected barber is not available for reassignment/);
-=======
-  assert.match(transferSource, /u\.role in \('barber'/);
-  assert.doesNotMatch(optionsHandler, /markEntriesNoShow/);
-  assert.match(requestHandler, /return queueTransfers\.request\(req, res\)/);
 });
 
 test('reassignment availability merges active temporary-branch employees', () => {
@@ -100,5 +90,4 @@ test('PATCH transfer eligibility uses the same fresh active-branch presence cont
   assert.match(source, /eab\.updated_at >= now\(\) - interval '90 seconds'/);
   assert.match(source, /const candidateIsEligible = await targetBarberIsEligible/);
   assert.match(source, /b\.branch_id=\$2/);
->>>>>>> b093cab68f0e8daf54d01b9bb065964f55c5b2b5
 });
