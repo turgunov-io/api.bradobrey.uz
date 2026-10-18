@@ -4,6 +4,7 @@ const router = express.Router();
 router.get('/', (req, res) => notifications.list(req, res));
 router.post('/check-today', (req, res) => notifications.checkToday(req, res));
 router.post('/push-subscription', (req, res) => notifications.savePushSubscription(req, res));
+router.post('/push-subscription/status', (req, res) => notifications.pushSubscriptionStatus(req, res));
 router.post('/fcm-token', (req, res) => notifications.saveFcmToken(req, res));
 router.delete('/push-subscription', (req, res) => notifications.removePushSubscription(req, res));
 router.post('/test-push', (req, res) => notifications.testPush(req, res));

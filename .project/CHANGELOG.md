@@ -257,3 +257,13 @@
 - Fixed marketplace client call notifications over Socket.IO: validated marketplace client JWTs can join only their own client room, and queue calls are emitted to that room as `queue.client_called` and `queue:call`.
 
 - Verifix schedule saves now reject same-day end times that are not after start; Chimgan Monday–Saturday personal schedules were corrected to 10:00–20:00.
+
+# 2026-10-18 — location event lookup
+
+- Added exact event-ID filtering to authenticated barber login location history and enforced branch scope for `manager` and `admin_branch` on location reads and writes.
+- Added API regression coverage for exact event matching and branch-scope enforcement.
+
+# 2026-10-19 — browser push device targeting
+
+- Added an authenticated browser subscription status check scoped to the current user and endpoint. Test push accepts an optional endpoint and targets only that owned browser subscription while preserving legacy user-wide sends when omitted.
+- Added regression coverage for authentication, ownership scoping, exact-device delivery, and missing subscriptions.

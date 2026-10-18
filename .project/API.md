@@ -196,3 +196,12 @@ The selected branch is persisted in `employee_active_branches` and is reflected 
 `POST /api/barbers/me/branch` switches an authorized workspace employee's active branch. If the employee is on shift, the API records a `shift_end` in the previous branch and a `shift_start` in the new branch; historical queue entries and payments remain attached to their original `queue_entries.branch_id`.
 
 `GET /api/barbers?mode=employees&branch_id=...` filters by both the permanent assignment and the persisted `active_branch_id`, so an employee temporarily working in another branch appears in that branch's administrative directory without changing the permanent assignment.
+# Barber login location events
+
+- `GET /api/barbers/location-events` accepts optional `branch_id`, `event_id`, and `limit` query parameters. Supplying `event_id` returns the matching event within the supplied branch; branch-scoped `manager` and `admin_branch` tokens are always constrained to their JWT `branchId`, even when `branch_id` is omitted.
+- The endpoint requires an authenticated location-administration role. Event lookup is used by Dashboard geolocation warning notifications; callers must use both notification `branch_id` and `data.event_id`.
+
+# Browser push subscriptions
+
+- `POST /api/notifications/push-subscription/status` requires an employee JWT and `{ "endpoint": "https://…" }`; it returns only whether that endpoint is registered to the authenticated user.
+- `POST /api/notifications/test-push` optionally accepts the same endpoint in its JSON body. When supplied, delivery is restricted to the subscription owned by the authenticated user and that exact endpoint. Calls without an endpoint keep the legacy user-wide delivery behavior.

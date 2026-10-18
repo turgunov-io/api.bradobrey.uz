@@ -175,9 +175,12 @@ async function createLocationWarningNotifications({ barberId, branchId, event })
     }
 }
 
-async function sendPushToUser(userId, payload) {
+async function sendPushToUser(userId, payload, options = {}) {
     if (!configureWebPush()) throw new Error('VAPID keys are not configured');
-    const result = await db.query('select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1', [userId]);
+    const endpoint = typeof options.endpoint === 'string' ? options.endpoint.trim() : '';
+    const result = endpoint
+        ? await db.query('select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1 and endpoint = $2', [userId, endpoint])
+        : await db.query('select id, endpoint, p256dh, auth from push_subscriptions where user_id = $1', [userId]);
     const summary = { found: result.rows.length, sent: 0, failed: 0, removed: 0 };
     await Promise.all(result.rows.map(async (subscription) => {
         try {
@@ -323,11 +326,37 @@ class Notifications {
         catch (error) { return res.status(500).json({ error: error.message }); }
     }
 
+    async pushSubscriptionStatus(req, res) {
+        const payload = authenticate(req, res); if (!payload) return;
+        const hasEndpoint = Object.prototype.hasOwnProperty.call(req.body || {}, 'endpoint');
+        const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : '';
+        if (hasEndpoint && (!endpoint || endpoint.length > 2048 || !/^https:\/\//i.test(endpoint))) {
+            return res.status(400).json({ error: 'Valid push subscription endpoint is required' });
+        }
+        let available = false;
+        try { available = configureWebPush(); } catch (_error) { available = false; }
+        if (!hasEndpoint) return res.json({ available, registered: false });
+        try {
+            const result = await db.query(
+                'select id from push_subscriptions where user_id = $1 and endpoint = $2 limit 1',
+                [payload.sub || payload.id, endpoint]
+            );
+            return res.json({ available, registered: (result.rows || []).length > 0 });
+        } catch (_error) {
+            return res.status(500).json({ error: 'Failed to check push subscription' });
+        }
+    }
+
     async testPush(req, res) {
         const payload = authenticate(req, res); if (!payload) return;
         if (!configureWebPush()) return res.status(503).json({ error: 'VAPID keys are not configured' });
+        const hasEndpoint = Object.prototype.hasOwnProperty.call(req.body || {}, 'endpoint');
+        const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : '';
+        if (hasEndpoint && (!endpoint || endpoint.length > 2048 || !/^https:\/\//i.test(endpoint))) {
+            return res.status(400).json({ error: 'Valid push subscription endpoint is required' });
+        }
         try {
-            const result = await sendPushToUser(payload.sub || payload.id, { title: 'Тестовое уведомление', body: 'Push работает на этом устройстве.', url: '/notifications', tag: 'test-push' });
+            const result = await sendPushToUser(payload.sub || payload.id, { title: 'Тестовое уведомление', body: 'Push работает на этом устройстве.', url: '/notifications', tag: 'test-push' }, { endpoint: hasEndpoint ? endpoint : undefined });
             if (!result.found) return res.status(404).json({ error: 'No push subscriptions found for this user', ...result });
             if (!result.sent && result.removed && !result.failed) return res.status(410).json({ error: 'Push subscription expired; enable notifications again on this device', ...result });
             if (!result.sent) return res.status(502).json({ error: 'Push delivery failed', ...result });

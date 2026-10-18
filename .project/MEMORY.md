@@ -391,3 +391,26 @@
   shorter configured `JWT_EXPIRES_IN`). The persisted expiry follows the token;
   session cleanup clears both shift flags and broadcasts `barber_status`, while
   branch switching preserves the current deadline.
+- Production on 2026-10-18 had 162 tracked working-tree changes (mostly
+  `node_modules`) and three local-only commits while `main` was two commits
+  behind `origin/main`. Saved the tracked patch and a complete Git bundle under
+  `/var/backups/api.pre-pull.20261018T183207Z`, then reset to `origin/main`
+  `2a3a8bf`; `git pull --ff-only` confirmed up-to-date and the checkout is clean.
+  Production `npm test` passed 136/136. Restarted only PM2 app
+  `BRADOBREY-BARBER`; API health was HTTP 200 and the dashboard stayed online.
+- On 2026-10-18, fixed production `GET /api/barbers/queue/:id/reassign-options`
+  failing because the installed PostgREST query builder has no `.not()` method.
+  Session IDs are now filtered in JS after the branch/on-shift/future-expiry
+  query. Commit `53a1a4a` is on `main`; 136/136 API tests passed locally and on
+  production. Production was fast-forwarded, the API PM2 process restarted,
+  health returned OK, and its Git checkout is clean.
+
+# Dashboard geolocation notification lookup (2026-10-18)
+
+- `GET /api/barbers/location-events` supports exact `event_id` filtering. Dashboard callers should send the notification's `branch_id` and `data.event_id` together so one clicked warning maps to its precise login event.
+- `manager` and legacy `admin_branch` are branch-scoped location administrators. The list endpoint constrains filtered and unfiltered requests to the JWT `branchId`; branch location read/write endpoints apply the same scope.
+
+# Browser Web Push device targeting (2026-10-19)
+
+- Browser push is stored in `push_subscriptions` and uses VAPID/Web Push; `employee_push_tokens` is the separate native Android/iOS FCM path. Existing browser endpoints already provide per-browser identity and must remain independently registered.
+- `POST /api/notifications/push-subscription/status` checks a subscription only by the authenticated user ID plus its endpoint. `POST /api/notifications/test-push` may receive an endpoint to target only that owned subscription; omission preserves legacy user-wide sends.
