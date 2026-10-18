@@ -80,6 +80,19 @@ visibility. Login stores a random signed-session `jti` and the JWT expiry in
 the active-branch row. Protected barber workspace routes validate the same
 branch, session ID, account state, and expiry against PostgreSQL. Apply the
 additive `db/postgres/employee_branches.sql` schema before deploying this API.
+Barber/manager login sessions expire at the earlier of the configured JWT TTL
+and the next midnight in `Asia/Tashkent`; the server cleanup clears expired
+session and shift state and emits a branch-scoped `barber_status` event. Branch
+switches preserve the existing session deadline.
+
+### Barber reassignment candidates
+
+`GET /api/barbers/queue/:id/reassign-options` and the transfer request both
+require an active branch assignment, on-shift state, allowed workspace role,
+active/non-archived account, and an unexpired persisted session. They do not
+require a recent heartbeat. Temporary app closure, screen lock, network loss,
+or Socket.IO disconnect therefore does not remove an otherwise eligible
+barber; logout, session expiry, branch revocation, and shift end still do.
 
 ### `GET /api/barbers/queue/:id/barber-history`
 

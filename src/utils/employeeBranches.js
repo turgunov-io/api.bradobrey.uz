@@ -106,7 +106,7 @@ async function setActiveEmployeeBranch({ employeeId, branchId, isOnShift, sessio
 
 async function getActiveEmployeeBranch(employeeId) {
   try {
-    const result = await db.query('select employee_id, branch_id, is_on_shift, selected_at, updated_at from employee_active_branches where employee_id = $1', [normalizeId(employeeId)]);
+    const result = await db.query('select employee_id, branch_id, is_on_shift, session_id, session_expires_at, selected_at, updated_at from employee_active_branches where employee_id = $1', [normalizeId(employeeId)]);
     return result.rows?.[0] || null;
   } catch (error) {
     if (isMissingRelation(error, 'employee_active_branches')) return null;

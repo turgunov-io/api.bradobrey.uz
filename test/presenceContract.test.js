@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { applyEmployeeLogoutTransaction } = require('../src/utils/employeePresenceTransaction');
-const { evaluateEmployeeSession } = require('../src/utils/employeeSession');
+const { evaluateEmployeeSession, getEmployeeSessionExpiry, getEmployeeTokenTtlSeconds } = require('../src/utils/employeeSession');
 const { cleanupExpiredEmployeeSessions } = require('../src/jobs/employeeSessionCleanup');
 
 const read = (path) => fs.readFileSync(path, 'utf8');
@@ -77,6 +77,21 @@ test('persisted sessions survive off-shift state but expire, revoke, and branch-
   assert.equal(evaluateEmployeeSession(base, { sessionId: 'other-session', role: 'barber' }).reason, 'revoked');
   assert.equal(evaluateEmployeeSession({ ...base, is_archived: true }, { sessionId: 'session-1', role: 'barber' }).reason, 'account_blocked');
   assert.equal(evaluateEmployeeSession({ ...base, branch_access_revoked: true }, { sessionId: 'session-1', role: 'barber' }).reason, 'branch_access_revoked');
+});
+
+test('server employee sessions expire at Tashkent midnight and branch switches cannot extend them', () => {
+  const now = new Date('2026-10-18T18:59:00.000Z'); // 23:59 in Asia/Tashkent
+  const tokenExpiry = Math.floor(Date.parse('2026-10-19T06:59:00.000Z') / 1000);
+  assert.equal(getEmployeeTokenTtlSeconds(new Date('2026-10-18T12:00:00.000Z'), '1h'), 3600);
+  assert.equal(getEmployeeTokenTtlSeconds(now, '12h'), 60);
+  assert.equal(
+    getEmployeeSessionExpiry(tokenExpiry, now),
+    '2026-10-18T19:00:00.000Z',
+  );
+  assert.equal(
+    getEmployeeSessionExpiry(tokenExpiry, now, '2026-10-18T18:59:30.000Z'),
+    '2026-10-18T18:59:30.000Z',
+  );
 });
 
 test('expiry cleanup revokes persisted state atomically and emits a branch-scoped removal event', async () => {

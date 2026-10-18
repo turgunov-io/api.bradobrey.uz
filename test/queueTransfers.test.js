@@ -87,9 +87,12 @@ test('reassignment availability merges active temporary-branch employees', () =>
   assert.match(availability, /activeBarbers/);
   assert.match(availability, /hasActiveBranchTable/);
   assert.match(availability, /branch_id: branchId/);
+  assert.match(availability, /session_id, session_expires_at/);
+  assert.match(availability, /\.gt\('session_expires_at'/);
+  assert.doesNotMatch(availability, /\.gte\('updated_at'/);
 });
 
-test('PATCH transfer eligibility uses the same fresh active-branch presence contract', () => {
+test('PATCH transfer eligibility uses a valid active-branch session without heartbeat freshness', () => {
   const source = fs.readFileSync(path.join(root, 'src/models/queueTransfers.js'), 'utf8');
 
   assert.match(source, /targetBarberIsEligible/);
@@ -97,7 +100,9 @@ test('PATCH transfer eligibility uses the same fresh active-branch presence cont
   assert.match(source, /join employee_active_branches eab on eab\.employee_id = b\.id/);
   assert.match(source, /eab\.branch_id=\$2/);
   assert.match(source, /eab\.is_on_shift is true/);
-  assert.match(source, /eab\.updated_at >= now\(\) - interval '90 seconds'/);
+  assert.match(source, /eab\.session_id is not null/);
+  assert.match(source, /eab\.session_expires_at > now\(\)/);
+  assert.doesNotMatch(source, /eab\.updated_at\s*>=/);
   assert.match(source, /const candidateIsEligible = await targetBarberIsEligible/);
   assert.match(source, /b\.branch_id=\$2/);
 });

@@ -371,3 +371,23 @@
 - Manual schedule creation inserts unconditionally and the schema lacks a unique constraint, so actual active duplicates within the same scope/day remain possible. API list only includes active entries in the dashboard because the dashboard filters the response client-side.
 - A read-only aggregate query of active Chimgan schedules confirmed one branch-default and one employee override on each weekday, with no same-scope duplicates. The six Monday–Saturday personal overrides were subsequently corrected to 10:00–20:00 at the owner's direction; Sunday 00:00–23:00 was preserved.
 - Follow-up fix on 2026-10-18: after the owner said “fix it now,” treated the shown 10:00–20:00 form values as the intended personal schedule. Updated its six Monday–Saturday Chimgan rows transactionally to end at 20:00; Sunday 00:00–23:00 and all generic rows were left intact. Added same-day end-after-start validation to API create/update/bulk paths and the Dashboard schedule forms. Backed up the source files/build and prior rows under `/var/backups`; API and Dashboard are online after restart.
+
+# Socket.IO production recheck (2026-10-18)
+
+- Current read-only report: `reports/socket-audit/2026-10-18-production-recheck.md`.
+- Public `/health` and Engine.IO polling handshake return HTTP 200; an unauthenticated Socket.IO namespace connection is rejected with `SOCKET_AUTH_REQUIRED`, as designed. This demonstrates reachable transport, not authenticated event delivery.
+- SSH to `ubuntu@95.46.96.213` was rejected, so PM2 state, deployed source, and proxy configuration could not be inspected. No authenticated client credentials/device were available; call-event delivery remains unverified.
+- Current contract requires kiosk `auth.kioskTicket` from `/api/kiosk/socket-ticket` or employee JWT in Socket.IO auth. A client sending only legacy `branchId` query is rejected. Correlate the affected client’s sanitized `connect_error` code and auth mode before attributing the incident; never collect the credential itself.
+- Cross-repo check of `C:\project\bradobrey_barber` confirmed the likely call-notification root cause: Barber App sends its employee JWT, but never emits `join_branch` after connecting. Its branch ID is only in the query string, which the API does not use for room membership. The API therefore puts it in `employee:<id>` while call events go to `branch:<id>`. The app's branch-change helper also sends `branch:<id>` instead of the raw ID and is a no-op for the initially selected branch. Report and safe corrective direction are in `reports/socket-audit/2026-10-18-production-recheck.md`. The Barber App worktree had a pre-existing modified `pubspec.yaml`; it was preserved.
+- Local Barber App fix applied at `C:\project\bradobrey_barber\lib\services\barber_socket_service.dart`: join the authorized branch room after each successful connect/reconnect and verify the ack; use raw branch IDs for join/leave; log branch denials; avoid duplicate listener registration across reconnects. This has not been built or released; no tests were run. The pre-existing modified Barber App `pubspec.yaml` remains untouched.
+
+# Barber reassignment presence and midnight session expiry (2026-10-18)
+
+- Reassignment option listing and durable transfer submission both use
+  `employee_active_branches.session_id/session_expires_at`, branch, role,
+  account, and on-shift state. `updated_at` is diagnostic heartbeat state only
+  and must not gate candidate visibility or transfer eligibility.
+- Employee login JWT TTL is capped at the next `Asia/Tashkent` midnight (or a
+  shorter configured `JWT_EXPIRES_IN`). The persisted expiry follows the token;
+  session cleanup clears both shift flags and broadcasts `barber_status`, while
+  branch switching preserves the current deadline.

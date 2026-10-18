@@ -12,7 +12,7 @@ const { isArchivedEmployee } = require('../middleware/employeeAccess');
 const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
 const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
-const { validatePersistedEmployeeSession } = require('../utils/employeeSession');
+const { getEmployeeSessionExpiry, getEmployeeTokenTtlSeconds, validatePersistedEmployeeSession } = require('../utils/employeeSession');
 const queueTransfers = require('./queueTransfers');
 
 const shiftAutoOffTimers = new Map();
@@ -1165,10 +1165,11 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
     // authoritative active-branch presence used by the kiosk endpoint.
     const { data: activeAssignments, error: activeAssignmentsError } = await db
         .from('employee_active_branches')
-        .select('employee_id, branch_id, is_on_shift, updated_at')
+        .select('employee_id, branch_id, is_on_shift, session_id, session_expires_at')
         .eq('branch_id', branchId)
         .eq('is_on_shift', true)
-        .gte('updated_at', new Date(Date.now() - 90 * 1000).toISOString());
+        .not('session_id', 'is', null)
+        .gt('session_expires_at', new Date().toISOString());
     if (activeAssignmentsError && !isMissingActiveEmployeeBranches(activeAssignmentsError)) {
         throw new Error(activeAssignmentsError.message);
     }
@@ -1906,11 +1907,10 @@ class Barbers {
             login: userData.login,
             role: userData.role,
             sessionId,
+            expiresIn: getEmployeeTokenTtlSeconds(),
         });
         const tokenPayload = jwt.decode(token);
-        const sessionExpiresAt = tokenPayload?.exp
-            ? new Date(tokenPayload.exp * 1000).toISOString()
-            : null;
+        const sessionExpiresAt = getEmployeeSessionExpiry(tokenPayload?.exp);
         if (!sessionExpiresAt) return res.status(500).json({ error: 'Failed to create employee session' });
 
         await setActiveEmployeeBranch({
@@ -2261,9 +2261,11 @@ class Barbers {
                 expiresIn: Math.max(1, Number(payload.exp) - Math.floor(Date.now() / 1000)),
             });
             const nextTokenPayload = jwt.decode(nextToken);
-            const sessionExpiresAt = nextTokenPayload?.exp
-                ? new Date(nextTokenPayload.exp * 1000).toISOString()
-                : null;
+            const sessionExpiresAt = getEmployeeSessionExpiry(
+                nextTokenPayload?.exp,
+                new Date(),
+                current?.session_expires_at || null,
+            );
             if (!sessionExpiresAt) return res.status(500).json({ error: 'Failed to refresh employee session' });
 
             await setActiveEmployeeBranch({

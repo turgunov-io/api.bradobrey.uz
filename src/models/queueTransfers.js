@@ -27,7 +27,8 @@ async function targetBarberIsEligible(client, targetId, branchId) {
       join employee_active_branches eab on eab.employee_id = b.id
       where b.id=$1 and eab.branch_id=$2
         and eab.is_on_shift is true
-        and eab.updated_at >= now() - interval '90 seconds'
+        and eab.session_id is not null
+        and eab.session_expires_at > now()
         and u.role in ('barber', 'super-barber', 'manager', 'super-manager')
         and b.is_active is true and b.is_archived is false`, [targetId, branchId]);
     return Boolean(result.rows[0]);

@@ -1,3 +1,33 @@
+const { nextZonedDayStartIso } = require('./timezone');
+
+function getEmployeeTokenTtlSeconds(now = new Date(), configuredTtl = process.env.JWT_EXPIRES_IN || '12h') {
+  const configuredSeconds = typeof configuredTtl === 'number'
+    ? configuredTtl
+    : (() => {
+      const match = String(configuredTtl).trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d|w|y)?$/i);
+      if (!match) return Number.NaN;
+      const amount = Number(match[1]);
+      const unit = (match[2] || 'ms').toLowerCase();
+      const multiplier = { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400, w: 604800, y: 31557600 }[unit];
+      return amount * multiplier;
+    })();
+  const midnightSeconds = (Date.parse(nextZonedDayStartIso(now)) - now.getTime()) / 1000;
+  if (!Number.isFinite(configuredSeconds) || configuredSeconds <= 0) return null;
+  return Math.max(1, Math.floor(Math.min(configuredSeconds, midnightSeconds)));
+}
+
+function getEmployeeSessionExpiry(tokenExpiresAtSeconds, now = new Date(), existingExpiry = null) {
+  const tokenExpiry = Number(tokenExpiresAtSeconds) * 1000;
+  if (!Number.isFinite(tokenExpiry) || tokenExpiry <= now.getTime()) return null;
+
+  const midnightExpiry = Date.parse(nextZonedDayStartIso(now));
+  const priorExpiry = existingExpiry ? Date.parse(existingExpiry) : Number.POSITIVE_INFINITY;
+  const expiry = Math.min(tokenExpiry, midnightExpiry, priorExpiry);
+  return Number.isFinite(expiry) && expiry > now.getTime()
+    ? new Date(expiry).toISOString()
+    : null;
+}
+
 async function validatePersistedEmployeeSession({ employeeId, branchId, sessionId, role }) {
   if (!employeeId || !branchId || !sessionId) return { valid: false, reason: 'invalid' };
 
@@ -40,4 +70,9 @@ function evaluateEmployeeSession(session, { sessionId, role }) {
   return { valid: true };
 }
 
-module.exports = { evaluateEmployeeSession, validatePersistedEmployeeSession };
+module.exports = {
+  evaluateEmployeeSession,
+  getEmployeeSessionExpiry,
+  getEmployeeTokenTtlSeconds,
+  validatePersistedEmployeeSession,
+};

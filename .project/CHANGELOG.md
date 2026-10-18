@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-18 — Reassignment availability and server midnight logout
+
+- Reassignment candidates and transfer requests now validate the persisted
+  branch session expiry instead of requiring a heartbeat in the last 90 seconds.
+  Branch, role, active-account, and on-shift checks remain in place.
+- Barber/manager login JWTs and persisted sessions expire at the earlier of the
+  configured JWT TTL and the next `Asia/Tashkent` midnight. The existing server
+  cleanup clears the expired session and emits the kiosk removal event; branch
+  switching retains the session deadline.
+- Added regression coverage for heartbeat-independent eligibility, midnight
+  expiry, and branch-switch deadline preservation.
+
 ## 2026-10-16 — Kiosk barber session presence
 
 - Kept kiosk card visibility tied to an unexpired persisted employee session;
