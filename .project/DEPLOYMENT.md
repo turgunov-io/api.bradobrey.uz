@@ -36,3 +36,17 @@ For an API-only release:
 - Rollback source archive: `/var/backups/api.bradobrey.uz-session-presence-pre-20261016.tar.gz`.
 - A physical kiosk and authenticated barber workflow were not available for
   end-to-end verification.
+
+## 2026-10-18 queue transfer outcome notification release
+
+- Applied `db/postgres/notifications.sql` transactionally; `employee_push_tokens` exists.
+- Deployed `src/models/notifications.js`, `src/models/queueTransfers.js`, `src/routers/barbers.js`, `src/routers/notifications.js`, and `src/services/marketplacePush.js` as a file overlay. Backup: `/var/backups/api.bradobrey.uz-transfer-notifications-pre-20261018-212702.tar.gz`.
+- Restarted only `BRADOBREY-BARBER`; `/health` returned 200, authenticated route probes returned 401, and the dashboard process PID was unchanged.
+- Live authenticated accept/reject and physical-device FCM delivery were not exercised. Barber App rollout and FCM token registration are required for actual device delivery.
+
+## 2026-10-18 Verifix schedule correction
+
+- Added API validation requiring a same-day schedule end after its start on create, update, and weekly bulk operations. Updated the branch schedule and personal schedule Dashboard forms to prevent invalid intervals.
+- Corrected six active Chimgan employee overrides from 10:00–09:00 to 10:00–20:00 transactionally; other days and branch-default schedules were unchanged. Pre-change row backup: `/var/backups/chimgan-personal-schedule-pre-20261018-1792344430045.json`.
+- API source backup: `/var/backups/api-verifix-validation-pre-20261018-222400.tar.gz`; Dashboard source and prior `.output` backup: `/var/backups/dashboard-verifix-validation-pre-20261018-222400.tar.gz`.
+- Restarted `BRADOBREY-BARBER` and `bradobrey-dashboard`; both are online. API `/health` and Dashboard `/login` returned HTTP 200. Production Dashboard had unrelated dirty employee/login files; they were preserved.

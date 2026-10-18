@@ -1,5 +1,17 @@
 # API contracts
 
+## Client queue call socket
+
+Marketplace clients can connect to Socket.IO with their existing marketplace JWT in `auth.token` (or `auth.accessToken`). The server verifies the token and confirms the client account is active, then joins only `client:<client_id>`. When the assigned barber calls a queue entry, that client receives `queue.client_called` and `queue:call` with the queue entry and branch identifiers. The event is transient; clients should refresh queue state after connecting or reconnecting. Employee and kiosk branch room access rules are unchanged.
+
+## Barber transfer outcome notifications
+
+- `PATCH /api/barbers/queue/transfers/:transferId/accept` and `/reject` persist one terminal decision. The initiating employee (`from_barber_id`) is the recipient. A duplicate retry of the same decision is idempotent and does not enqueue another result.
+- `GET /api/barbers/queue/transfers/outcomes?limit=50&since=<ISO-8601>` returns accepted/rejected transfers initiated by the authenticated employee only. It supports recovery after socket disconnect or app restart; the default window is 24 hours and `limit` is clamped to 1–100.
+- A successful decision emits generic `queue_updated` to the branch room and the detailed result event only to `employee:<from_barber_id>`. FCM delivery is separately attempted after commit and cannot roll back the result.
+- `POST /api/notifications/fcm-token` requires an employee JWT and `{ "token": "...", "platform": "ANDROID" }` (also accepts `IOS`). A refreshed token upserts ownership; tokens are retained at logout and removed only when Firebase confirms they are invalid. The server needs configured Firebase Admin credentials for delivery.
+- Push data uses `type=queue_transfer_outcome` with transfer, entry, result, initiator, target and branch IDs; rejection reason is included only when supplied and is sanitized. Token values and notification content are not logged.
+
 ## Employee quality statistics (`employee-quality-v1`)
 
 All routes require a valid JWT and permissions loaded from `user_permissions`; an empty permission set is authoritative after rollout provisioning.
@@ -20,6 +32,8 @@ Global scope currently means the whole database. It is safe only while one Postg
 ### `GET /api/barbers/queue`
 
 Each active, assigned queue item includes ordered `transfer_history`. Every event contains transfer status/timestamps plus `from_barber_id`, `from_barber_name`, `to_barber_id`, and `to_barber_name`. Client identifiers stored in transfer audit rows and free-text transfer reasons are not exposed. This keeps the active Barber queue self-contained; clients do not need a second history request to render the barber path.
+
+Queue transfer outcomes are broadcast to the branch room through `queue:update` with `type=transfer_accepted|transfer_rejected`, `entryId`, `transferId`, `fromBarberId`, `toBarberId`, `barberId`, and `branchId`. Barber clients use `fromBarberId` to notify only the barber who requested the transfer. These events are transient; clients should still refresh queue state after reconnect.
 
 ### `GET /api/kiosk/barbers/:branch_id`
 

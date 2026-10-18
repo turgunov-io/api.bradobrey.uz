@@ -51,7 +51,7 @@ test('bulk schedule rolls back if a branch disappeared or insert fails', async (
   }
 });
 test('rejects invalid times, days and unauthorized bulk scope', async () => {
-  for (const change of [{ start_time: '25:00' }, { end_time: '10:00' }, { grace_minutes: -1 }, { branch_ids: [] }]) {
+  for (const change of [{ start_time: '25:00' }, { end_time: '10:00' }, { end_time: '09:00' }, { grace_minutes: -1 }, { branch_ids: [] }]) {
     const { api, req, res, calls } = setup();
     req.body = { ...body, ...change };
     await api.bulkSchedules(req, res);
@@ -62,6 +62,15 @@ test('rejects invalid times, days and unauthorized bulk scope', async () => {
   req.body = { ...body, branch_ids: ['00000000-0000-0000-0000-000000000002'] };
   await api.bulkSchedules(req, res);
   assert.equal(res.code, 403);
+});
+test('schedule intervals require the end time to be later on the same day', () => {
+  const { api } = setup();
+  const isValid = api._private.isValidShiftTimeRange;
+  assert.equal(isValid('10:00:00', '20:00:00'), true);
+  assert.equal(isValid('09:00:00', '09:01:00'), true);
+  assert.equal(isValid('10:00:00', '10:00:00'), false);
+  assert.equal(isValid('10:00:00', '09:00:00'), false);
+  assert.equal(isValid('10:00:00', null), true);
 });
 test('persists an editable fixed rate including zero', async () => {
   const { api, req, res } = setup();

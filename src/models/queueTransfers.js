@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/postgres');
+const notificationModel = require('./notifications');
+const { _private: notificationHelpers } = notificationModel;
 const { canInitiateTransfer, matchingTerminalDecision, resolveTransferOutcome } = require('../utils/queueTransferState');
 
 const BARBER_ROLES = new Set(['barber', 'super-barber', 'manager', 'super-manager']);
@@ -7,6 +9,12 @@ const REASSIGNABLE_QUEUE_STATUSES = new Set(['waiting', 'called', 'swapped']);
 const STALE_QUEUE_HOURS = 9;
 const timeoutMinutes = Math.max(1, Number(process.env.QUEUE_TRANSFER_TIMEOUT_MINUTES || 10));
 let expiryTimer = null;
+
+function sanitizeReason(value) {
+  if (typeof value !== 'string') return null;
+  const reason = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240);
+  return reason || null;
+}
 
 async function targetBarberIsEligible(client, targetId, branchId) {
   const relation = await client.query("select to_regclass('public.employee_active_branches') as relation");
@@ -285,6 +293,39 @@ async function history(req, res) {
   }
 }
 
+async function outcomes(req, res) {
+  const actor = identity(req, res);
+  if (!actor) return;
+  const limit = Math.min(Math.max(Number(req.query?.limit) || 30, 1), 100);
+  const since = req.query?.since ? new Date(req.query.since) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+  if (Number.isNaN(since.getTime())) return res.status(400).json({ error: 'Invalid since timestamp' });
+  try {
+    const { rows } = await pool.query(`
+      select t.id as transfer_id, t.queue_entry_id as entry_id, t.status,
+        t.from_barber_id, t.to_barber_id, t.responded_at, t.reason, q.branch_id
+      from queue_transfer_events t
+      join queue_entries q on q.id = t.queue_entry_id
+      where t.from_barber_id = $1
+        and t.status in ('accepted', 'rejected')
+        and t.responded_at >= $2
+      order by t.responded_at desc, t.id desc
+      limit $3
+    `, [actor.id, since.toISOString(), limit]);
+    return res.json({ items: (rows || []).map((row) => ({
+      transfer_id: String(row.transfer_id),
+      entry_id: String(row.entry_id),
+      status: row.status,
+      from_barber_id: String(row.from_barber_id),
+      to_barber_id: String(row.to_barber_id),
+      branch_id: String(row.branch_id),
+      responded_at: row.responded_at,
+      reason: sanitizeReason(row.reason),
+    })) });
+  } catch (_error) {
+    return res.status(500).json({ error: 'Failed to load transfer outcomes' });
+  }
+}
+
 async function respond(req, res, decision) {
   const actor = identity(req, res);
   if (!actor) return;
@@ -318,13 +359,80 @@ async function respond(req, res, decision) {
     const updatedOrder = await client.query(`update queue_entries set barber_id=$2, status=$3, started_at=null, swapped_flag=true, updated_at=now()
       , created_at=coalesce($4, created_at) where id=$1 and status='transfer_pending' returning id, status, barber_id, branch_id`, [transfer.queue_entry_id, nextBarber, outcome.orderStatus, assignedAt]);
     if (!updatedOrder.rows[0]) { await client.query('rollback'); return res.status(409).json({ error: 'Order is no longer awaiting transfer confirmation' }); }
-    const { rows: updated } = await client.query(`update queue_transfer_events set status=$2, responded_by=$3, responded_at=now(), reason=$4 where id=$1 returning *`, [transfer.id, outcome.transferStatus, actor.id, req.body?.reason || null]);
+    const reason = decision === 'reject' ? sanitizeReason(req.body?.reason) : null;
+    const { rows: updated } = await client.query(`update queue_transfer_events set status=$2, responded_by=$3, responded_at=now(), reason=$4 where id=$1 returning *`, [transfer.id, outcome.transferStatus, actor.id, reason]);
+    const notificationCopy = notificationHelpers.transferOutcomeCopy(outcome.transferStatus);
+    let notificationId = null;
+    await client.query('savepoint transfer_notification');
+    try {
+      const notification = await client.query(`
+        insert into notifications (recipient_user_id, type, title, body, branch_id, data)
+        values ($1, 'queue_transfer_outcome', $2, $3, $4, $5::jsonb)
+        returning id
+      `, [transfer.from_barber_id, notificationCopy.title, notificationCopy.body, updatedOrder.rows[0].branch_id, JSON.stringify({
+        transfer_id: String(transfer.id),
+        entry_id: String(transfer.queue_entry_id),
+        result: outcome.transferStatus,
+        from_barber_id: String(transfer.from_barber_id),
+        to_barber_id: String(transfer.to_barber_id),
+        branch_id: String(updatedOrder.rows[0].branch_id),
+        ...(reason ? { reason } : {}),
+      })]);
+      notificationId = notification.rows[0]?.id || null;
+      await client.query('release savepoint transfer_notification');
+    } catch (notificationError) {
+      await client.query('rollback to savepoint transfer_notification');
+      await client.query('release savepoint transfer_notification');
+      console.warn('[queue-transfer-notification] inbox insert failed', {
+        transferId: String(transfer.id),
+        reason: String(notificationError?.code || 'database_error'),
+      });
+    }
     await client.query('commit');
     const io = req.app.get('io');
-    if (io) io.to(`branch:${updatedOrder.rows[0].branch_id}`).emit('queue:update', { type: `transfer_${outcome.transferStatus}`, entryId: transfer.queue_entry_id, barberId: nextBarber });
+    const outcomeEvent = {
+      type: `transfer_${outcome.transferStatus}`,
+      entryId: String(transfer.queue_entry_id),
+      transferId: String(transfer.id),
+      barberId: String(nextBarber),
+      fromBarberId: String(transfer.from_barber_id),
+      toBarberId: String(transfer.to_barber_id),
+      branchId: String(updatedOrder.rows[0].branch_id),
+      ...(reason ? { reason } : {}),
+    };
+    try {
+      if (io) {
+        io.to(`branch:${updatedOrder.rows[0].branch_id}`).emit('queue:update', {
+          type: 'queue_updated',
+          entryId: String(transfer.queue_entry_id),
+          branchId: String(updatedOrder.rows[0].branch_id),
+        });
+        io.to(`employee:${transfer.from_barber_id}`).emit('queue:update', outcomeEvent);
+      }
+    } catch (_socketError) {
+      console.warn('[queue-transfer-notification] socket delivery failed', {
+        transferId: String(transfer.id),
+      });
+    }
+    void notificationModel.sendQueueTransferPush({
+      userId: transfer.from_barber_id,
+      transferId: String(transfer.id),
+      entryId: String(transfer.queue_entry_id),
+      status: outcome.transferStatus,
+      fromBarberId: String(transfer.from_barber_id),
+      toBarberId: String(transfer.to_barber_id),
+      branchId: String(updatedOrder.rows[0].branch_id),
+      reason,
+      notificationId,
+    }).catch((pushError) => {
+      console.warn('[queue-transfer-push] asynchronous delivery failed', {
+        transferId: String(transfer.id),
+        reason: String(pushError?.code || 'delivery_error'),
+      });
+    });
     return res.json({ transfer: updated[0], entry: updatedOrder.rows[0] });
   } catch (error) { await client.query('rollback').catch(() => {}); res.status(500).json({ error: error.message }); }
   finally { client.release(); }
 }
 
-module.exports = { request, pending, history, startExpiryScheduler, stopExpiryScheduler, accept: (req, res) => respond(req, res, 'accept'), reject: (req, res) => respond(req, res, 'reject') };
+module.exports = { request, pending, history, outcomes, startExpiryScheduler, stopExpiryScheduler, accept: (req, res) => respond(req, res, 'accept'), reject: (req, res) => respond(req, res, 'reject'), _private: { sanitizeReason } };

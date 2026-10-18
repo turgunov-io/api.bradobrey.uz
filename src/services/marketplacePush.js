@@ -94,8 +94,8 @@ const firebaseServiceAccount = () => {
       clientEmail: parsed.client_email,
       privateKey: String(parsed.private_key).replace(/\\n/g, '\n'),
     };
-  } catch (error) {
-    console.error('[marketplace-push] invalid FIREBASE_SERVICE_ACCOUNT_JSON:', error.message);
+  } catch (_error) {
+    console.error('[marketplace-push] Firebase credentials unavailable', { reason: 'invalid_service_account_json' });
     return null;
   }
 };
@@ -111,10 +111,31 @@ const getFirebaseMessaging = () => {
     firebaseMessaging = getMessaging(app);
     return firebaseMessaging;
   } catch (error) {
-    console.error('[marketplace-push] Firebase initialization failed:', error.message);
+    console.error('[marketplace-push] Firebase initialization failed', {
+      reason: String(error?.code || 'initialization_error'),
+    });
     return null;
   }
 };
+
+async function sendFcmNotification({ token, title, body, data = {}, channelId = 'queue_reminders_v2' }) {
+  const messaging = getFirebaseMessaging();
+  if (!messaging) return { delivered: false, reason: 'provider_not_configured' };
+
+  await messaging.send({
+    token,
+    notification: { title, body },
+    data: Object.fromEntries(
+      Object.entries(data).map(([key, value]) => [key, String(value ?? '')]),
+    ),
+    android: {
+      priority: 'high',
+      notification: { channelId, sound: 'default' },
+    },
+    apns: { payload: { aps: { sound: 'default' } } },
+  });
+  return { delivered: true };
+}
 
 const providerConfigured = () => Boolean(getFirebaseMessaging() || providerUrl());
 
@@ -136,29 +157,13 @@ const sendToProvider = async ({
 
   const messaging = getFirebaseMessaging();
   if (messaging) {
-    const data = Object.fromEntries(
-      Object.entries({
-        type,
-        notification_id: notificationId,
-        ...(payload || {}),
-      }).map(([key, value]) => [key, String(value ?? '')]),
-    );
-    await messaging.send({
+    return sendFcmNotification({
       token,
-      notification: { title, body },
-      data,
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'queue_reminders_v2',
-          sound: 'default',
-        },
-      },
-      apns: {
-        payload: { aps: { sound: 'default', badge: 1 } },
-      },
+      title,
+      body,
+      channelId: 'queue_reminders_v2',
+      data: { type, notification_id: notificationId, ...(payload || {}) },
     });
-    return { delivered: true };
   }
 
   const url = providerUrl();
@@ -399,5 +404,6 @@ const startMarketplaceNotificationDispatcher = () => {
 module.exports = {
   dispatchNotification,
   sendTestNotificationToClient,
+  sendFcmNotification,
   startMarketplaceNotificationDispatcher,
 };

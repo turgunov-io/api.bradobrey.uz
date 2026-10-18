@@ -40,14 +40,14 @@
 
 ### SEC-P0-04 — Утечка живой очереди и незащищённый Socket.IO
 
-- Finding: public API/Socket.IO раскрывает имена и стабильные идентификаторы очереди; room join без JWT/ACL.
+- Finding: первоначальная проверка смешала public queue DTO риск с доступом к Socket.IO rooms. В текущем checkout Socket.IO handshake уже требует employee JWT или kiosk ticket, а branch join проверяется сервером. Утечка/минимизация данных в отдельных public API DTO всё ещё требует отдельного endpoint-by-endpoint retest.
 - Severity: High / P0.
-- Evidence: `src/server.js:28-48`, `src/modules/marketplace/catalog/repository.js:110-115`, `218-232`, `src/models/barbers.js:995-1024`.
+- Evidence (current code): `src/server.js:53-74`, branch authorization on join follows in the same file; prior DTO evidence: `src/modules/marketplace/catalog/repository.js:110-115`, `218-232`, `src/models/barbers.js:995-1024`.
 - Affected Component: realtime queue и данные клиентов.
-- Recommended Fix: authenticated rooms, персональный/branch scope, публичный DTO только с агрегатами.
-- Developer Fix: не выполнен.
-- Security Retest: anonymous не получает PII/identifiers и не вступает в room.
-- Resolution: OPEN.
+- Recommended Fix: сохранять authenticated rooms, персональный/branch scope и проверить public DTO на отсутствие PII/стабильных идентификаторов.
+- Developer Fix: Socket.IO auth/branch scope присутствуют в текущем коде.
+- Security Retest: локально есть contract tests на anonymous handshake и branch spoofing; production release и отдельная проверка каждого public DTO не подтверждены.
+- Resolution: PARTIALLY FIXED IN CODE / PRODUCTION RETEST REQUIRED.
 
 ### SEC-P0-05 — Публичный memory upload до 5 GB
 
@@ -173,3 +173,18 @@ Phone authentication must use the Telegram challenge/verify flow.
 ## Employee session persistence
 
 Workspace JWTs carry a random `jti` that is also stored with `session_expires_at` in `employee_active_branches`. The global employee API middleware and Socket.IO handshake validate the persisted session, branch assignment, branch status, archive status, and expiry. Logout revokes the stored session atomically. Heartbeat, app lifecycle, and socket disconnect are not session-revocation signals. Apply the additive employee-branches schema before deploying this API revision; database connectivity must be verified before rollout.
+## Сводный сервисный аудит (2026-10-16)
+
+- Полный межсервисный статический обзор и локальные проверки: `audit-reports/SYSTEM_SERVICE_AUDIT_2026-10-16.md`.
+- Единственный live production probe: `GET /health` → HTTP 200. Endpoint является liveness-only и не доказывает соединение с PostgreSQL или актуальность release SHA.
+- `npm test`: 108/108 pass; integration suite не запускался, PostgreSQL migrations/data не подтверждены.
+- Подтверждены критические открытые риски: unauthenticated `/api/barbers/register` принимает admin role; marketplace banner mutation использует public `multer.memoryStorage()` с лимитом 5 GiB. Повторный booking из Kiosk не передаёт поддерживаемый API `idempotency_key`.
+- Текущая npm audit (`--omit=dev`): 2 critical и 17 high среди 27 advisories; выполнить reachability triage и исправить runtime dependencies.
+- Исторические `.env` secrets были в Git history; актуальный rotation/revocation status неизвестен. Локальный service credential не читается аудитом, его deployment ownership/rotation status следует подтвердить.
+- Production DB, PM2, reverse proxy, backup restore, внешние уведомления и device journeys не проверялись; фактический production state остаётся UNKNOWN за пределами health endpoint.
+
+# Transfer notification security notes (2026-10-18)
+
+- FCM token registration is employee-JWT protected; a token is associated with one employee and a refreshed token transfers ownership on upsert. Logout intentionally does not delete registrations, preserving the project requirement; when another employee registers on that device, ownership is updated.
+- Transfer recovery is scoped in SQL to the authenticated initiating employee. Push payloads contain transfer identifiers/status and sanitized optional rejection text; no token or credential is logged.
+- Provider errors are logged by safe error code only and do not change the committed transfer outcome. Firebase Admin credentials remain server-side and must not be copied into the mobile app.

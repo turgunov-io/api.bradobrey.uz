@@ -234,3 +234,14 @@
 # 2026-10-12
 
 - Fixed employee cross-branch work context: added access and active-branch persistence, branch selection during login, server-side branch authorization, and active-branch-aware kiosk/marketplace booking and Verifix flows.
+
+# 2026-10-18 — barber transfer outcome notifications
+
+- Address transfer outcomes to the initiating employee room, persist a recipient inbox record, and provide authenticated cursor-based recovery after reconnect.
+- Added employee Android/iOS FCM token registration backed by existing Firebase Admin service configuration. Push runs after commit; missing tokens/provider failures are safely diagnosed and do not undo the queue transition.
+- Backend regression tests cover accept/reject recipient, authorization, idempotency, push failure, missing token, token registration, and scoped recovery. Android debug APK builds successfully with the supplied config. Production deployment and real-device FCM delivery were not performed.
+# 2026-10-18
+
+- Fixed marketplace client call notifications over Socket.IO: validated marketplace client JWTs can join only their own client room, and queue calls are emitted to that room as `queue.client_called` and `queue:call`.
+
+- Verifix schedule saves now reject same-day end times that are not after start; Chimgan Monday–Saturday personal schedules were corrected to 10:00–20:00.

@@ -318,3 +318,56 @@
 - Kiosk roster projection now keeps visibility tied to a valid, branch-scoped persisted session while preserving the actual `employee_active_branches.is_on_shift` value. This prevents an authenticated off-shift barber from being incorrectly displayed as on-shift/available.
 - Added lifecycle regression coverage for minimize/close/screen-off/network loss/socket reconnect/API process restart, idempotent card projection, explicit logout, expiry/revocation/archive, and branch isolation. These are backend state/projection tests; a real tablet and production schema/runtime were not exercised.
 - Production deployment completed on 2026-10-16: applied the additive `db/postgres/employee_branches.sql` migration in a transaction, overlaid the session-aware API files, and restarted only PM2 app `BRADOBREY-BARBER`. The API remained online and `/health` returned HTTP 200; dashboard PID was unchanged. Pre-deploy source backup is `/var/backups/api.bradobrey.uz-session-presence-pre-20261016.tar.gz`. Physical kiosk-device and authenticated end-to-end validation remain outstanding.
+# Full service/system audit (2026-10-16)
+
+- Consolidated report: `audit-reports/SYSTEM_SERVICE_AUDIT_2026-10-16.md`.
+- Local backend suite: 108/108 passed. A background DB-related request logged `ECONNREFUSED 127.0.0.1:5432` but did not fail the suite; PostgreSQL integration was disabled and production schema remains unverified.
+- Live `GET https://api.bradobrey.uz/health` returned HTTP 200; this route is liveness-only and must not be used as DB/deployment readiness evidence.
+- Critical current-code risks: public `POST /api/barbers/register` accepts caller-selected `admin` role; public Marketplace banner uploads use memory storage and accept up to 5 GiB. Single marketplace booking and financial completion are not fully atomic. Kiosk app does not send the API's supported `idempotency_key`, risking duplicate orders after lost responses.
+- Socket.IO room join is protected in current code by JWT/kiosk ticket and branch authorization; prior broad open-room finding is stale for current checkout, but public DTO PII and production rollout need retest.
+- `npm audit --omit=dev`: 27 advisories (2 critical, 17 high, 7 moderate, 1 low); fix and retest runtime graph, triaging PM2/tool-only dependency paths.
+- No production DB, PM2, proxy, backup/restore, or device journey could be verified. Historical `.env` credentials existed in Git history; current rotation/revocation status is unknown. Do not infer deployment commit from health status.
+
+# Focused backend audit, Socket.IO excluded (2026-10-17)
+
+- Full current-checkout findings and remediation order: `audit-reports/BACKEND_AUDIT_2026-10-17.md`.
+- `npm test`: 108/108 passed; no PostgreSQL integration or production access was used.
+- Current source confirms unauthenticated employee provisioning/management, finance snapshot writes, and Marketplace barbershop/banner mutations; the staff directory exposes internal fields. Socket.IO was intentionally out of scope.
+- The tracked `.env.example` has credential-shaped Telegram/OTP values; validity is unknown and values are redacted in the audit. Verify out of band and rotate if active.
+- Kiosk Marketplace booking writes are not atomic. Health is liveness-only; shutdown does not close server/pool; the schema runner omits `expenses.sql` and `barber_location_control.sql`.
+- `npm audit --omit=dev` reports 2 critical and 17 high advisories; Socket.IO-specific dependency findings are excluded from the focused report. Production dependency reachability and deployment state remain unverified.
+
+# Telegram bot promotional-message investigation (2026-10-17)
+
+- Screenshots show unsolicited promotional message bubbles in the bot conversation, not Telegram's sponsored UI bar above a chat.
+- Current Telegram backend handlers only send OTP and phone verification/onboarding prompts; no ad copy/dispatch path was found.
+- A Telegram-token-shaped value exists in tracked `.env.example` history (observed in commits dated 2026-10-07 and 2026-10-14); local `.env` has no `TELEGRAM_BOT_TOKEN`, so active production token comparison is unavailable. Treat the tracked value as exposed, but do not claim compromise proven.
+- Investigation and safe containment steps: `audit-reports/TELEGRAM_BOT_AD_SPAM_2026-10-17.md`. Production/Telegram services were not accessed; token revocation and deployment updates remain owner/operator action.
+
+# Barber transfer outcome notifications (2026-10-18)
+
+- Socket outcome notifications target `employee:<from_barber_id>`; `branch:<id>` receives only generic queue refresh. The API stores outcomes and offers `GET /api/barbers/queue/transfers/outcomes` for client recovery.
+- The Barber Android client registers FCM tokens at `/api/notifications/fcm-token`. Server delivery reuses `FIREBASE_SERVICE_ACCOUNT_JSON` through Firebase Admin. Never store or print the service credential in project docs/logs.
+- Client Android Firebase app config is provided at `C:\project\bradobrey_barber\android\app\google-services.json`; its registered package was verified as `com.bradobrey_pro.uz`, and the debug APK built successfully on 2026-10-18. Real-device FCM delivery remains unverified. Local backend `FIREBASE_SERVICE_ACCOUNT_JSON` is missing or invalid; production configuration is unknown and rollout was not authorized.
+
+# Production transfer notification check (2026-10-18)
+
+- Read-only checks against `https://api.bradobrey.uz`: `/health` returned HTTP 200 (liveness only); existing `/api/barbers/queue/transfers/pending` and `/api/notifications` returned the expected unauthenticated HTTP 401.
+- `GET /api/barbers/queue/transfers/outcomes` returned HTTP 404, and an unauthenticated `POST /api/notifications/fcm-token` returned HTTP 404. The Barber transfer outcome recovery and FCM token registration routes are not deployed in the production API currently checked.
+- No authenticated employee push token or FCM delivery test was attempted. No production data/configuration was read or changed; the deployed commit and Firebase Admin credential state remain unverified.
+
+# Queue transfer outcome notifications production release (2026-10-18)
+
+- Deployed API notification changes to `95.46.96.213` by reviewed file overlay; the production Git checkout was not pulled/reset. The source rollback archive is `/var/backups/api.bradobrey.uz-transfer-notifications-pre-20261018-212702.tar.gz`.
+- Applied the additive `db/postgres/notifications.sql` migration transactionally; verified `public.employee_push_tokens` exists.
+- Restarted only PM2 process `BRADOBREY-BARBER` (new PID 1761395). It is online; `bradobrey-dashboard` remained online with PID 1568203.
+- Production `/health` returned HTTP 200. The new transfer-outcomes and FCM-token routes returned HTTP 401 without credentials, confirming route registration and auth enforcement (previously 404). No user notification was sent.
+- Five changed API JavaScript files passed production `node --check`. Device-level FCM delivery is still pending Barber App rollout/token registration; no authenticated live accept/reject workflow was exercised.
+
+# Verifix schedule audit (2026-10-18)
+
+- Branch schedule UI renders every active row individually. One branch-wide row plus a matching employee-specific override is expected under the documented fallback model, so the two lines per weekday in the report are not automatically duplicate records. Applying the branch week schedule replaces generic rows but deliberately preserves employee rows.
+- Correction after checking production source: `findSchedule()` selects `barber_id` and prioritizes matching employee schedules. The prior audit claim that this field was omitted was false; see `audit-reports/verifix-schedule-duplicates/20261018-current-state.md`. No schedule code change or restart was needed for that claim.
+- Manual schedule creation inserts unconditionally and the schema lacks a unique constraint, so actual active duplicates within the same scope/day remain possible. API list only includes active entries in the dashboard because the dashboard filters the response client-side.
+- A read-only aggregate query of active Chimgan schedules confirmed one branch-default and one employee override on each weekday, with no same-scope duplicates. The six Monday–Saturday personal overrides were subsequently corrected to 10:00–20:00 at the owner's direction; Sunday 00:00–23:00 was preserved.
+- Follow-up fix on 2026-10-18: after the owner said “fix it now,” treated the shown 10:00–20:00 form values as the intended personal schedule. Updated its six Monday–Saturday Chimgan rows transactionally to end at 20:00; Sunday 00:00–23:00 and all generic rows were left intact. Added same-day end-after-start validation to API create/update/bulk paths and the Dashboard schedule forms. Backed up the source files/build and prior rows under `/var/backups`; API and Dashboard are online after restart.

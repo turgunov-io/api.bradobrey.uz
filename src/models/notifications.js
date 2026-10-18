@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const webpush = require('web-push');
 const { db } = require('../config/postgres');
 const { classifyCompletedOrder } = require('../services/employeeQuality');
+const marketplacePush = require('../services/marketplacePush');
 const EMPLOYEE_ROLES = ['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'super-barber', 'barber'];
 
 function configureWebPush() {
@@ -39,6 +40,14 @@ async function ensureNotificationsTable() {
           updated_at timestamptz not null default now()
         );
         create index if not exists push_subscriptions_user_idx on push_subscriptions (user_id);
+        create table if not exists employee_push_tokens (
+          token text primary key,
+          user_id uuid not null references users(id) on delete cascade,
+          platform text not null check (platform in ('ANDROID', 'IOS')),
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+        create index if not exists employee_push_tokens_user_idx on employee_push_tokens (user_id);
     `);
 }
 
@@ -196,7 +205,93 @@ async function sendPushToUser(userId, payload) {
     return summary;
 }
 
+function transferOutcomeCopy(status) {
+    return status === 'accepted'
+        ? { title: 'Запрос на смену барбера принят', body: 'Другой барбер принял клиента.' }
+        : { title: 'Запрос на смену барбера отклонён', body: 'Другой барбер отклонил клиента.' };
+}
+
+async function sendQueueTransferPush({ userId, transferId, entryId, status, fromBarberId, toBarberId, branchId, reason, notificationId }) {
+    const copy = transferOutcomeCopy(status);
+    let tokens;
+    try {
+        const result = await db.query(
+            'select token from employee_push_tokens where user_id = $1',
+            [userId],
+        );
+        tokens = result.rows || [];
+    } catch (_error) {
+        console.warn('[queue-transfer-push] delivery skipped', { transferId, reason: 'token_lookup_failed' });
+        return { delivered: 0, reason: 'token_lookup_failed' };
+    }
+
+    if (!tokens.length) {
+        console.warn('[queue-transfer-push] delivery skipped', { transferId, reason: 'no_registered_tokens' });
+        return { delivered: 0, reason: 'no_registered_tokens' };
+    }
+
+    let delivered = 0;
+    for (const { token } of tokens) {
+        try {
+            const result = await marketplacePush.sendFcmNotification({
+                token,
+                ...copy,
+                channelId: 'queue_transfer_outcomes',
+                data: {
+                    type: 'queue_transfer_outcome',
+                    ...(notificationId ? { notification_id: notificationId } : {}),
+                    transfer_id: transferId,
+                    entry_id: entryId,
+                    result: status,
+                    from_barber_id: fromBarberId,
+                    to_barber_id: toBarberId,
+                    branch_id: branchId,
+                    ...(reason ? { reason } : {}),
+                },
+            });
+            if (result.delivered) {
+                delivered += 1;
+            } else {
+                console.warn('[queue-transfer-push] delivery skipped', { transferId, reason: result.reason || 'provider_unavailable' });
+            }
+        } catch (error) {
+            const code = String(error?.code || 'provider_error');
+            if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(code)) {
+                await db.query(
+                    'delete from employee_push_tokens where user_id = $1 and token = $2',
+                    [userId, token],
+                ).catch(() => {});
+            }
+            console.warn('[queue-transfer-push] delivery failed', { transferId, reason: code });
+        }
+    }
+
+    return { delivered, reason: delivered ? null : 'delivery_failed' };
+}
+
 class Notifications {
+    async saveFcmToken(req, res) {
+        const payload = authenticate(req, res); if (!payload) return;
+        const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+        const platform = String(req.body?.platform || '').trim().toUpperCase();
+        if (!token || token.length > 4096 || !['ANDROID', 'IOS'].includes(platform)) {
+            return res.status(400).json({ error: 'Valid token and platform are required' });
+        }
+        try {
+            await db.query(`
+                insert into employee_push_tokens (token, user_id, platform, updated_at)
+                values ($1, $2, $3, now())
+                on conflict (token) do update
+                    set user_id = excluded.user_id,
+                        platform = excluded.platform,
+                        updated_at = now()
+            `, [token, payload.sub || payload.id, platform]);
+            return res.status(201).json({ registered: true });
+        } catch (error) {
+            return res.status(500).json({ error: 'Failed to register push token' });
+        }
+    }
+
     async savePushSubscription(req, res) {
         const payload = authenticate(req, res); if (!payload) return;
         const subscription = req.body || {};
@@ -275,6 +370,7 @@ module.exports = {
     notifications: new Notifications(),
     createSuspiciousOrderNotifications,
     createLocationWarningNotifications,
+    sendQueueTransferPush,
     ensureNotificationsTable,
-    _private: { normalizePersistedQualityAssessment },
+    _private: { normalizePersistedQualityAssessment, transferOutcomeCopy },
 };

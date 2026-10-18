@@ -101,6 +101,11 @@ const normalizeTime = (value) => {
   return `${match[1]}:${match[2]}:${match[3] || '00'}`;
 };
 
+const isValidShiftTimeRange = (startTime, endTime) => {
+  if (!startTime || !endTime) return true;
+  return startTime < endTime;
+};
+
 const normalizeDate = (value) => {
   const text = normalizeText(value);
   return text && /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
@@ -669,8 +674,8 @@ class Verifix {
     const end = normalizeTime(body.end_time);
     const grace = body.grace_minutes ?? 0;
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !uuid.test(id)) || new Set(ids).size !== ids.length || !start || !end || start === end || !Number.isInteger(grace) || grace < 0 || grace > 2147483647) {
-      return res.status(400).json({ error: 'Provide unique branch_ids, different start/end times and non-negative integer grace_minutes' });
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !uuid.test(id)) || new Set(ids).size !== ids.length || !start || !end || !isValidShiftTimeRange(start, end) || !Number.isInteger(grace) || grace < 0 || grace > 2147483647) {
+      return res.status(400).json({ error: 'Provide unique branch_ids, an end time after the start time, and non-negative integer grace_minutes' });
     }
     if (!['admin_network', 'admin'].includes(auth.role) && ids.some(id => id !== auth.branchId)) {
       return res.status(403).json({ error: 'Cannot change schedules for other branches' });
@@ -761,6 +766,9 @@ class Verifix {
       if (body.end_time !== undefined && body.end_time !== null && body.end_time !== '' && !endTime) {
         return res.status(400).json({ error: 'end_time must be HH:mm or HH:mm:ss' });
       }
+      if (isWorking && !isValidShiftTimeRange(startTime, endTime)) {
+        return res.status(400).json({ error: 'end_time must be later than start_time' });
+      }
 
       const { data, error } = await db
         .from('barber_work_schedules')
@@ -793,6 +801,14 @@ class Verifix {
       const { id } = req.params || {};
       const body = req.body || {};
       if (!id) return res.status(400).json({ error: 'schedule id is required' });
+
+      const { data: currentSchedule, error: currentScheduleError } = await db
+        .from('barber_work_schedules')
+        .select('start_time, end_time')
+        .eq('id', id)
+        .maybeSingle();
+      if (currentScheduleError) return res.status(500).json({ error: currentScheduleError.message });
+      if (!currentSchedule) return res.status(404).json({ error: 'Schedule not found' });
 
       const update = { updated_at: new Date().toISOString() };
       const requestedIsWorking = body.is_working === undefined
@@ -847,6 +863,12 @@ class Verifix {
       if (requestedIsWorking === true && (update.start_time === null || body.start_time === undefined)) {
         return res.status(400).json({ error: 'start_time is required on working days' });
       }
+      const remainsWorking = requestedIsWorking ?? Boolean(currentSchedule.start_time);
+      const effectiveStartTime = update.start_time === undefined ? currentSchedule.start_time : update.start_time;
+      const effectiveEndTime = update.end_time === undefined ? currentSchedule.end_time : update.end_time;
+      if (remainsWorking && !isValidShiftTimeRange(effectiveStartTime, effectiveEndTime)) {
+        return res.status(400).json({ error: 'end_time must be later than start_time' });
+      }
 
       const { data, error } = await db
         .from('barber_work_schedules')
@@ -891,4 +913,5 @@ class Verifix {
 
 module.exports = Object.assign(new Verifix(), {
   recordActivityEvent,
+  _private: { isValidShiftTimeRange },
 });

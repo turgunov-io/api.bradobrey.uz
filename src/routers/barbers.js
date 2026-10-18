@@ -24,6 +24,7 @@ router.get('/location-events', (req, res) => location.listLocationEvents(req, re
 router.patch("/me", upload.single('file'), (req, res) => barbers.updateProfile(req, res));
 router.get("/queue", (req, res) => barbers.myQueue(req, res));
 router.get('/queue/transfers/pending', (req, res) => queueTransfers.pending(req, res));
+router.get('/queue/transfers/outcomes', (req, res) => queueTransfers.outcomes(req, res));
 router.patch('/queue/transfers/:transferId/accept', (req, res) => queueTransfers.accept(req, res));
 router.patch('/queue/transfers/:transferId/reject', (req, res) => queueTransfers.reject(req, res));
 router.get("/queue/:id/reassign-options", (req, res) => barbers.queueReassignOptions(req, res));

@@ -197,7 +197,7 @@ Before enabling this workflow against a database, apply
 4. Request a manual transfer with `PATCH /api/barbers/queue/:id/reassign`, body `{ "barber_id": "<target barber id>" }`, and an optional `Idempotency-Key`.
 5. A valid request returns `202` and changes the entry to `status=transfer_pending`. The target barber must then call `PATCH /api/barbers/queue/transfers/:transferId/accept` or `/reject`.
 6. On acceptance, the backend assigns the entry to the target barber, restores `status=waiting`, clears `started_at`, sets `swapped_flag=true`, and places the entry after the target barber's active queue tail. Rejection or expiry returns it to the original barber/status.
-7. Backend emits `queue:update` transfer events. Clients must refetch after the response and after reconnect; Socket.IO events are not a durable delivery mechanism.
+7. Backend emits `queue:update` transfer events. Outcome events include `transferId`, `fromBarberId`, `toBarberId`, `barberId`, and `branchId`, allowing the originating Barber App to notify the requesting barber on acceptance/rejection. Clients must refetch after the response and after reconnect; Socket.IO events are not a durable delivery mechanism.
 
 ## User Journey Map (Blocks 1 and 2)
 

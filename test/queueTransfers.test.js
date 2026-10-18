@@ -43,6 +43,16 @@ test('transfer workflow locks the order and transfer before applying state trans
   assert.match(source, /expires_at\)\.getTime\(\) <= Date\.now\(\)/);
 });
 
+test('transfer outcome socket events identify the transfer participants', () => {
+  const source = fs.readFileSync(path.join(root, 'src/models/queueTransfers.js'), 'utf8');
+  const outcomeEvent = source.slice(source.indexOf("type: `transfer_${outcome.transferStatus}`"));
+
+  assert.match(outcomeEvent, /transferId: String\(transfer\.id\)/);
+  assert.match(outcomeEvent, /fromBarberId: String\(transfer\.from_barber_id\)/);
+  assert.match(outcomeEvent, /toBarberId: String\(transfer\.to_barber_id\)/);
+  assert.match(outcomeEvent, /branchId: String\(updatedOrder\.rows\[0\]\.branch_id\)/);
+});
+
 test('active transfer request keeps stale and recipient eligibility checks in the durable path', () => {
   const transferSource = fs.readFileSync(
     path.join(root, 'src/models/queueTransfers.js'),
