@@ -27,6 +27,13 @@ test('accepts a valid employee token from handshake auth', () => {
   assert.equal(extractSocketToken(socket({ auth: { token } })), token);
 });
 
+test('accepts a marketplace client token for the client-scoped socket', () => {
+  const token = jwt.sign({ sub: 'client-1', role: 'marketplace' }, secret);
+  const result = verifySocketToken(socket({ auth: { token } }), secret);
+  assert.equal(result.payload.sub, 'client-1');
+  assert.equal(result.payload.role, 'marketplace');
+});
+
 test('branch access uses server-side state and rejects branch spoofing', () => {
   const payload = { sub: 'employee-1', role: 'barber', branchId: branchA };
   const state = { user: { branch_id: branchA }, barber: { branch_id: branchA }, activeBranches: [] };

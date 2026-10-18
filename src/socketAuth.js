@@ -8,6 +8,7 @@ const SOCKET_EMPLOYEE_ROLES = new Set([
   'barber',
   'super-barber',
   'super-manager',
+  'marketplace',
 ]);
 
 const isSafeBranchId = (value) => /^[0-9a-f-]{20,64}$/i.test(String(value || ''));

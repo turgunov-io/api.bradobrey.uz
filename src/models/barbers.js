@@ -1351,6 +1351,10 @@ const emitCallEvent = (io, entry) => {
     room.emit('queue:update', payload);
     room.emit('queue.client_called', payload);
     room.emit('queue:call', payload);
+    if (entry.client_id) {
+        io.to(`client:${entry.client_id}`).emit('queue.client_called', payload);
+        io.to(`client:${entry.client_id}`).emit('queue:call', payload);
+    }
 };
 
 const emitLifecycleEvent = (io, entry, { type, eventName }) => {

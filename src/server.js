@@ -62,6 +62,18 @@ io.use(async (socket, next) => {
       return next();
     }
     const { payload } = verifySocketToken(socket, process.env.JWT_SECRET);
+    if (payload.role === 'marketplace') {
+      const { data: client, error } = await db.from('marketplace_clients')
+        .select('id, is_active').eq('id', payload.sub || payload.id).maybeSingle();
+      if (error) throw error;
+      if (!client || client.is_active === false) {
+        const error = new Error('Socket session is no longer valid');
+        error.data = { code: 'SOCKET_SESSION_REVOKED' };
+        return next(error);
+      }
+      socket.data.auth = { kind: 'marketplace', payload, state: { client } };
+      return next();
+    }
     const state = await loadSocketAccessState(payload.sub || payload.id);
     if (!state.user || state.barber?.is_archived === true) {
       const error = new Error('Socket session is no longer valid');
@@ -97,7 +109,11 @@ io.on('connection', (socket) => {
     socket.join(`branch:${branchId}`);
     joinedBranches.add(branchId);
   }
-  if (socket.data.auth?.kind !== 'kiosk') {
+  if (socket.data.auth?.kind === 'marketplace') {
+    const clientId = socket.data.auth.payload.sub || socket.data.auth.payload.id;
+    socket.join(`client:${clientId}`);
+  }
+  if (!['kiosk', 'marketplace'].includes(socket.data.auth?.kind)) {
     const employeeId = socket.data.auth?.payload?.sub || socket.data.auth?.payload?.id;
     if (employeeId) socket.join(`employee:${employeeId}`);
   }
