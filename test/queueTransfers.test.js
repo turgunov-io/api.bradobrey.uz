@@ -89,6 +89,8 @@ test('reassignment availability merges active temporary-branch employees', () =>
   assert.match(availability, /branch_id: branchId/);
   assert.match(availability, /session_id, session_expires_at/);
   assert.match(availability, /\.gt\('session_expires_at'/);
+  assert.match(availability, /\.filter\(\(assignment\) => Boolean\(assignment\.session_id\)\)/);
+  assert.doesNotMatch(availability, /\.not\(/);
   assert.doesNotMatch(availability, /\.gte\('updated_at'/);
 });
 

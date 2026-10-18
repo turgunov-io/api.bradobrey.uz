@@ -1168,7 +1168,6 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
         .select('employee_id, branch_id, is_on_shift, session_id, session_expires_at')
         .eq('branch_id', branchId)
         .eq('is_on_shift', true)
-        .not('session_id', 'is', null)
         .gt('session_expires_at', new Date().toISOString());
     if (activeAssignmentsError && !isMissingActiveEmployeeBranches(activeAssignmentsError)) {
         throw new Error(activeAssignmentsError.message);
@@ -1176,7 +1175,9 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
 
     const hasActiveBranchTable = !activeAssignmentsError;
     const activeByEmployeeId = new Map(
-        (activeAssignments || []).map((assignment) => [String(assignment.employee_id), assignment])
+        (activeAssignments || [])
+            .filter((assignment) => Boolean(assignment.session_id))
+            .map((assignment) => [String(assignment.employee_id), assignment])
     );
     const activeEmployeeIds = Array.from(activeByEmployeeId.keys());
     let activeBarbers = [];
