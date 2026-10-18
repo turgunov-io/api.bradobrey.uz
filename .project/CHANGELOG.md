@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-19 — Restore full Dashboard permissions for the production admin
+
+- Production `admin` had five explicit `user_permissions` rows created by the
+  one-time employee-quality backfill. Since a non-empty set is authoritative,
+  these rows overrode the full admin preset. Backed up and removed only this
+  account's rows; the existing `admin` role now resolves to the 26-permission
+  full preset. No user role, password, or other account was changed.
+- Global admins can now create expenses for the selected branch when they have
+  no home branch. Branch-scoped admin and manager roles cannot override their
+  authenticated branch.
+- Production permission backup:
+  `/var/backups/bradobrey-admin-permissions-20261019/admin-permissions-before.json`.
+- Dashboard tests: 57/57 passed. API tests: 145/145 passed. Production API
+  authenticated reads for profile, employees, branches, expenses, penalties,
+  notifications, Verifix settings, and global employee statistics returned
+  HTTP 200; unauthenticated protected expense/statistics requests returned 401.
+
 ## 2026-10-18 — Reassignment availability and server midnight logout
 
 - Reassignment candidates and transfer requests now validate the persisted

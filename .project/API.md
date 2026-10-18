@@ -1,5 +1,13 @@
 # API contracts
 
+## Dashboard expense branch selection
+
+`POST /api/expenses` accepts `branch_id` (or `branchId`) for `admin`,
+`admin_network`, and `super-manager`; this is required for global administrators
+without a home branch. Other roles continue to use their authenticated branch,
+so a request body cannot override their branch scope. Expense dates remain
+server-derived.
+
 ## Client queue call socket
 
 Marketplace clients can connect to Socket.IO with their existing marketplace JWT in `auth.token` (or `auth.accessToken`). The server verifies the token and confirms the client account is active, then joins only `client:<client_id>`. When the assigned barber calls a queue entry, that client receives `queue.client_called` and `queue:call` with the queue entry and branch identifiers. The event is transient; clients should refresh queue state after connecting or reconnecting. Employee and kiosk branch room access rules are unchanged.

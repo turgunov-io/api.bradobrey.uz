@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
+const GLOBAL_ADMIN_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
 const EXPENSE_TYPE = 'expense';
 const PERMISSIONS = {
   read: 'expenses.read',
@@ -108,6 +109,12 @@ const requirePermission = (access, permission, res) => {
   return false;
 };
 
+const resolveCreateBranchId = (access, body = {}) => (
+  GLOBAL_ADMIN_ROLES.has(access?.role)
+    ? text(body.branch_id || body.branchId) || access.branchId
+    : access?.branchId
+);
+
 const validate = (body, partial = false) => {
   const payload = {};
   if (body.category !== undefined || !partial) {
@@ -205,7 +212,8 @@ module.exports = {
     let access;
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.create, res)) return;
-    if (!access.branchId) return res.status(422).json({ error: 'User branch is not assigned' });
+    const branchId = resolveCreateBranchId(access, req.body || {});
+    if (!branchId) return res.status(422).json({ error: 'Branch is required' });
     // New expenses always belong to the calendar day on which they are created.
     // Do not trust a client-provided date, otherwise a manager can move an
     // expense into another accounting period from the mobile app.
@@ -223,7 +231,7 @@ module.exports = {
         `insert into warehouse_purchases
          (branch_id, supplier_name, purchased_at, status, total_amount, metadata)
          values ($1, $2, $3, 'received', $4, $5::jsonb) returning id`,
-        [access.branchId, draft.payload.name, draft.payload.spent_at, draft.payload.amount, JSON.stringify(metadata)]);
+        [branchId, draft.payload.name, draft.payload.spent_at, draft.payload.amount, JSON.stringify(metadata)]);
       const result = await byId(created.rows[0].id);
       return res.status(201).json({ expense: toItem(result.rows[0], access) });
     } catch (error) { return sendDbError(res, error); }
@@ -281,4 +289,6 @@ module.exports = {
       return res.status(204).send();
     } catch (error) { return sendDbError(res, error); }
   },
+
+  resolveCreateBranchId,
 };

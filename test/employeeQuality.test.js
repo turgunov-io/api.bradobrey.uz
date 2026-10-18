@@ -124,6 +124,8 @@ test('eligibility requires sample, coverage, employment record, and authoritativ
 });
 
 test('admin roles receive the full preset when no per-user permissions are provisioned', () => {
+  assert.equal(effectivePermissions('admin', []).size, 26);
+  assert.equal(effectivePermissions('admin_network', []).size, 26);
   assert.equal(effectivePermissions('admin', []).has('statistics.read.global'), true);
   assert.equal(effectivePermissions('admin_network', []).has('history.read.branch'), true);
   assert.equal(effectivePermissions('admin', [{ permission: 'statistics.read.branch' }]).size, 1);

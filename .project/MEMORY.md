@@ -414,3 +414,9 @@
 
 - Browser push is stored in `push_subscriptions` and uses VAPID/Web Push; `employee_push_tokens` is the separate native Android/iOS FCM path. Existing browser endpoints already provide per-browser identity and must remain independently registered.
 - `POST /api/notifications/push-subscription/status` checks a subscription only by the authenticated user ID plus its endpoint. `POST /api/notifications/test-push` may receive an endpoint to target only that owned subscription; omission preserves legacy user-wide sends.
+
+# Production admin permission restoration (2026-10-19)
+
+- The production `admin` account had exactly five `user_permissions` rows from the one-time employee-quality role-compatible backfill. Those rows were treated as an explicit override, so Dashboard and quality/statistics authorization returned only those permissions instead of the role preset. JWTs do not contain permission claims; `/api/barbers/me` reads current rows from PostgreSQL on every request.
+- Backed up the target account's permission rows to `/var/backups/bradobrey-admin-permissions-20261019/admin-permissions-before.json` (mode 0600), then removed only those five rows transactionally. Role remains `admin`; the empty set now selects the existing 26-permission admin preset. Non-target permission rows were not modified.
+- Production checks confirmed `/api/barbers/me` returns the target admin with an empty explicit row list; Dashboard's existing empty-admin mapping yields all 26 recognized permissions. Authenticated smoke checks for employees, branches, expenses, penalties, notifications, Verifix settings, and global statistics returned 200; unauthenticated protected expenses/statistics returned 401. Expense creation for global admins must use selected `branch_id` because this account has no home branch.
