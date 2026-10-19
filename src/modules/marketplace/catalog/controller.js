@@ -1,10 +1,10 @@
 const kiosk = require('../../../models/kiosk');
 const { normalizeId, parseBoolean } = require('./helpers');
 const service = require('./service');
+const { sendPublicError } = require('../../../utils/publicError');
 
 const handleError = (res, error) => {
-  const status = error?.statusCode || error?.status || 500;
-  return res.status(status).json({ error: error?.message || 'Internal server error' });
+  return sendPublicError(res, error);
 };
 
 class MarketplaceCatalogController {
@@ -25,7 +25,7 @@ class MarketplaceCatalogController {
     } catch (error) {
       if (error?.code || error?.statusCode) {
         console.info('[marketplace-booking-rejected]', JSON.stringify({
-          code: error.code || error.message,
+          code: error.code || 'UNKNOWN',
           status: error.statusCode || error.status || 500,
           branch_id: req.body?.branch_id || null,
           barber_id: req.body?.barber_id || null,
@@ -40,7 +40,7 @@ class MarketplaceCatalogController {
   async getBarbershop(req, res) {
     try {
       const id = normalizeId(req.params?.id);
-      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!id) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
       const item = await service.getCatalogBarbershop(id);
       return res.json({ item });
     } catch (error) {
@@ -52,7 +52,7 @@ class MarketplaceCatalogController {
   async listBranches(req, res) {
     try {
       const id = normalizeId(req.params?.id);
-      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!id) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
       const active = parseBoolean(req.query?.active, true);
       const result = await service.listCatalogBranches({ barbershopId: id, active });
       return res.json(result);
@@ -65,7 +65,7 @@ class MarketplaceCatalogController {
   async branchDetails(req, res) {
     try {
       const id = normalizeId(req.params?.id);
-      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!id) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
       const result = await service.getBranchDetails(id);
       return res.json(result);
     } catch (error) {
@@ -77,7 +77,7 @@ class MarketplaceCatalogController {
   async branchBarbers(req, res) {
     try {
       const id = normalizeId(req.params?.id);
-      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!id) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
       const result = await service.listBranchBarbers(id);
       return res.json(result);
     } catch (error) {
@@ -89,7 +89,7 @@ class MarketplaceCatalogController {
   async branchServices(req, res) {
     try {
       const id = normalizeId(req.params?.id);
-      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!id) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
       const result = await service.listBranchServices(id);
       return res.json(result);
     } catch (error) {
@@ -101,7 +101,7 @@ class MarketplaceCatalogController {
   async paymentOptions(req, res) {
     try {
       const id = normalizeId(req.params?.id);
-      if (!id) return res.status(400).json({ error: 'id is required' });
+      if (!id) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
       const result = await service.getPaymentOptions(id);
       return res.json(result);
     } catch (error) {
@@ -123,10 +123,10 @@ class MarketplaceCatalogController {
   async availability(req, res) {
     try {
       const branchId = normalizeId(req.params?.id);
-      if (!branchId) return res.status(400).json({ error: 'id is required' });
+      if (!branchId) return sendPublicError(res, { publicCode: 'ID_REQUIRED' }, { status: 400 });
 
       const barberId = normalizeId(req.query?.barber_id);
-      if (!barberId) return res.status(400).json({ error: 'barber_id is required' });
+      if (!barberId) return sendPublicError(res, { publicCode: 'BARBER_ID_REQUIRED' }, { status: 400 });
 
       const serviceIds = Array.isArray(req.query?.service_ids)
         ? req.query.service_ids.map(normalizeId).filter(Boolean)

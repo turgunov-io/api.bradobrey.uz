@@ -17,21 +17,41 @@ const isMissingCashbackSchemaError = (error) => {
   return code === '42P01' || code === '42703' || message.includes('cashback_transactions') || message.includes('cashback_wallets');
 };
 
-function authClient(req, res) {
+async function authClient(req, res) {
   const header = String(req.headers.authorization || '');
   if (!header.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authorization token is required' });
     return null;
   }
+  let payload;
   try {
-    const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET);
-    if (payload?.role !== MARKETPLACE_ROLE || !(payload.sub || payload.id)) {
-      res.status(403).json({ error: 'Only marketplace users can access this resource' });
-      return null;
-    }
-    return String(payload.sub || payload.id);
+    payload = jwt.verify(header.slice(7), process.env.JWT_SECRET);
   } catch (_) {
     res.status(401).json({ error: 'Invalid or expired token' });
+    return null;
+  }
+  if (payload?.role !== MARKETPLACE_ROLE || !(payload.sub || payload.id)) {
+    res.status(403).json({ error: 'Only marketplace users can access this resource' });
+    return null;
+  }
+  const clientId = String(payload.sub || payload.id);
+  try {
+    const clientResult = await pool.query(
+      'select id, is_active from marketplace_clients where id = $1 limit 1',
+      [clientId],
+    );
+    const client = clientResult.rows[0];
+    if (!client) {
+      res.status(403).json({ error: 'USER_NOT_REGISTERED', code: 'USER_NOT_REGISTERED' });
+      return null;
+    }
+    if (client.is_active === false) {
+      res.status(403).json({ error: 'ACCOUNT_DISABLED', code: 'ACCOUNT_DISABLED' });
+      return null;
+    }
+    return clientId;
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
     return null;
   }
 }
@@ -53,7 +73,7 @@ async function getPlatformSetting(key, fallback) {
 }
 
 async function activeBooking(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const result = await pool.query(
     `select b.*, coalesce(json_agg(json_build_object(
@@ -106,7 +126,7 @@ async function activeBooking(req, res) {
 }
 
 async function notifications(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   try {
@@ -125,7 +145,7 @@ async function notifications(req, res) {
 }
 
 async function markNotificationRead(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const result = await pool.query(
     `update marketplace_notifications set read_at = coalesce(read_at, now())
@@ -137,7 +157,7 @@ async function markNotificationRead(req, res) {
 }
 
 async function registerPushToken(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const token = String(req.body?.token || '').trim();
   const previousToken = String(req.body?.previous_token || '').trim();
@@ -161,7 +181,7 @@ async function registerPushToken(req, res) {
 }
 
 async function loyalty(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const client = await getClient(clientId);
   if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
@@ -176,7 +196,7 @@ async function loyalty(req, res) {
 }
 
 async function restrictionStatus(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const client = await getClient(clientId);
   if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
@@ -206,7 +226,7 @@ async function restrictionStatus(req, res) {
 }
 
 async function referral(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   try {
     // Reconcile this user's pending referral rewards immediately. The
@@ -290,7 +310,7 @@ async function referral(req, res) {
 }
 
 async function createReview(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const requestId = String(req.body?.request_id || req.get('Idempotency-Key') || '').trim() || null;
   const bookingId = String(req.body?.booking_id || '').trim();
@@ -458,7 +478,7 @@ async function createReview(req, res) {
 }
 
 async function cancelBooking(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const bookingId = String(req.params.id || '').trim();
   const requestId = String(req.body?.request_id || req.get('Idempotency-Key') || '').trim() || null;
@@ -721,7 +741,7 @@ async function cancelBooking(req, res) {
 }
 
 async function updateReview(req, res) {
-  const clientId = authClient(req, res);
+  const clientId = await authClient(req, res);
   if (!clientId) return;
   const reviewId = String(req.params.id || '').trim();
   const rating = Number(req.body?.rating);

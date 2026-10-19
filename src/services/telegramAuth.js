@@ -400,13 +400,17 @@ class TelegramAuthService {
     await this.updateChallenge(challengeHash, { locked_until: null, ...(Number(attempts) >= Number(maxAttempts) ? { status: 'failed', used_at: new Date() } : {}) });
   }
 
-  async completeLogin({ challengeHash, phone, telegramUserId, telegramChatId, displayName, firstName, lastName, patronymic, referralCode, language }) {
+  async completeLogin({ challengeHash, phone, telegramUserId, telegramChatId, displayName, firstName, lastName, patronymic, referralCode, language, purpose }) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       const existingResult = await client.query(`select id, email, phone, display_name, first_name, last_name, patronymic, language, is_active, telegram_user_id, telegram_chat_id from marketplace_clients where phone = $1 for update`, [phone]);
       const existing = existingResult.rows[0];
       if (existing?.is_active === false) { await client.query('ROLLBACK'); throw new TelegramAuthError(403, 'ACCOUNT_DISABLED', 'Account is disabled'); }
+      if (purpose === 'login' && !existing) {
+        await client.query('ROLLBACK');
+        throw new TelegramAuthError(403, 'USER_NOT_REGISTERED', 'USER_NOT_REGISTERED');
+      }
       if (existing && ((existing.telegram_user_id && String(existing.telegram_user_id) !== String(telegramUserId)) || (existing.telegram_chat_id && String(existing.telegram_chat_id) !== String(telegramChatId)))) {
         await client.query('ROLLBACK');
         throw new TelegramAuthError(409, 'TELEGRAM_BINDING_CONFLICT', 'This phone is already linked to another Telegram account');
@@ -492,6 +496,7 @@ class TelegramAuthService {
       patronymic: reserved.patronymic || patronymic,
       referralCode: reserved.referral_code,
       language: normalizedLanguage || reserved.language,
+      purpose: reserved.purpose,
     });
     const token = jwt.sign({ sub: account.id, email: account.email || null, phone: account.phone, role: MARKETPLACE_ROLE }, this.getJwtSecret(), { expiresIn: this.env.JWT_EXPIRES_IN || '12h' });
     logTelegramEvent(this.logger, 'otp_verification_succeeded', {

@@ -30,6 +30,7 @@ const telegramAuth = require('./routers/telegramAuth');
 const { ensureNotificationsTable } = require('./models/notifications');
 const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
 const { securityHeaders } = require('./middleware/securityHeaders');
+const { sendPublicError } = require('./utils/publicError');
 
 const app = express();
 
@@ -117,13 +118,12 @@ app.get('/today/date/', (req, res) => {
 // Marketplace App
 app.use('/api/marketplace', marketplace);
 
-app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+app.use((req, res) => sendPublicError(res, null, { status: 404 }));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   console.error(err);
-  const status = err.status || 500;
-  res.status(status).json({ error: err.message || 'Internal server error' });
+  return sendPublicError(res, err);
 });
 
 module.exports = app;

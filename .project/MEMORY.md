@@ -441,3 +441,24 @@
 - Statistics/history date-only filters use `Asia/Tashkent` half-open calendar ranges through `src/utils/statisticsDate.js`; do not revert to UTC `Z` parsing or inclusive end bounds.
 - History responses include `clients.first_visit_date` for period-scoped dashboard new/repeat calculations. Legacy history/statistics handlers return generic 500 codes and log database/provider details server-side.
 - Statistics audit report: `C:\project\bradobrey-audit-report\2026-10-19-statistics\AUDIT_REPORT.md`. No staging/production runtime verification or deployment was performed.
+
+# Marketplace localization/error audit (2026-10-19)
+
+- The mobile client supports `ru`, `uz`, and `en`; `marketplace_clients.language`
+  is constrained to those values in the database schema.
+- Marketplace FCM dispatch now joins the recipient client language and chooses
+  server-owned localized copy. Unknown languages/types fall back to Russian
+  generic copy. Admin test notifications still intentionally accept custom
+  title/body and are not a user-facing localization source.
+- `src/utils/publicError.js` is now used by the global and marketplace catalog
+  paths. `src/middleware/marketplacePublicErrors.js` also normalizes legacy
+  marketplace top-level error responses at the router boundary; migrate the
+  handlers to call the mapper directly as follow-up cleanup.
+- Local verification: 159/159 API tests passed; integration remained skipped
+  because PostgreSQL was unavailable locally; production was not accessed or
+  changed.
+- On 2026-10-19, Telegram Marketplace login was hardened so `purpose=login`
+  never creates a client row. Unknown login identities return
+  `USER_NOT_REGISTERED`; registration retains the creation branch. Protected
+  Marketplace profile, compliance, group-booking, and site-booking paths now
+  confirm the JWT subject still exists and is active in `marketplace_clients`.

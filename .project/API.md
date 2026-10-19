@@ -1,5 +1,29 @@
 # API contracts
 
+## Marketplace authentication and registration boundary
+
+- `purpose=registration` may create a new `marketplace_clients` record after
+  successful Telegram verification; `purpose=login` may only authenticate an
+  existing active record.
+- An unknown login phone returns HTTP 403 with
+  `{ "error": "USER_NOT_REGISTERED", "code": "USER_NOT_REGISTERED" }` and
+  does not insert an account or issue a JWT.
+- Authenticated Marketplace profile, compliance, group-booking, and
+  `source=site` booking paths verify the JWT subject against the authoritative
+  `marketplace_clients` table and reject missing clients with the same code.
+
+## Marketplace error and notification contract
+
+- Marketplace clients should branch on the stable response `code`; `error` is
+  retained as a backward-compatible alias. New server errors must not expose
+  SQL, provider, stack, or configuration details.
+- Global and marketplace catalog handlers now return stable codes through the
+  public error mapper. Legacy marketplace model handlers still need migration
+  to this mapper; the marketplace router boundary currently normalizes their
+  top-level error responses as a compatibility guard.
+- Marketplace FCM uses `marketplace_clients.language` and supports `ru`/`uz`/`en`;
+  the normalized language is included in FCM data and provider webhook payloads.
+
 ## Dashboard expense branch selection
 
 `POST /api/expenses` accepts `branch_id` (or `branchId`) for `admin`,

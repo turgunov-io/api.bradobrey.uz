@@ -43,7 +43,7 @@ class FakePool {
     }
     if (q.startsWith('select challenge_hash, phone, otp_hash')) {
       const usable = this.challenge && !this.challenge.usedAt && this.challenge.status === 'pending';
-      return usable ? { rows: [{ challenge_hash: this.challenge.challengeHash, phone: this.challenge.phone, otp_hash: this.challenge.otpHash, telegram_user_id: this.challenge.telegramUserId, telegram_chat_id: this.challenge.telegramChatId, attempts: this.challenge.attempts, max_attempts: this.challenge.maxAttempts, display_name: this.challenge.displayName, first_name: this.challenge.firstName, last_name: this.challenge.lastName, patronymic: this.challenge.patronymic, language: this.challenge.language }] } : { rows: [] };
+      return usable ? { rows: [{ challenge_hash: this.challenge.challengeHash, phone: this.challenge.phone, otp_hash: this.challenge.otpHash, telegram_user_id: this.challenge.telegramUserId, telegram_chat_id: this.challenge.telegramChatId, attempts: this.challenge.attempts, max_attempts: this.challenge.maxAttempts, display_name: this.challenge.displayName, first_name: this.challenge.firstName, last_name: this.challenge.lastName, patronymic: this.challenge.patronymic, referral_code: this.challenge.referralCode, purpose: this.challenge.purpose, language: this.challenge.language }] } : { rows: [] };
     }
     if (q.startsWith('update telegram_auth_challenges set attempts')) { this.challenge.attempts += 1; return { rows: [] }; }
     if (q.startsWith('update telegram_auth_challenges set status = \'verified\'')) { this.challenge.status = 'verified'; this.challenge.usedAt = true; return { rows: [{ challenge_hash: this.challenge.challengeHash }] }; }
@@ -105,6 +105,21 @@ test('existing Telegram binding can start a new login session', async () => {
   assert.equal(pool.challenge.status, 'awaiting_contact');
   assert.doesNotMatch(bot.messages.at(-1).text, /Ссылка недействительна/);
   await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, contact: { user_id: 42, phone_number: '998901234567' } } });
+  assert.equal(pool.challenge.status, 'pending');
+});
+
+test('Telegram login rejects an unknown phone without creating a Marketplace account', async () => {
+  const pool = new FakePool(); const bot = new FakeBot(); const service = makeService(pool, bot);
+  const { challenge_id: challengeId, linkToken } = await service.sendCode({ purpose: 'login' });
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, text: `/start ${linkToken}` } });
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, contact: { user_id: 42, phone_number: '+998901234567' } } });
+  const code = bot.messages[1].text.match(/\b(\d{6})\b/)[1];
+
+  await assert.rejects(
+    service.verifyCode({ challengeId, code }),
+    (error) => error.code === 'USER_NOT_REGISTERED' && error.status === 403,
+  );
+  assert.equal(pool.account, null);
   assert.equal(pool.challenge.status, 'pending');
 });
 

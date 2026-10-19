@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-10-19 — Marketplace registration/login boundary
+
+- Fixed Telegram login so `purpose=login` cannot create a new
+  `marketplace_clients` row. Unknown phones now receive
+  `USER_NOT_REGISTERED` and no JWT.
+- Added authoritative client existence/active-state checks to protected
+  Marketplace profile, compliance, group-booking, and site-booking paths.
+- Added a regression test for unknown Telegram login; the full local API suite
+  passes. No production deployment or database mutation was performed.
+
+## 2026-10-19 — Marketplace localization/error hardening
+
+- Marketplace FCM notifications now select localized title/body from the
+  recipient's `marketplace_clients.language` (`ru`/`uz`/`en`) and include the
+  normalized language in data/webhook payloads.
+- Global Express errors and marketplace catalog failures now return stable
+  `{ error, code }` values without exposing SQL, provider, or internal
+  messages.
+- Added regression tests for localized push copy and public error sanitization.
+- Local verification: 159/159 API tests passed; PostgreSQL integration remained
+  skipped because no local database connection was available. Production was
+  not accessed or changed.
+
 ## 2026-10-19 — Restore full Dashboard permissions for the production admin
 
 - Production `admin` had five explicit `user_permissions` rows created by the

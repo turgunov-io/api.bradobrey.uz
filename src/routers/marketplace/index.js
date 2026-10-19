@@ -7,9 +7,11 @@ const barbershopsRouter = require('./barbershops');
 const catalogRouter = require('./catalog');
 const complianceRouter = require('./compliance');
 const adminRouter = require('./admin');
+const { marketplacePublicErrors } = require('../../middleware/marketplacePublicErrors');
 
 const marketplaceRouter = express.Router();
 
+marketplaceRouter.use(marketplacePublicErrors);
 marketplaceRouter.use('/catalog', catalogRouter);
 marketplaceRouter.use('/auth', authRouter);
 marketplaceRouter.use('/clients', clientsRouter);

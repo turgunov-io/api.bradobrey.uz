@@ -7,74 +7,80 @@ const PUSH_NOTIFY_CHANNEL = 'marketplace_notification_created';
 const POLL_INTERVAL_MS = Math.max(1000, Number(process.env.MARKETPLACE_PUSH_POLL_MS || 2000));
 
 const notificationCopy = {
-  BOOKING_CREATED: {
-    title: 'Бронирование создано',
-    body: 'Вы добавлены в живую очередь.',
+  ru: {
+    BOOKING_CREATED: ['Бронирование создано', 'Вы добавлены в живую очередь.'],
+    BOOKING_CANCELLED: ['Бронирование отменено', 'Ваше бронирование отменено.'],
+    REFERRAL_BONUS: ['Начислен реферальный бонус', 'Ваш бонус за приглашение доступен в профиле.'],
+    LEVEL_CHANGED: ['Изменился уровень лояльности', 'Проверьте новый уровень и доступные привилегии.'],
+    ACCOUNT_BLOCKED: ['Аккаунт временно ограничен', 'Откройте приложение, чтобы узнать подробности.'],
+    ACCOUNT_BLOCKED_CANCELS: ['Аккаунт временно ограничен', 'Лимит отмен за сегодня превышен. Проверьте подробности в приложении.'],
+    NO_SHOW: ['Неявка зафиксирована', 'Баллы статуса изменены. Проверьте подробности в профиле.'],
+    NO_SHOW_PENALTY: ['Неявка зафиксирована', 'Баллы статуса изменены. Проверьте подробности в профиле.'],
+    YOU_ARE_CALLED: ['Вас вызывают', 'Подойдите к выбранному барберу.'],
+    SERVICE_STARTED: ['Услуга началась', 'Барбер начал обслуживание.'],
+    SERVICE_COMPLETED: ['Услуга завершена', 'Спасибо за визит. Оцените обслуживание в приложении.'],
+    REFERRAL_EXPIRING: ['Реферальный бонус скоро истечёт', 'У вас осталось 30 дней, чтобы воспользоваться реферальной возможностью.'],
+    QUEUE_POSITION_CHANGED: ['Изменилась позиция в очереди', 'Откройте приложение, чтобы увидеть актуальное ожидание.'],
+    ALMOST_YOUR_TURN: ['Скоро ваша очередь', 'Пожалуйста, будьте готовы подойти к барберу.'],
+    BARBER_READY: ['Барбер готов', 'Ваш барбер готов принять вас.'],
+    CASHBACK_EARNED: ['Начислен кешбек', 'Кешбек за завершённую услугу доступен в кошельке.'],
+    PROMO_FROM_SHOP: ['Новое предложение', 'В выбранном барбершопе появилось новое предложение.'],
+    TEST_NOTIFICATION: ['Тестовое уведомление', 'Это тестовое уведомление Bradobrey.'],
+    DEFAULT: ['BRADOBREY', 'У вас новое уведомление.'],
   },
-  BOOKING_CANCELLED: {
-    title: 'Бронирование отменено',
-    body: 'Ваше бронирование отменено.',
+  uz: {
+    BOOKING_CREATED: ['Yozilish yaratildi', 'Siz jonli navbatga qo\'shildingiz.'],
+    BOOKING_CANCELLED: ['Yozilish bekor qilindi', 'Yozilishingiz bekor qilindi.'],
+    REFERRAL_BONUS: ['Referal bonusi qo\'shildi', 'Taklif bonusingiz profilda mavjud.'],
+    LEVEL_CHANGED: ['Loyallik darajasi o\'zgardi', 'Yangi daraja va imtiyozlaringizni tekshiring.'],
+    ACCOUNT_BLOCKED: ['Hisob vaqtincha cheklangan', 'Tafsilotlarni bilish uchun ilovani oching.'],
+    ACCOUNT_BLOCKED_CANCELS: ['Hisob vaqtincha cheklangan', 'Bugungi bekor qilish limiti oshib ketdi. Tafsilotlarni ilovada ko\'ring.'],
+    NO_SHOW: ['Kelmaganlik qayd etildi', 'Status ballari o\'zgardi. Tafsilotlarni profilda ko\'ring.'],
+    NO_SHOW_PENALTY: ['Kelmaganlik qayd etildi', 'Status ballari o\'zgardi. Tafsilotlarni profilda ko\'ring.'],
+    YOU_ARE_CALLED: ['Sizni chaqirishmoqda', 'Tanlangan barber yoniga boring.'],
+    SERVICE_STARTED: ['Xizmat boshlandi', 'Barber sizga xizmat ko\'rsatishni boshladi.'],
+    SERVICE_COMPLETED: ['Xizmat yakunlandi', 'Tashrifingiz uchun rahmat. Xizmatni baholang.'],
+    REFERRAL_EXPIRING: ['Referal bonusi tez orada tugaydi', 'Referal imkoniyatidan foydalanish uchun 30 kun qoldi.'],
+    QUEUE_POSITION_CHANGED: ['Navbatdagi o\'rningiz o\'zgardi', 'Joriy kutish vaqtini ilovada ko\'ring.'],
+    ALMOST_YOUR_TURN: ['Navbatingiz yaqin', 'Barber yoniga borishga tayyor bo\'ling.'],
+    BARBER_READY: ['Barber tayyor', 'Barberingiz sizni qabul qilishga tayyor.'],
+    CASHBACK_EARNED: ['Keshbek qo\'shildi', 'Yakunlangan xizmat uchun keshbek hamyonda mavjud.'],
+    PROMO_FROM_SHOP: ['Yangi taklif', 'Tanlangan barbershopda yangi taklif paydo bo\'ldi.'],
+    TEST_NOTIFICATION: ['Test bildirishnomasi', 'Bu Bradobrey test bildirishnomasi.'],
+    DEFAULT: ['BRADOBREY', 'Sizda yangi bildirishnoma bor.'],
   },
-  REFERRAL_BONUS: {
-    title: 'Начислен реферальный бонус',
-    body: 'Ваш бонус за приглашение доступен в профиле.',
+  en: {
+    BOOKING_CREATED: ['Booking created', 'You have been added to the live queue.'],
+    BOOKING_CANCELLED: ['Booking cancelled', 'Your booking has been cancelled.'],
+    REFERRAL_BONUS: ['Referral bonus added', 'Your referral bonus is available in your profile.'],
+    LEVEL_CHANGED: ['Loyalty level changed', 'Check your new level and available benefits.'],
+    ACCOUNT_BLOCKED: ['Account temporarily restricted', 'Open the app for more details.'],
+    ACCOUNT_BLOCKED_CANCELS: ['Account temporarily restricted', 'Today\'s cancellation limit was exceeded. Check the app for details.'],
+    NO_SHOW: ['No-show recorded', 'Your status points changed. Check your profile for details.'],
+    NO_SHOW_PENALTY: ['No-show recorded', 'Your status points changed. Check your profile for details.'],
+    YOU_ARE_CALLED: ['You are being called', 'Please go to your selected barber.'],
+    SERVICE_STARTED: ['Service started', 'Your barber has started the service.'],
+    SERVICE_COMPLETED: ['Service completed', 'Thank you for visiting. Rate your service in the app.'],
+    REFERRAL_EXPIRING: ['Referral bonus expiring soon', 'You have 30 days left to use your referral benefit.'],
+    QUEUE_POSITION_CHANGED: ['Queue position changed', 'Open the app to see your current wait.'],
+    ALMOST_YOUR_TURN: ['Almost your turn', 'Please be ready to go to your barber.'],
+    BARBER_READY: ['Barber ready', 'Your barber is ready to serve you.'],
+    CASHBACK_EARNED: ['Cashback added', 'Cashback for your completed service is available in your wallet.'],
+    PROMO_FROM_SHOP: ['New offer', 'A new offer is available at your selected barbershop.'],
+    TEST_NOTIFICATION: ['Test notification', 'This is a Bradobrey test notification.'],
+    DEFAULT: ['BRADOBREY', 'You have a new notification.'],
   },
-  LEVEL_CHANGED: {
-    title: 'Изменился уровень лояльности',
-    body: 'Проверьте новый уровень и доступные привилегии.',
-  },
-  ACCOUNT_BLOCKED: {
-    title: 'Аккаунт временно ограничен',
-    body: 'Откройте приложение, чтобы узнать подробности.',
-  },
-  ACCOUNT_BLOCKED_CANCELS: {
-    title: 'Аккаунт временно ограничен',
-    body: 'Лимит отмен за сегодня превышен. Проверьте подробности в приложении.',
-  },
-  NO_SHOW: {
-    title: 'Неявка зафиксирована',
-    body: 'Баллы статуса изменены. Проверьте подробности в профиле.',
-  },
-  NO_SHOW_PENALTY: {
-    title: 'Неявка зафиксирована',
-    body: 'Баллы статуса изменены. Проверьте подробности в профиле.',
-  },
-  YOU_ARE_CALLED: {
-    title: 'Вас вызывают',
-    body: 'Подойдите к выбранному барберу.',
-  },
-  SERVICE_STARTED: {
-    title: 'Услуга началась',
-    body: 'Барбер начал обслуживание.',
-  },
-  SERVICE_COMPLETED: {
-    title: 'Услуга завершена',
-    body: 'Спасибо за визит. Оцените обслуживание в приложении.',
-  },
-  REFERRAL_EXPIRING: {
-    title: 'Реферальный бонус скоро истечёт',
-    body: 'У вас осталось 30 дней, чтобы воспользоваться реферальной возможностью.',
-  },
-  QUEUE_POSITION_CHANGED: {
-    title: 'Изменилась позиция в очереди',
-    body: 'Откройте приложение, чтобы увидеть актуальное ожидание.',
-  },
-  ALMOST_YOUR_TURN: {
-    title: 'Скоро ваша очередь',
-    body: 'Пожалуйста, будьте готовы подойти к барберу.',
-  },
-  BARBER_READY: {
-    title: 'Барбер готов',
-    body: 'Ваш барбер готов принять вас.',
-  },
-  CASHBACK_EARNED: {
-    title: 'Начислен кешбек',
-    body: 'Кешбек за завершённую услугу доступен в кошельке.',
-  },
-  PROMO_FROM_SHOP: {
-    title: 'Новое предложение',
-    body: 'В выбранном барбершопе появилось новое предложение.',
-  },
+};
+
+const normalizeLanguage = (language) => {
+  const value = String(language || '').trim().toLowerCase().split('-')[0];
+  return Object.prototype.hasOwnProperty.call(notificationCopy, value) ? value : 'ru';
+};
+
+const getNotificationCopy = (type, language) => {
+  const localized = notificationCopy[normalizeLanguage(language)];
+  const pair = localized[type] || localized.DEFAULT;
+  return { title: pair[0], body: pair[1] };
 };
 
 const providerUrl = () => String(process.env.MARKETPLACE_PUSH_WEBHOOK_URL || '').trim();
@@ -145,13 +151,11 @@ const sendToProvider = async ({
   type,
   payload,
   notificationId,
+  language,
   title: customTitle,
   body: customBody,
 }) => {
-  const copy = notificationCopy[type] || {
-    title: 'BRADOBREY',
-    body: 'У вас новое уведомление.',
-  };
+  const copy = getNotificationCopy(type, language);
   const title = String(customTitle || copy.title).trim();
   const body = String(customBody || copy.body).trim();
 
@@ -162,7 +166,12 @@ const sendToProvider = async ({
       title,
       body,
       channelId: 'queue_reminders_v2',
-      data: { type, notification_id: notificationId, ...(payload || {}) },
+      data: {
+        type,
+        language: normalizeLanguage(language),
+        notification_id: notificationId,
+        ...(payload || {}),
+      },
     });
   }
 
@@ -181,6 +190,7 @@ const sendToProvider = async ({
       token,
       platform,
       type,
+      language: normalizeLanguage(language),
       title,
       body,
       payload: payload || {},
@@ -213,6 +223,7 @@ async function sendTestNotificationToClient({ clientId, title, body }) {
         platform: token.platform,
         type: 'TEST_NOTIFICATION',
         payload: { test: 'true' },
+        language: 'ru',
         title,
         body,
       });
@@ -247,9 +258,11 @@ const dispatchNotification = async (notificationId) => {
           and (push_claimed_at is null or push_claimed_at < now() - interval '10 minutes')
         returning id
      )
-       select n.id, n.marketplace_client_id, n.type, n.payload, t.token, t.platform
-       from claimed c
-       join marketplace_notifications n on n.id = c.id
+       select n.id, n.marketplace_client_id, n.type, n.payload,
+              coalesce(mc.language, 'ru') as language, t.token, t.platform
+       from claimed claim
+       join marketplace_notifications n on n.id = claim.id
+       left join marketplace_clients mc on mc.id = n.marketplace_client_id
        left join marketplace_push_tokens t
          on t.marketplace_client_id = n.marketplace_client_id`,
     [notificationId]
@@ -277,6 +290,7 @@ const dispatchNotification = async (notificationId) => {
         type: notification.type,
         payload: notification.payload,
         notificationId: notification.id,
+        language: notification.language,
       });
       if (result.delivered) delivered += 1;
     } catch (error) {
@@ -403,6 +417,7 @@ const startMarketplaceNotificationDispatcher = () => {
 
 module.exports = {
   dispatchNotification,
+  getNotificationCopy,
   sendTestNotificationToClient,
   sendFcmNotification,
   startMarketplaceNotificationDispatcher,

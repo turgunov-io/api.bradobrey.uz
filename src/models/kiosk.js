@@ -672,7 +672,7 @@ class Kiosk {
                 .eq('id', actorId)
                 .maybeSingle();
             if (mpError) return res.status(500).json({ error: mpError.message });
-            if (!mpClient) return res.status(404).json({ error: 'Marketplace client not found' });
+            if (!mpClient) return res.status(403).json({ error: 'USER_NOT_REGISTERED', code: 'USER_NOT_REGISTERED' });
             if (mpClient.is_active === false) return res.status(403).json({ error: 'Account is disabled' });
             if (mpClient.blocked_until && new Date(mpClient.blocked_until) > new Date()) {
                 return res.status(403).json({

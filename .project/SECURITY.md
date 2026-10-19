@@ -188,3 +188,23 @@ Workspace JWTs carry a random `jti` that is also stored with `session_expires_at
 - FCM token registration is employee-JWT protected; a token is associated with one employee and a refreshed token transfers ownership on upsert. Logout intentionally does not delete registrations, preserving the project requirement; when another employee registers on that device, ownership is updated.
 - Transfer recovery is scoped in SQL to the authenticated initiating employee. Push payloads contain transfer identifiers/status and sanitized optional rejection text; no token or credential is logged.
 - Provider errors are logged by safe error code only and do not change the committed transfer outcome. Firebase Admin credentials remain server-side and must not be copied into the mobile app.
+
+# Marketplace error and push localization review (2026-10-19)
+
+- `src/utils/publicError.js` is now used by the global Express error handler
+  and marketplace catalog controller; `marketplacePublicErrors` also guards
+  legacy marketplace responses at the router boundary. These paths return
+  stable public codes rather than database/provider messages, table names, or
+  stack details.
+- Marketplace FCM copy is selected from persisted recipient language and normal
+  dispatcher events no longer rely on arbitrary notification text.
+- Remaining debt: legacy marketplace auth/profile/compliance/group-booking
+  handlers still contain direct `error.message` responses and mixed contracts;
+  migrate them to the mapper directly and add route-level contract tests.
+## Marketplace registration boundary — fixed locally on 2026-10-19
+
+Telegram login previously fell through to the new-account insert branch. The
+service now requires an existing active Marketplace client for login, returns
+`USER_NOT_REGISTERED` for unknown identities, and protected Marketplace routes
+re-check authoritative database state. Full local API tests passed; production
+deployment and live authenticated verification were not performed.

@@ -195,7 +195,7 @@ class MarketplaceProfile {
     }
 
     if (!baseClient) {
-      res.status(404).json({ error: 'Marketplace client not found' });
+      res.status(403).json({ error: 'USER_NOT_REGISTERED', code: 'USER_NOT_REGISTERED' });
       return null;
     }
 

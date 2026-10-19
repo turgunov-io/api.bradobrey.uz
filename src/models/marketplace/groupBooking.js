@@ -3,7 +3,7 @@ const { pool } = require('../../config/postgres');
 const catalogService = require('../../modules/marketplace/catalog/service');
 const { PAYMENT_METHODS } = require('../../modules/marketplace/catalog/constants');
 
-function getClientId(req, res) {
+async function getClientId(req, res) {
   const header = String(req.headers.authorization || '');
   if (!header.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authorization token is required' });
@@ -15,7 +15,21 @@ function getClientId(req, res) {
       res.status(403).json({ error: 'Marketplace user token is required' });
       return null;
     }
-    return String(payload.sub || payload.id);
+    const clientId = String(payload.sub || payload.id);
+    const clientResult = await pool.query(
+      'select id, is_active from marketplace_clients where id = $1 limit 1',
+      [clientId],
+    );
+    const client = clientResult.rows[0];
+    if (!client) {
+      res.status(403).json({ error: 'USER_NOT_REGISTERED', code: 'USER_NOT_REGISTERED' });
+      return null;
+    }
+    if (client.is_active === false) {
+      res.status(403).json({ error: 'ACCOUNT_DISABLED', code: 'ACCOUNT_DISABLED' });
+      return null;
+    }
+    return clientId;
   } catch (_) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
@@ -23,7 +37,7 @@ function getClientId(req, res) {
 }
 
 async function create(req, res) {
-  const marketplaceClientId = getClientId(req, res);
+  const marketplaceClientId = await getClientId(req, res);
   if (!marketplaceClientId) return;
   const body = req.body || {};
   const branchId = String(body.branch_id || '').trim();
