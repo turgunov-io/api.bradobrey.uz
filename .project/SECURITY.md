@@ -3,6 +3,17 @@
 Дата: 2026-10-03  
 Статус security gate: **FAIL**
 
+## Marketplace review security review (2026-10-19)
+
+- Review lookup is authenticated and filters by the JWT subject; client-supplied
+  user identifiers are ignored.
+- Create/update validates UUIDs and rating `1..5`, checks completed-visit
+  ownership, enforces the existing edit window and database uniqueness, and
+  keeps idempotency replay scoped to the authenticated client.
+- Database/provider failures now return stable public codes instead of raw SQL
+  or internal messages. Local unit/security boundary tests passed; live
+  PostgreSQL and production verification were not performed.
+
 ## Открытые findings
 
 ### SEC-P0-01 — Неаутентифицированное создание администратора и управление системой

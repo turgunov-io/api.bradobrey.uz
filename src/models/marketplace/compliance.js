@@ -4,6 +4,14 @@ const { pool } = require('../../config/postgres');
 const { settlePendingReferralBonuses } = require('../../services/referralBonus');
 
 const MARKETPLACE_ROLE = 'marketplace';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isUuid = (value) => UUID_PATTERN.test(String(value || '').trim());
+
+const sendComplianceServerError = (res, error, code) => {
+  console.error('[MarketplaceCompliance] request failed', { code: error?.code || 'UNKNOWN' });
+  return res.status(500).json({ error: code, code });
+};
 
 const fallbackReferralCode = (seed) => {
   let hash = 0;
@@ -51,7 +59,7 @@ async function authClient(req, res) {
     }
     return clientId;
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    sendComplianceServerError(res, error, 'INTERNAL_SERVER_ERROR');
     return null;
   }
 }
@@ -309,6 +317,68 @@ async function referral(req, res) {
   }
 }
 
+async function getReview(req, res) {
+  const clientId = await authClient(req, res);
+  if (!clientId) return;
+  const bookingId = String(req.query?.booking_id || '').trim();
+  const serviceId = String(req.query?.service_id || '').trim() || null;
+  if (!isUuid(bookingId) || (serviceId && !isUuid(serviceId))) {
+    return res.status(400).json({ error: 'booking_id must be a valid UUID' });
+  }
+  try {
+    const result = await pool.query(
+      `select *
+         from marketplace_reviews
+        where marketplace_client_id = $1
+          and booking_id = $2
+          and (($3::uuid is null and service_id is null)
+            or ($3::uuid is not null and service_id = $3::uuid))
+        order by service_id nulls first, created_at desc`,
+      [clientId, bookingId, serviceId],
+    );
+    return res.json(serviceId
+      ? { review: result.rows[0] || null }
+      : { review: result.rows[0] || null, reviews: result.rows });
+  } catch (error) {
+    return sendComplianceServerError(res, error, 'REVIEW_LOAD_FAILED');
+  }
+}
+
+const reviewPayloadHash = (payload) => crypto
+  .createHash('md5')
+  .update(JSON.stringify(payload))
+  .digest('hex');
+
+async function writeReviewAlertAndAudit(dbClient, {
+  review,
+  clientId,
+  bookingId,
+  entityId = bookingId,
+  barbershopId,
+  rating,
+  action,
+}) {
+  if (rating <= 2) {
+    await dbClient.query(
+      `insert into marketplace_review_alerts (review_id, barbershop_id, rating)
+       values ($1, $2, $3)
+       on conflict (review_id) do nothing`,
+      [review.id, barbershopId, rating],
+    );
+  }
+  await dbClient.query(
+    `insert into marketplace_audit_logs (marketplace_client_id, action, entity_type, entity_id, metadata)
+     values ($1, $2, $3, $4, $5::jsonb)`,
+    [
+      clientId,
+      action,
+      action === 'REVIEW_UPDATED' ? 'marketplace_review' : 'marketplace_booking',
+      entityId,
+      JSON.stringify({ rating }),
+    ],
+  );
+}
+
 async function createReview(req, res) {
   const clientId = await authClient(req, res);
   if (!clientId) return;
@@ -317,9 +387,15 @@ async function createReview(req, res) {
   const serviceId = String(req.body?.service_id || '').trim() || null;
   const rating = Number(req.body?.rating);
   const comment = req.body?.comment == null ? null : String(req.body.comment).trim();
-  if (!bookingId || !Number.isInteger(rating) || rating < 1 || rating > 5) {
-    return res.status(400).json({ error: 'booking_id and rating from 1 to 5 are required' });
+  if (!isUuid(bookingId) || (serviceId && !isUuid(serviceId))) {
+    return res.status(400).json({ error: 'booking_id and service_id must be valid UUIDs' });
   }
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'rating from 1 to 5 is required' });
+  }
+  const canonicalPayload = { booking_id: bookingId, service_id: serviceId, rating, comment };
+  const canonicalHash = reviewPayloadHash(canonicalPayload);
+  const legacyHash = reviewPayloadHash(req.body || {});
   const dbClient = await pool.connect();
   try {
     await dbClient.query('BEGIN');
@@ -330,10 +406,10 @@ async function createReview(req, res) {
           `select status, response, payload_hash from marketplace_idempotency_requests
             where request_id = $1 and marketplace_client_id = $2 for update`, [requestId, clientId]
         );
-        const reviewPayloadHash = crypto.createHash('md5').update(JSON.stringify(req.body || {})).digest('hex');
-        if (prior.rows[0]?.payload_hash && prior.rows[0].payload_hash !== reviewPayloadHash) {
+        if (prior.rows[0]?.payload_hash
+          && ![canonicalHash, legacyHash].includes(prior.rows[0].payload_hash)) {
           await dbClient.query('ROLLBACK');
-          return res.status(409).json({ error: 'REVIEW_ALREADY_SUBMITTED' });
+          return res.status(409).json({ error: 'REVIEW_ALREADY_SUBMITTED', code: 'REVIEW_ALREADY_SUBMITTED' });
         }
         if (prior.rows[0]?.response) {
           await dbClient.query('ROLLBACK');
@@ -341,25 +417,19 @@ async function createReview(req, res) {
         }
         if (prior.rows[0]) {
           await dbClient.query('ROLLBACK');
-          return res.status(409).json({ error: 'IDEMPOTENCY_REQUEST_IN_PROGRESS' });
+          return res.status(409).json({ error: 'IDEMPOTENCY_REQUEST_IN_PROGRESS', code: 'IDEMPOTENCY_REQUEST_IN_PROGRESS' });
         }
         await dbClient.query(
           `insert into marketplace_idempotency_requests (request_id, marketplace_client_id, operation, payload_hash)
-           values ($1, $2, 'REVIEW_CREATE', md5($3))`,
-          [requestId, clientId, JSON.stringify(req.body || {})]
+           values ($1, $2, 'REVIEW_CREATE', $3)`,
+          [requestId, clientId, canonicalHash]
         );
       } catch (error) {
         if (error?.code !== '42P01') throw error;
-        // Older production databases may have reviews but not the optional
-        // idempotency table yet. Keep review submission working; the table is
-        // still created by marketplace_tz_compliance.sql when migrations run.
-        // PostgreSQL marks the current transaction as aborted after the
-        // missing-relation error, so start a clean transaction before the
-        // review queries continue.
         await dbClient.query('ROLLBACK');
         await dbClient.query('BEGIN');
         idempotencyAvailable = false;
-        console.warn('[MarketplaceCompliance] idempotency table is unavailable; creating review without deduplication');
+        console.warn('[MarketplaceCompliance] idempotency table is unavailable; review uniqueness remains database-enforced');
       }
     }
     const booking = await dbClient.query(
@@ -368,13 +438,11 @@ async function createReview(req, res) {
           and (id = $1 or exists (
             select 1 from marketplace_booking_persons bp
              where bp.booking_id = marketplace_bookings.id and bp.queue_entry_id = $1
-          ))`, [bookingId, clientId]
+          ))
+        for update`, [bookingId, clientId]
     );
     let resolvedBookingId = booking.rows[0]?.id;
     if (!resolvedBookingId) {
-      // Older completed marketplace visits may exist only as queue_entries.
-      // Backfill the aggregate booking lazily when the client submits its
-      // first review, so the review remains compatible with legacy history.
       const legacyQueueEntry = await dbClient.query(
         `select q.id, q.barber_id, c.name as client_name
            from queue_entries q
@@ -401,18 +469,13 @@ async function createReview(req, res) {
           `insert into marketplace_booking_persons
              (booking_id, person_index, display_name, barber_id, queue_entry_id)
            values ($1, 1, $2, $3, $4)`,
-          [
-            resolvedBookingId,
-            legacy.client_name || 'Client',
-            legacy.barber_id,
-            legacy.id,
-          ],
+          [resolvedBookingId, legacy.client_name || 'Client', legacy.barber_id, legacy.id],
         );
       }
     }
     if (!resolvedBookingId) {
       await dbClient.query('ROLLBACK');
-      return res.status(409).json({ error: 'REVIEW_NOT_ALLOWED' });
+      return res.status(409).json({ error: 'REVIEW_NOT_ALLOWED', code: 'REVIEW_NOT_ALLOWED' });
     }
     const reviewContext = await dbClient.query(
       `select br.marketplace_barbershop_id as barbershop_id, p.barber_id
@@ -438,40 +501,72 @@ async function createReview(req, res) {
       );
       if (!serviceCheck.rows[0]) {
         await dbClient.query('ROLLBACK');
-        return res.status(400).json({ error: 'SERVICE_NOT_IN_BOOKING' });
+        return res.status(400).json({ error: 'SERVICE_NOT_IN_BOOKING', code: 'SERVICE_NOT_IN_BOOKING' });
       }
     }
-    const result = await dbClient.query(
-      `insert into marketplace_reviews (marketplace_client_id, booking_id, service_id, barbershop_id, barber_id, rating, comment)
-       values ($1, $2, $3, $4, $5, $6, $7) returning *`,
-      [clientId, resolvedBookingId, serviceId, barbershopId, barberId, rating, comment]
+
+    const existing = await dbClient.query(
+      `select * from marketplace_reviews
+        where marketplace_client_id = $1
+          and booking_id = $2
+          and service_id is not distinct from $3::uuid
+        for update`,
+      [clientId, resolvedBookingId, serviceId],
     );
-    if (rating <= 2) {
-      await dbClient.query(
-        `insert into marketplace_review_alerts (review_id, barbershop_id, rating)
-         values ($1, $2, $3)
-         on conflict (review_id) do nothing`,
-        [result.rows[0].id, barbershopId, rating],
+    let responseStatus = 201;
+    let action = 'REVIEW_CREATED';
+    let result;
+    if (existing.rows[0]) {
+      result = await dbClient.query(
+        `update marketplace_reviews
+            set rating = $1, comment = $2, updated_at = now()
+          where id = $3 and marketplace_client_id = $4
+            and created_at >= now() - interval '24 hours'
+          returning *`,
+        [rating, comment, existing.rows[0].id, clientId],
+      );
+      if (!result.rows[0]) {
+        await dbClient.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'REVIEW_EDIT_WINDOW_EXPIRED_OR_NOT_FOUND',
+          code: 'REVIEW_EDIT_WINDOW_EXPIRED_OR_NOT_FOUND',
+        });
+      }
+      responseStatus = 200;
+      action = 'REVIEW_UPDATED';
+    } else {
+      result = await dbClient.query(
+        `insert into marketplace_reviews (marketplace_client_id, booking_id, service_id, barbershop_id, barber_id, rating, comment)
+         values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+        [clientId, resolvedBookingId, serviceId, barbershopId, barberId, rating, comment]
       );
     }
-    await dbClient.query(
-      `insert into marketplace_audit_logs (marketplace_client_id, action, entity_type, entity_id, metadata)
-       values ($1, 'REVIEW_CREATED', 'marketplace_booking', $2, $3::jsonb)`,
-      [clientId, resolvedBookingId, JSON.stringify({ rating })]
-    );
+    await writeReviewAlertAndAudit(dbClient, {
+      review: result.rows[0],
+      clientId,
+      bookingId: resolvedBookingId,
+      entityId: action === 'REVIEW_UPDATED' ? existing.rows[0].id : resolvedBookingId,
+      barbershopId,
+      rating,
+      action,
+    });
     const response = { review: result.rows[0] };
     if (requestId && idempotencyAvailable) {
       await dbClient.query(
-        `update marketplace_idempotency_requests set status = 201, response = $2::jsonb, completed_at = now() where request_id = $1`,
-        [requestId, JSON.stringify(response)]
+        `update marketplace_idempotency_requests
+            set status = $2, response = $3::jsonb, completed_at = now()
+          where request_id = $1`,
+        [requestId, responseStatus, JSON.stringify(response)]
       );
     }
     await dbClient.query('COMMIT');
-    return res.status(201).json(response);
+    return res.status(responseStatus).json(response);
   } catch (error) {
     try { await dbClient.query('ROLLBACK'); } catch (_) { /* ignore */ }
-    if (error.code === '23505') return res.status(409).json({ error: 'Review already exists' });
-    throw error;
+    if (error?.code === '23505') {
+      return res.status(409).json({ error: 'REVIEW_ALREADY_EXISTS', code: 'REVIEW_ALREADY_EXISTS' });
+    }
+    return sendComplianceServerError(res, error, 'REVIEW_SAVE_FAILED');
   } finally {
     dbClient.release();
   }
@@ -746,24 +841,28 @@ async function updateReview(req, res) {
   const reviewId = String(req.params.id || '').trim();
   const rating = Number(req.body?.rating);
   const comment = req.body?.comment == null ? null : String(req.body.comment).trim();
-  if (!reviewId || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+  if (!isUuid(reviewId) || !Number.isInteger(rating) || rating < 1 || rating > 5) {
     return res.status(400).json({ error: 'review id and rating from 1 to 5 are required' });
   }
-  const result = await pool.query(
-    `update marketplace_reviews
-        set rating = $1, comment = $2, updated_at = now()
-      where id = $3 and marketplace_client_id = $4
-        and created_at >= now() - interval '24 hours'
-      returning *`,
-    [rating, comment, reviewId, clientId],
-  );
-  if (!result.rows[0]) return res.status(409).json({ error: 'REVIEW_EDIT_WINDOW_EXPIRED_OR_NOT_FOUND' });
-  await pool.query(
-    `insert into marketplace_audit_logs (marketplace_client_id, action, entity_type, entity_id, metadata)
-     values ($1, 'REVIEW_UPDATED', 'marketplace_review', $2, $3::jsonb)`,
-    [clientId, reviewId, JSON.stringify({ rating })],
-  );
-  return res.json({ review: result.rows[0] });
+  try {
+    const result = await pool.query(
+      `update marketplace_reviews
+          set rating = $1, comment = $2, updated_at = now()
+        where id = $3 and marketplace_client_id = $4
+          and created_at >= now() - interval '24 hours'
+        returning *`,
+      [rating, comment, reviewId, clientId],
+    );
+    if (!result.rows[0]) return res.status(409).json({ error: 'REVIEW_EDIT_WINDOW_EXPIRED_OR_NOT_FOUND' });
+    await pool.query(
+      `insert into marketplace_audit_logs (marketplace_client_id, action, entity_type, entity_id, metadata)
+       values ($1, 'REVIEW_UPDATED', 'marketplace_review', $2, $3::jsonb)`,
+      [clientId, reviewId, JSON.stringify({ rating })],
+    );
+    return res.json({ review: result.rows[0] });
+  } catch (error) {
+    return sendComplianceServerError(res, error, 'REVIEW_SAVE_FAILED');
+  }
 }
 
 module.exports = {
@@ -771,6 +870,7 @@ module.exports = {
   loyalty,
   restrictionStatus,
   referral,
+  getReview,
   createReview,
   updateReview,
   cancelBooking,

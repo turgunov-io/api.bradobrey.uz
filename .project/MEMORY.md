@@ -1,5 +1,15 @@
 # Project memory
 
+- Marketplace review remediation (2026-10-19): compliance now exposes an
+  authenticated, booking-scoped GET for the current client's review. POST is
+  safe to retry with idempotency and updates the same owned review within the
+  existing 24-hour window; PATCH remains available for explicit edits. UUID,
+  rating, ownership, completion, and DB uniqueness checks are enforced server
+  side. SQL was not changed because the existing partial indexes already guard
+  one legacy review per booking or one review per booking/service. Local
+  PostgreSQL integration was not available, so migration application and
+  end-to-end DB behavior remain unverified.
+
 ## Barber order-history audit (2026-10-15)
 
 - Full documented audit: `.project/audit-reports/barber-order-history/2026-10-15-full-audit.md`.

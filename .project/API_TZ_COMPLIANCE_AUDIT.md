@@ -29,7 +29,7 @@ OTP `0000` не считается дефектом текущего этапа 
 | Cashback/referral/loyalty | PARTIAL | Ledger, caps, уровни и referral points присутствуют. Не найдены Frequency/Happy Hours; возврат cashback при отмене может быть пропущен. |
 | Комиссия маркетплейса | MISSING | Не найдены origin-классификация NEW/OWN и расчёт ставок 5,5%/2,5%. |
 | Онлайн-оплата Payme/Click | MISSING | Способы рекламируются, но gateway session/callback/webhook verification не найдены. |
-| Отзывы | PARTIAL | Completed-only, ownership, уникальность по услуге и окно 24 часа есть. Не найден публичный ответ барбершопа и weighted rating. |
+| Отзывы | PARTIAL | Completed-only, ownership, booking-scoped lookup, уникальность по услуге и окно 24 часа есть. Не найден публичный ответ барбершопа и weighted rating. |
 | Multi-tenant isolation | MISSING / P1 | Merchant/admin_branch могут получать сетевые отчёты и PII без shop/branch scope. |
 | Идемпотентность и аудит | PARTIAL | В новых marketplace flows механизмы есть, но не покрывают неатомарный single booking и legacy endpoints. |
 | Production readiness | MISSING | Нет CI, реального build/lint/typecheck gate, DB readiness, полной observability и проверенного graceful shutdown. |
@@ -110,6 +110,14 @@ Marketplace profile меняет телефон без OTP (`src/models/marketpl
 14. Cashback level lookup фактически перекрывается глобальной setting `cashback`; Frequency/Happy Hours и `FLOOR`-округление не реализованы.
 15. Daily points cap работает all-or-nothing вместо начисления оставшегося остатка лимита.
 16. Reviews допускают legacy review без `service_id`; group review context может выбрать не того участника/barber.
+
+### Remediation note — 2026-10-19
+
+The review contract now has an authenticated booking lookup for the current
+Marketplace client, explicit UUID/rating validation, stable public errors, and
+owned-review updates within the existing 24-hour window. Existing partial
+unique indexes remain the duplicate guard. Weighted public ratings, barber
+replies, and group/service review semantics remain outside this remediation.
 17. Cashback reconciliation вычисляет и перезаписывает wallet snapshot без блокировки ledger/wallet от конкурентных earn/spend.
 18. Правило одной активной записи не является общим DB invariant для kiosk и Marketplace; возможно одновременно войти через `point` и `site`.
 19. Публичные no-show/not-in-time endpoints позволяют по UUID применить штраф/блокировку без JWT и ownership check.

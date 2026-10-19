@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-19 — Marketplace reviews and booking detail contract
+
+- Added authenticated `GET /api/marketplace/compliance/reviews?booking_id=...`
+  scoped to the Marketplace JWT subject.
+- Review writes now validate UUID/rating inputs, update the authenticated
+  owner's existing review within the 24-hour edit window, preserve idempotent
+  replay behavior, and return stable public error codes without DB details.
+- Existing partial unique indexes remain the database guard for one legacy
+  review per booking or one review per booking/service. Added unit contracts;
+  `npm test` passes 165/165 and integration remains skipped without PostgreSQL.
+
 ## 2026-10-19 — Marketplace registration/login boundary
 
 - Fixed Telegram login so `purpose=login` cannot create a new

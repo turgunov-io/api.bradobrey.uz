@@ -12,6 +12,20 @@
   `source=site` booking paths verify the JWT subject against the authoritative
   `marketplace_clients` table and reject missing clients with the same code.
 
+## Marketplace reviews
+
+- `GET /api/marketplace/compliance/reviews?booking_id=<uuid>` returns the
+  authenticated client's booking-level review for the completed booking, or
+  `review: null` when none exists. An optional `service_id=<uuid>` selects a
+  service-level review. It never trusts a client-supplied user id.
+- `POST /api/marketplace/compliance/reviews` accepts a rating from 1 to 5 and
+  creates a review only for an owned completed visit. Repeating a review for
+  the same booking/service updates the owner's review while it is within the
+  24-hour edit window; database uniqueness remains the final duplicate guard.
+- `PATCH /api/marketplace/compliance/reviews/:id` updates only the
+  authenticated owner's review within the same edit window. Public database
+  failures use stable error codes and do not expose SQL/provider details.
+
 ## Marketplace error and notification contract
 
 - Marketplace clients should branch on the stable response `code`; `error` is
