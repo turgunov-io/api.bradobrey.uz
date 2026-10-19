@@ -477,6 +477,16 @@
 
 # Certificate module audit and repair (2026-10-19)
 
+- The certificate 404 investigation confirmed that the backend route is
+  `GET /api/kiosk/certificate/:id`, registered by `app.use('/api/kiosk',
+  kiosk)`. `/api/marketplace/api/kiosk/certificate/:id` is not a valid route;
+  it combines two unrelated prefixes. The kiosk handler normalizes the code
+  to uppercase before filtering `certificates.code` and preserves 401/403
+  authorization responses.
+- The local API suite now covers `A005` (case-insensitive lookup), unknown IDs,
+  route registration, and auth gates. Local PostgreSQL was unavailable, so the
+  presence/status of the real `A005` row remains unverified.
+
 - Certificate admin handlers now require bearer authentication and the
   certificates.manage permission, with approved global admin roles allowed by
   the existing role model. Database errors are logged safely and exposed as

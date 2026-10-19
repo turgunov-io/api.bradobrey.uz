@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-19 — Certificate lookup URL contract
+
+- Confirmed the single canonical certificate lookup route is
+  `GET /api/kiosk/certificate/:id`; no duplicate marketplace alias was added.
+- Added regression coverage for uppercase lookup (`A005`), unknown IDs, route
+  registration, missing authentication, and insufficient roles.
+- Local backend verification: `npm test` passes 171/171. PostgreSQL-backed
+  existence of `A005` could not be confirmed because no local database was
+  available; no production data was changed.
+
 ## 2026-10-19 — Marketplace reviews and booking detail contract
 
 - Added authenticated `GET /api/marketplace/compliance/reviews?booking_id=...`

@@ -267,5 +267,8 @@ The selected branch is persisted in `employee_active_branches` and is reflected 
 - Certificate redemption in booking uses server-side code/status/expiry/service
   validation. Codes are normalized to uppercase, every requested service must
   be covered, and site bookings using a certificate require idempotency_key.
-- The certificate lookup endpoint is authenticated and returns only the
-  minimum data needed by the booking client for allowed-service selection.
+- The canonical authenticated lookup endpoint is
+  `GET /api/kiosk/certificate/:id`; it returns only the minimum data needed by
+  the booking client for allowed-service selection. It is not mounted below
+  `/api/marketplace`, so clients must not prepend the marketplace prefix to
+  this shared kiosk path.
