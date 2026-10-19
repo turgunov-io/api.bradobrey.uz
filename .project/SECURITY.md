@@ -9,7 +9,10 @@
   user identifiers are ignored.
 - Create/update validates UUIDs and rating `1..5`, checks completed-visit
   ownership, enforces the existing edit window and database uniqueness, and
-  keeps idempotency replay scoped to the authenticated client.
+  keeps idempotency replay scoped to the authenticated client. The 24-hour
+  decision is made by PostgreSQL time; the client cannot extend it by changing
+  the device clock. Review responses expose only the authenticated owner's
+  review plus server-derived edit metadata.
 - Database/provider failures now return stable public codes instead of raw SQL
   or internal messages. Local unit/security boundary tests passed; live
   PostgreSQL and production verification were not performed.

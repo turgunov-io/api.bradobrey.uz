@@ -340,7 +340,9 @@ async function getReview(req, res) {
          order by case when b.id = $2 then 0 else 1 end, b.created_at desc
          limit 1
       )
-      select r.*
+      select r.*,
+             (r.created_at >= now() - interval '24 hours') as can_edit,
+             (r.created_at + interval '24 hours') as edit_until
         from marketplace_reviews r
        where r.marketplace_client_id = $1
          and r.booking_id = coalesce((select id from resolved_booking), $2)
@@ -405,6 +407,9 @@ async function createReview(req, res) {
   }
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
     return res.status(400).json({ error: 'rating from 1 to 5 is required' });
+  }
+  if (comment && comment.length > 500) {
+    return res.status(400).json({ error: 'comment must not exceed 500 characters' });
   }
   const canonicalPayload = { booking_id: bookingId, service_id: serviceId, rating, comment };
   const canonicalHash = reviewPayloadHash(canonicalPayload);
@@ -535,7 +540,9 @@ async function createReview(req, res) {
             set rating = $1, comment = $2, updated_at = now()
           where id = $3 and marketplace_client_id = $4
             and created_at >= now() - interval '24 hours'
-          returning *`,
+          returning *,
+                    (created_at >= now() - interval '24 hours') as can_edit,
+                    (created_at + interval '24 hours') as edit_until`,
         [rating, comment, existing.rows[0].id, clientId],
       );
       if (!result.rows[0]) {
@@ -550,7 +557,10 @@ async function createReview(req, res) {
     } else {
       result = await dbClient.query(
         `insert into marketplace_reviews (marketplace_client_id, booking_id, service_id, barbershop_id, barber_id, rating, comment)
-         values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+         values ($1, $2, $3, $4, $5, $6, $7)
+         returning *,
+                   (created_at >= now() - interval '24 hours') as can_edit,
+                   (created_at + interval '24 hours') as edit_until`,
         [clientId, resolvedBookingId, serviceId, barbershopId, barberId, rating, comment]
       );
     }
@@ -857,13 +867,18 @@ async function updateReview(req, res) {
   if (!isUuid(reviewId) || !Number.isInteger(rating) || rating < 1 || rating > 5) {
     return res.status(400).json({ error: 'review id and rating from 1 to 5 are required' });
   }
+  if (comment && comment.length > 500) {
+    return res.status(400).json({ error: 'comment must not exceed 500 characters' });
+  }
   try {
     const result = await pool.query(
       `update marketplace_reviews
           set rating = $1, comment = $2, updated_at = now()
         where id = $3 and marketplace_client_id = $4
           and created_at >= now() - interval '24 hours'
-        returning *`,
+        returning *,
+                  (created_at >= now() - interval '24 hours') as can_edit,
+                  (created_at + interval '24 hours') as edit_until`,
       [rating, comment, reviewId, clientId],
     );
     if (!result.rows[0]) return res.status(409).json({ error: 'REVIEW_EDIT_WINDOW_EXPIRED_OR_NOT_FOUND' });

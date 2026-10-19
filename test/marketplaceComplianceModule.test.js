@@ -63,6 +63,8 @@ test('GET review is scoped to the authenticated marketplace client', async () =>
     assert.deepEqual(response.body, { review, reviews: [review] });
     const reviewCall = calls.find((call) => call.sql.includes('from marketplace_reviews'));
     assert.match(reviewCall.sql, /marketplace_client_id\s*=\s*\$1/i);
+    assert.match(reviewCall.sql, /created_at\s*>=\s*now\(\)\s*-\s*interval\s+'24 hours'/i);
+    assert.match(reviewCall.sql, /edit_until/i);
     assert.deepEqual(reviewCall.params, [clientId, bookingId, null]);
   } finally {
     pool.query = originalQuery;
@@ -250,6 +252,40 @@ test('review validation rejects rating outside 1..5 before opening a write trans
   try {
     const response = makeResponse();
     await compliance.createReview(makeRequest({ clientId, body: { booking_id: bookingId, rating: 0 } }), response);
+    assert.equal(response.statusCode, 400);
+    assert.equal(connected, false);
+  } finally {
+    pool.query = originalQuery;
+    pool.connect = originalConnect;
+  }
+});
+
+test('review validation rejects comments longer than the client contract', async () => {
+  const compliance = require('../src/models/marketplace/compliance');
+  const { pool } = require('../src/config/postgres');
+  const clientId = '11111111-1111-4111-8111-111111111111';
+  const bookingId = '22222222-2222-4222-8222-222222222222';
+  const originalQuery = pool.query;
+  const originalConnect = pool.connect;
+  let connected = false;
+  pool.query = async (sql) => {
+    if (sql.includes('select id, is_active from marketplace_clients')) return { rows: [{ id: clientId, is_active: true }] };
+    throw new Error('Unexpected pool query');
+  };
+  pool.connect = async () => {
+    connected = true;
+    throw new Error('write transaction must not be opened');
+  };
+  try {
+    const response = makeResponse();
+    await compliance.createReview(makeRequest({
+      clientId,
+      body: {
+        booking_id: bookingId,
+        rating: 5,
+        comment: 'x'.repeat(501),
+      },
+    }), response);
     assert.equal(response.statusCode, 400);
     assert.equal(connected, false);
   } finally {

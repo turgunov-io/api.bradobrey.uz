@@ -5,6 +5,8 @@
 - Added authenticated `GET /api/marketplace/compliance/reviews?booking_id=...`
   scoped to the Marketplace JWT subject; it now resolves both Marketplace
   booking ids and legacy queue-entry ids.
+- Review lookup/write responses now expose server-derived `can_edit` and
+  `edit_until` metadata, and review comments are bounded to 500 characters.
 - Review writes now validate UUID/rating inputs, update the authenticated
   owner's existing review within the 24-hour edit window, preserve idempotent
   replay behavior, and return stable public error codes without DB details.

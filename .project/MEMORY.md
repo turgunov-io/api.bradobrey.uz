@@ -5,10 +5,12 @@
   safe to retry with idempotency and updates the same owned review within the
   existing 24-hour window; PATCH remains available for explicit edits. UUID,
   rating, ownership, completion, and DB uniqueness checks are enforced server
-  side. SQL was not changed because the existing partial indexes already guard
-  one legacy review per booking or one review per booking/service. Local
-  PostgreSQL integration was not available, so migration application and
-  end-to-end DB behavior remain unverified.
+  side. GET/write responses include `can_edit` and `edit_until` derived from
+  PostgreSQL `created_at`/`now()`, and comments are capped at 500 characters.
+  SQL was not changed because the existing partial indexes already guard one
+  legacy review per booking or one review per booking/service. Local PostgreSQL
+  integration was not available, so migration application and end-to-end DB
+  behavior remain unverified.
 
 ## Barber order-history audit (2026-10-15)
 

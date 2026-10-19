@@ -17,15 +17,19 @@
 - `GET /api/marketplace/compliance/reviews?booking_id=<uuid>` accepts either
   the Marketplace booking id or one of its legacy `queue_entry_id` values and
   returns the authenticated client's booking-level review, or `review: null`
-  when none exists. An optional `service_id=<uuid>` selects a service-level
-  review. It never trusts a client-supplied user id.
+  when none exists. An existing review includes server-derived `can_edit` and
+  `edit_until` fields based on `created_at` and database time. An optional
+  `service_id=<uuid>` selects a service-level review. It never trusts a
+  client-supplied user id.
 - `POST /api/marketplace/compliance/reviews` accepts a rating from 1 to 5 and
-  creates a review only for an owned completed visit. Repeating a review for
-  the same booking/service updates the owner's review while it is within the
-  24-hour edit window; database uniqueness remains the final duplicate guard.
+  a comment up to 500 characters and creates a review only for an owned
+  completed visit. Repeating a review for the same booking/service updates the
+  owner's review while it is within the 24-hour edit window; database
+  uniqueness remains the final duplicate guard.
 - `PATCH /api/marketplace/compliance/reviews/:id` updates only the
-  authenticated owner's review within the same edit window. Public database
-  failures use stable error codes and do not expose SQL/provider details.
+  authenticated owner's review within the same edit window. The edit window is
+  checked by PostgreSQL time, not client time. Public database failures use
+  stable error codes and do not expose SQL/provider details.
 
 ## Marketplace error and notification contract
 
