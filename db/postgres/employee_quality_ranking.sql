@@ -53,6 +53,11 @@ create table if not exists queue_quality_assessments (
 alter table if exists queue_quality_assessments
   add column if not exists employee_role text,
   add column if not exists review_version integer not null default 0;
+-- Existing installations may predate the inline UNIQUE constraint. Creating
+-- the index here makes duplicate assessments fail the migration explicitly;
+-- it never silently picks one row or inflates an aggregate.
+create unique index if not exists queue_quality_assessments_queue_entry_id_uq
+  on queue_quality_assessments (queue_entry_id);
 alter table if exists queue_quality_assessments
   drop constraint if exists queue_quality_assessments_queue_entry_id_fkey,
   drop constraint if exists queue_quality_assessments_employee_id_fkey,
@@ -482,9 +487,10 @@ begin
 end;
 $$;
 
--- Legacy completion evidence is explicitly approximate and never eligible for
--- an official v1 rank. This backfill is idempotent and does not infer actor or
--- cancellation responsibility.
+-- Legacy completion evidence is explicitly approximate. Approximate-only
+-- periods remain provisional; a mixed period may qualify only when the
+-- aggregate classifiable sample and coverage meet the v1 thresholds. This
+-- backfill is idempotent and does not infer actor or cancellation responsibility.
 insert into queue_quality_assessments (
   queue_entry_id, employee_id, branch_id, employee_role, completed_at, started_at, finished_at,
   service_ids, expected_duration_minutes, actual_duration_minutes,

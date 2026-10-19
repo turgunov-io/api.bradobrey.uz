@@ -39,6 +39,8 @@ const baseRow = (overrides = {}) => ({
   live_snapshot_count: 10,
   backfill_current_catalog_count: 0,
   unclassified_count: 0,
+  assessment_source: 'live_snapshot',
+  data_confidence: 'authoritative',
   employee_failure_count: 0,
   revenue: 0,
   ...overrides,
@@ -105,15 +107,22 @@ test('statistical ties share competition rank and neutral outcomes do not affect
   assert.deepEqual(result.map((item) => item.rank), [1, 1, 3]);
 });
 
-test('eligibility requires sample, coverage, employment record, and authoritative live evidence', () => {
+test('eligibility uses the classifiable sample and admits mixed evidence at sufficient coverage', () => {
   assert.equal(normalizeEmployeeMetrics(baseRow({ completed: 9, classifiable_completed: 9,
     authoritative_completed: 9 })).provisional_reason, 'insufficient_classifiable_completed');
   assert.equal(normalizeEmployeeMetrics(baseRow({ completed: 10, classifiable_completed: 9,
     authoritative_completed: 10 })).provisional_reason, 'insufficient_classifiable_completed');
   assert.equal(normalizeEmployeeMetrics(baseRow({ completed: 20, classifiable_completed: 17,
     authoritative_completed: 20 })).provisional_reason, 'insufficient_classification_coverage');
+  assert.equal(normalizeEmployeeMetrics(baseRow({ completed: 10, classifiable_completed: 10,
+    authoritative_completed: 9, live_snapshot_count: 9, backfill_current_catalog_count: 1,
+    assessment_source: 'mixed', data_confidence: 'mixed' })).eligible, true);
   assert.equal(normalizeEmployeeMetrics(baseRow({ authoritative_completed: 9,
     live_snapshot_count: 9, backfill_current_catalog_count: 1, data_confidence: 'approximate' })).provisional_reason,
+  'approximate_data');
+  assert.equal(normalizeEmployeeMetrics(baseRow({ completed: 11, classifiable_completed: 10,
+    authoritative_completed: 1, live_snapshot_count: 0, backfill_current_catalog_count: 10,
+    assessment_source: 'backfill_current_catalog', data_confidence: 'mixed' })).provisional_reason,
   'approximate_data');
   assert.equal(normalizeEmployeeMetrics(baseRow({ completed: 0, classifiable_completed: 0,
     authoritative_completed: 0, live_snapshot_count: 0 })).provisional_reason, 'no_completed_orders');
@@ -121,6 +130,45 @@ test('eligibility requires sample, coverage, employment record, and authoritativ
   assert.equal(onBreak.eligible, true);
   assert.equal(onBreak.provisional_reason, null);
   assert.equal(normalizeEmployeeMetrics(baseRow({ is_archived: true })).provisional_reason, 'employee_archived');
+});
+
+test('employee quality eligibility and ranking cover the v1 boundary matrix', () => {
+  const mixed156 = rankEmployees([baseRow({
+    id: 'abbos',
+    name: 'Аббос',
+    completed: 156,
+    classifiable_completed: 156,
+    authoritative_completed: 100,
+    live_snapshot_count: 100,
+    backfill_current_catalog_count: 56,
+    assessment_source: 'mixed',
+    data_confidence: 'mixed',
+  })])[0];
+  assert.equal(mixed156.eligible, true);
+  assert.equal(mixed156.rank, 1);
+  assert.equal(mixed156.provisional_reason, null);
+
+  assert.equal(rankEmployees([baseRow({ completed: 9, classifiable_completed: 9 })])[0].rank, null);
+  assert.equal(rankEmployees([baseRow({ completed: 100, classifiable_completed: 90,
+    authoritative_completed: 90, live_snapshot_count: 90 })])[0].eligible, true);
+  assert.equal(rankEmployees([baseRow({ completed: 100, classifiable_completed: 89,
+    authoritative_completed: 89, live_snapshot_count: 89 })])[0].provisional_reason,
+  'insufficient_classification_coverage');
+  assert.equal(rankEmployees([baseRow({ completed: 20, classifiable_completed: 20,
+    authoritative_completed: 20, live_snapshot_count: 20 })])[0].eligible, true);
+  assert.equal(rankEmployees([baseRow({ completed: 100, classifiable_completed: 90,
+    authoritative_completed: 45, live_snapshot_count: 45, backfill_current_catalog_count: 45,
+    assessment_source: 'mixed', data_confidence: 'mixed' })])[0].eligible, true);
+});
+
+test('stable tie order and revenue independence', () => {
+  const rows = [
+    baseRow({ id: 'same-b', name: 'Одинаковый', revenue: 1 }),
+    baseRow({ id: 'same-a', name: 'Одинаковый', revenue: 999999 }),
+  ];
+  assert.deepEqual(rankEmployees(rows).map((row) => row.employee.id), ['same-a', 'same-b']);
+  rows.reverse();
+  assert.deepEqual(rankEmployees(rows).map((row) => row.employee.id), ['same-a', 'same-b']);
 });
 
 test('admin roles receive the full preset when no per-user permissions are provisioned', () => {
@@ -340,6 +388,11 @@ test('migration contract uses exact v1 reasons, atomic snapshots, and approximat
   assert.match(sql, /after update of status on queue_entries[\s\S]*capture_queue_quality_assessment/i);
   assert.match(sql, /queue_quality_plan_snapshots/i);
   assert.match(sql, /'backfill_current_catalog'[\s\S]*'approximate'/i);
+  assert.match(sql, /queue_entry_id uuid not null unique/i);
+  assert.match(sql, /create unique index if not exists queue_quality_assessments_queue_entry_id_uq/i);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'models', 'employeeQuality.js'), 'utf8'), /a\.completed_at >= \$1::timestamptz[\s\S]*a\.completed_at < \$2::timestamptz/i);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'models', 'employeeQuality.js'), 'utf8'), /count\(distinct e\.queue_entry_id\) filter \(where e\.to_status = 'no_show'/i);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'models', 'employeeQuality.js'), 'utf8'), /count\(distinct e\.queue_entry_id\)::int as employee_failure_count/i);
   const accessSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'utils', 'employeeQualityAccess.js'), 'utf8');
   assert.match(accessSource, /statistics\.quality\.review/i);
   assert.doesNotMatch(sql, /coalesce\(q\.finished_at,\s*q\.created_at\)/i);

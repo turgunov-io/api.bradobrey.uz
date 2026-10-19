@@ -77,24 +77,40 @@ function normalizeEmployeeMetrics(row, rules = DEFAULT_RULES) {
   const trustedCompleted = Math.max(0, classifiableCompleted - suspiciousCount);
   const employeeFailureCount = normalizeCount(row.employee_failure_count);
   const coverage = completed ? classifiableCompleted / completed : 0;
-  const authoritativeCompleted = Math.min(completed, normalizeCount(row.authoritative_completed));
   const liveSnapshotCount = Math.min(classifiableCompleted, normalizeCount(row.live_snapshot_count));
   const backfillCount = Math.min(classifiableCompleted, normalizeCount(row.backfill_current_catalog_count));
   const unclassifiedCount = completed - classifiableCompleted;
-  const allEvidenceAuthoritative = completed > 0 && authoritativeCompleted === completed;
+  // Eligibility is based on the reconciled classifiable sample and its
+  // coverage. A mixed period is valid when it contains usable authoritative
+  // evidence; only an approximate-only period remains provisional. The old
+  // `authoritativeCompleted === completed` check incorrectly made any mixed
+  // source (and even an otherwise complete period with one unclassifiable
+  // completion) ineligible, despite the published 10/90% policy.
+  const sourcesReconcile = liveSnapshotCount + backfillCount === classifiableCompleted;
+  const authoritativeEvidence = row.data_confidence === 'authoritative'
+    && row.assessment_source === 'live_snapshot'
+    && backfillCount === 0
+    && liveSnapshotCount === classifiableCompleted
+    && sourcesReconcile;
+  const mixedEvidence = row.data_confidence === 'mixed'
+    && row.assessment_source === 'mixed'
+    && liveSnapshotCount > 0
+    && sourcesReconcile;
+  const hasUsableEvidence = authoritativeEvidence || mixedEvidence;
   const eligible = row.is_archived !== true
     && classifiableCompleted >= rules.minimum_classifiable_completed
     && coverage >= rules.minimum_classification_coverage
-    && allEvidenceAuthoritative;
+    && hasUsableEvidence;
 
   let provisionalReason = null;
   if (row.is_archived === true) provisionalReason = 'employee_archived';
   else if (completed === 0) provisionalReason = 'no_completed_orders';
   else if (classifiableCompleted < rules.minimum_classifiable_completed) provisionalReason = 'insufficient_classifiable_completed';
   else if (coverage < rules.minimum_classification_coverage) provisionalReason = 'insufficient_classification_coverage';
-  else if (!allEvidenceAuthoritative) {
-    if (row.data_confidence === 'mixed') provisionalReason = 'mixed_data';
-    else if (row.data_confidence === 'approximate') provisionalReason = 'approximate_data';
+  else if (!hasUsableEvidence) {
+    if (row.data_confidence === 'approximate' || (backfillCount > 0 && liveSnapshotCount === 0)) {
+      provisionalReason = 'approximate_data';
+    }
     else provisionalReason = 'no_authoritative_snapshot';
   }
 
@@ -102,13 +118,13 @@ function normalizeEmployeeMetrics(row, rules = DEFAULT_RULES) {
     completed,
     classifiable_completed: classifiableCompleted,
     classification_coverage: coverage,
-    assessment_source: allEvidenceAuthoritative ? 'live_snapshot' : (row.assessment_source || null),
+    assessment_source: row.assessment_source || null,
     assessment_source_counts: {
       backfill_current_catalog: backfillCount,
       live_snapshot: liveSnapshotCount,
       unclassified: unclassifiedCount,
     },
-    data_confidence: allEvidenceAuthoritative ? 'authoritative' : (row.data_confidence || 'insufficient'),
+    data_confidence: row.data_confidence || 'insufficient',
     trusted_completed: trustedCompleted,
     suspicious_count: suspiciousCount,
     suspicious_rate: classifiableCompleted ? suspiciousCount / classifiableCompleted : 0,

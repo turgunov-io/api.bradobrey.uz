@@ -85,7 +85,7 @@ async function loadEmployeeRows(access) {
          where a.classifiable and a.suspicious and a.review_state in ('unreviewed', 'confirmed')
        )::int as suspicious_count,
        count(a.queue_entry_id) filter (
-         where a.assessment_source = 'live_snapshot' and a.data_confidence = 'authoritative'
+         where a.classifiable and a.assessment_source = 'live_snapshot' and a.data_confidence = 'authoritative'
        )::int as authoritative_completed,
        count(a.queue_entry_id) filter (
          where a.classifiable and a.assessment_source = 'live_snapshot'
@@ -96,22 +96,22 @@ async function loadEmployeeRows(access) {
          as backfill_current_catalog_count,
        count(a.queue_entry_id) filter (where not a.classifiable)::int as unclassified_count,
        case
-         when count(a.queue_entry_id) filter (where a.assessment_source = 'live_snapshot') > 0
-          and count(a.queue_entry_id) filter (where a.assessment_source = 'backfill_current_catalog') > 0
+          when count(a.queue_entry_id) filter (where a.classifiable and a.assessment_source = 'live_snapshot') > 0
+           and count(a.queue_entry_id) filter (where a.classifiable and a.assessment_source = 'backfill_current_catalog') > 0
            then 'mixed'
-         when count(a.queue_entry_id) filter (where a.assessment_source = 'backfill_current_catalog') > 0
+          when count(a.queue_entry_id) filter (where a.classifiable and a.assessment_source = 'backfill_current_catalog') > 0
            then 'backfill_current_catalog'
-         when count(a.queue_entry_id) filter (where a.assessment_source = 'live_snapshot') > 0
+          when count(a.queue_entry_id) filter (where a.classifiable and a.assessment_source = 'live_snapshot') > 0
            then 'live_snapshot'
          else null
        end as assessment_source,
        case
-         when count(a.queue_entry_id) filter (where a.data_confidence = 'authoritative') > 0
-          and count(a.queue_entry_id) filter (where a.data_confidence = 'approximate') > 0
+          when count(a.queue_entry_id) filter (where a.classifiable and a.data_confidence = 'authoritative') > 0
+           and count(a.queue_entry_id) filter (where a.classifiable and a.data_confidence = 'approximate') > 0
            then 'mixed'
-         when count(a.queue_entry_id) filter (where a.data_confidence = 'approximate') > 0
+          when count(a.queue_entry_id) filter (where a.classifiable and a.data_confidence = 'approximate') > 0
            then 'approximate'
-         when count(a.queue_entry_id) filter (where a.data_confidence = 'authoritative') > 0
+          when count(a.queue_entry_id) filter (where a.classifiable and a.data_confidence = 'authoritative') > 0
            then 'authoritative'
          else 'insufficient'
        end as data_confidence,
@@ -177,7 +177,7 @@ async function loadFailureCounts(access) {
   const end = appendParam(params, access.range.endExclusive);
   const reasons = appendParam(params, [...EMPLOYEE_FAILURE_REASONS]);
   const result = await pool.query(
-    `select e.responsible_employee_id as employee_id, count(*)::int as employee_failure_count
+    `select e.responsible_employee_id as employee_id, count(distinct e.queue_entry_id)::int as employee_failure_count
        from queue_status_events e
       where e.occurred_at >= ${start}::timestamptz
         and e.occurred_at < ${end}::timestamptz
@@ -204,9 +204,9 @@ async function loadNeutralCounts(access) {
   const result = await pool.query(
     `select
        e.barber_id as employee_id,
-       count(*) filter (where e.to_status = 'no_show')::int as no_show_count,
-       count(*) filter (where e.to_status = 'not_in_time')::int as not_in_time_count,
-       count(*) filter (
+       count(distinct e.queue_entry_id) filter (where e.to_status = 'no_show')::int as no_show_count,
+       count(distinct e.queue_entry_id) filter (where e.to_status = 'not_in_time')::int as not_in_time_count,
+       count(distinct e.queue_entry_id) filter (
          where e.to_status = 'cancelled'
            and not (e.actor_type = 'employee'
              and e.responsible_employee_id is not null
