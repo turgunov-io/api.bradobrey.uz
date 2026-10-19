@@ -56,6 +56,20 @@
 
 ## Долговременные факты
 
+- Telegram OTP production audit 2026-10-19: the rotated Bot token passed `getMe`,
+  but production had no webhook (`hasUrl=false`) and three pending updates while
+  the backend only handled webhook delivery. The webhook is now configured at
+  the API endpoint with the existing secret and `allowed_updates=["message"]`;
+  pending updates drained to zero and no Telegram webhook error is present.
+  Do not store the token, webhook secret, SSH password, or database credentials
+  in project memory.
+- Local Telegram OTP hardening 2026-10-19 adds structured redacted Bot API
+  diagnostics, timeout/upstream error classification, and preserves a pending
+  OTP if Telegram accepted the message but the follow-up delivery-status audit
+  write failed. The focused/full local suite passes 155/155. Production source
+  overlay must remain file-scoped because the production checkout has unrelated
+  dirty changes.
+
 - Backend использует Express, PostgreSQL и Socket.IO; Marketplace и kiosk объединены через legacy `queue_entries`.
 - В queue Marketplace сейчас кодируется как `source='site'`, а в marketplace booking используется `MARKETPLACE`. Это текущая совместимость, но контракт нужно нормализовать и документировать.
 - Group booking реализован транзакционно; single booking на 2026-10-03 неатомарен.

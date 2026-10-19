@@ -290,3 +290,14 @@
 - Added shared Tashkent half-open date normalization for history and legacy statistics queries, including calendar validation and reversed-range rejection.
 - Added first-visit date to history client projections, counted rejection statuses consistently, and replaced raw database error responses with stable generic error codes.
 - Added `test/statisticsDate.test.js`; the audit report is in `C:\project\bradobrey-audit-report\2026-10-19-statistics\AUDIT_REPORT.md`.
+# 2026-10-19 — Telegram OTP production recovery and hardening
+
+- Rotated/validated the Telegram Bot runtime credential and restored the missing
+  production webhook; pending Telegram updates drained successfully.
+- Added a safe webhook setup script, structured redacted Bot API diagnostics,
+  timeout/upstream error classification, and a regression guard that does not
+  invalidate an OTP after Telegram accepted it when only delivery-status
+  persistence fails.
+- Local backend suite: 155/155 passing. A real user-driven OTP verification is
+  still required for end-to-end delivery confirmation.
+

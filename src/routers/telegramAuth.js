@@ -3,18 +3,24 @@ const express = require('express');
 
 const TelegramAuth = require('../services/telegramAuth');
 const { rateLimit } = require('../middleware/rateLimit');
+const { logTelegramEvent } = require('../utils/telegramAuditLogger');
 
 const router = express.Router();
 const sendLimiter = rateLimit({ windowMs: 24 * 60 * 60 * 1000, max: 10, keyPrefix: 'telegram-bot-send' });
 const verifyLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 10, keyPrefix: 'telegram-bot-verify' });
 
-const handleError = (res, error) => {
+const handleError = (req, res, error) => {
   if (error?.expose && Number.isInteger(error.status)) {
     const body = { error: error.message, code: error.code };
     if (Number.isInteger(error.retryAfter)) body.retryAfter = error.retryAfter;
     return res.status(error.status).json(body);
   }
-  console.error('[telegram-bot-auth] request failed', error?.code || 'UNKNOWN');
+  logTelegramEvent(console, 'http_request_failed', {
+    route: req?.path,
+    method: req?.method,
+    status: error?.status || 500,
+    failure: error?.code || 'UNKNOWN',
+  }, 'error');
   return res.status(500).json({ error: 'Internal server error', code: 'TELEGRAM_AUTH_FAILED' });
 };
 
@@ -30,7 +36,7 @@ const sendCode = async (req, res) => {
       purpose: req.body?.purpose || req.body?.auth_mode,
     }));
   }
-  catch (error) { return handleError(res, error); }
+  catch (error) { return handleError(req, res, error); }
 };
 
 const verifyCode = async (req, res) => {
@@ -45,7 +51,7 @@ const verifyCode = async (req, res) => {
       patronymic: req.body?.patronymic,
       language: req.body?.language,
     }));
-  } catch (error) { return handleError(res, error); }
+  } catch (error) { return handleError(req, res, error); }
 };
 
 const hasWebhookSecret = (req) => {
@@ -63,7 +69,9 @@ const webhook = async (req, res) => {
   // upstream timeouts and duplicate retries when Telegram is slow.
   res.sendStatus(200);
   Promise.resolve(TelegramAuth.handleWebhook(req.body)).catch((error) => {
-    console.error('[telegram-bot-webhook] update failed', error?.code || 'UNKNOWN');
+    logTelegramEvent(console, 'webhook_update_failed', {
+      failure: error?.code || 'UNKNOWN',
+    }, 'error');
   });
 };
 

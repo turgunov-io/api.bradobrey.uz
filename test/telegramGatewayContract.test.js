@@ -10,6 +10,7 @@ test('Telegram phone auth uses Bot API and keeps Gateway/MTProto out of the OTP 
   const bot = read('src/services/telegram-bot.service.js');
   const router = read('src/routers/telegramAuth.js');
   const env = read('.env.example');
+  const webhookScript = read('scripts/configure-telegram-webhook.js');
   assert.match(router, /router\.post\('\/send-code'/);
   assert.match(router, /router\.post\('\/verify-code'/);
   assert.match(router, /router\.post\('\/webhook'/);
@@ -23,6 +24,8 @@ test('Telegram phone auth uses Bot API and keeps Gateway/MTProto out of the OTP 
   assert.match(env, /TELEGRAM_BOT_USERNAME=/);
   assert.match(env, /TELEGRAM_WEBHOOK_SECRET=/);
   assert.doesNotMatch(env, /TELEGRAM_GATEWAY|TELEGRAM_API_ID|TELEGRAM_API_HASH/);
+  assert.match(webhookScript, /setWebhook/);
+  assert.match(webhookScript, /api\/integrations\/telegram\/webhook/);
 });
 
 test('Telegram Bot migration has binding, link-token and hash-only OTP fields', () => {

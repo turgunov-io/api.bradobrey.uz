@@ -20,7 +20,7 @@ class FakeBot {
 }
 
 class FakePool {
-  constructor(account = null) { this.account = account; this.challenge = null; this.historyCount = 0; this.ageSeconds = null; }
+  constructor(account = null) { this.account = account; this.challenge = null; this.historyCount = 0; this.ageSeconds = null; this.failDeliveryStatus = false; }
   async connect() { return { query: (sql, params) => this.execute(sql, params || []), release() {} }; }
   async query(sql, params) { return this.execute(sql, params || []); }
   async execute(sql, params) {
@@ -49,7 +49,7 @@ class FakePool {
     if (q.startsWith('update telegram_auth_challenges set status = \'verified\'')) { this.challenge.status = 'verified'; this.challenge.usedAt = true; return { rows: [{ challenge_hash: this.challenge.challengeHash }] }; }
     if (q.startsWith('update telegram_auth_challenges set status = \'awaiting_contact\'')) { this.challenge.status = 'awaiting_contact'; this.challenge.telegramUserId = params[1]; this.challenge.telegramChatId = params[2]; return { rows: [] }; }
     if (q.startsWith('update telegram_auth_challenges set status = \'pending\'')) { this.challenge.status = 'pending'; this.challenge.phone = params[1]; this.challenge.otpHash = params[2]; return { rows: [] }; }
-    if (q.startsWith('update telegram_auth_challenges set')) { if (q.includes('delivery_status')) this.challenge.deliveryStatus = params[0]; if (q.includes("status = 'failed'")) { this.challenge.status = 'failed'; this.challenge.usedAt = true; } return { rows: [] }; }
+    if (q.startsWith('update telegram_auth_challenges set')) { if (this.failDeliveryStatus && q.includes('delivery_status')) throw new Error('delivery status persistence unavailable'); if (q.includes('delivery_status')) this.challenge.deliveryStatus = params[0]; if (q.includes("status = 'failed'")) { this.challenge.status = 'failed'; this.challenge.usedAt = true; } return { rows: [] }; }
     if (q.startsWith('select id, email, phone')) return { rows: this.account ? [this.account] : [] };
     if (q.startsWith('select id from marketplace_clients')) return { rows: [] };
     if (q.startsWith('insert into marketplace_clients')) { this.account = { id: 'client-1', email: null, phone: params[0], display_name: params[1], first_name: params[2], last_name: params[3], patronymic: params[4], language: params[5] || 'ru', is_active: true, telegram_user_id: params[6], telegram_chat_id: params[7] }; return { rows: [this.account] }; }
@@ -144,4 +144,18 @@ test('missing Bot credentials fail closed before delivery', async () => {
   const pool = new FakePool();
   const service = new TelegramAuthService({ pool, env: { ...ENV, TELEGRAM_BOT_TOKEN: '' } });
   await assert.rejects(service.sendCode({ phone: '+998901234567' }), (error) => error.code === 'TELEGRAM_BOT_NOT_CONFIGURED');
+});
+
+test('keeps a delivered OTP valid when only delivery-status persistence fails', async () => {
+  const pool = new FakePool();
+  pool.failDeliveryStatus = true;
+  const bot = new FakeBot();
+  const service = makeService(pool, bot);
+  const { challenge_id: challengeId, linkToken } = await service.sendCode({});
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, text: `/start ${linkToken}` } });
+  await service.handleWebhook({ message: { from: { id: 42 }, chat: { id: 84 }, contact: { user_id: 42, phone_number: '+998901234567' } } });
+  assert.equal(pool.challenge.status, 'pending');
+  const code = bot.messages[1].text.match(/\b(\d{6})\b/)[1];
+  const result = await service.verifyCode({ challengeId, code });
+  assert.equal(result.verified, true);
 });

@@ -50,3 +50,18 @@ For an API-only release:
 - Corrected six active Chimgan employee overrides from 10:00–09:00 to 10:00–20:00 transactionally; other days and branch-default schedules were unchanged. Pre-change row backup: `/var/backups/chimgan-personal-schedule-pre-20261018-1792344430045.json`.
 - API source backup: `/var/backups/api-verifix-validation-pre-20261018-222400.tar.gz`; Dashboard source and prior `.output` backup: `/var/backups/dashboard-verifix-validation-pre-20261018-222400.tar.gz`.
 - Restarted `BRADOBREY-BARBER` and `bradobrey-dashboard`; both are online. API `/health` and Dashboard `/login` returned HTTP 200. Production Dashboard had unrelated dirty employee/login files; they were preserved.
+# Telegram OTP deployment note — 2026-10-19
+
+- The production Bot token was rotated outside Git and validated with Telegram
+  `getMe`; secret values are intentionally not recorded here.
+- Production webhook was configured without deleting pending updates:
+  `/api/integrations/telegram/webhook`, protected by the runtime webhook secret,
+  with `message` updates only. `getWebhookInfo` reported a configured URL,
+  zero pending updates, and no last error after setup.
+- The source hardening is tested locally before deployment. Deploy only the
+  reviewed Telegram source/script/package/example/test/report files, preserve
+  unrelated production worktree changes, restart only `BRADOBREY-BARBER`, and
+  verify `/health`, PM2 status, webhook info, and both webhook-secret paths.
+- A real OTP completion still requires a human test account/chat interaction;
+  no user phone or OTP is stored in deployment documentation.
+

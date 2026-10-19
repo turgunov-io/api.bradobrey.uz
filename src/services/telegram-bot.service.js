@@ -1,19 +1,36 @@
 const DEFAULT_TIMEOUT_MS = 8 * 1000;
 
+const { logTelegramEvent } = require('../utils/telegramAuditLogger');
+
 class TelegramBotError extends Error {
-  constructor(code, status = 502) {
+  constructor(code, status = 502, details = {}) {
     super('Telegram Bot API request failed');
     this.name = 'TelegramBotError';
     this.code = String(code || 'UNKNOWN').toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 80);
     this.status = status;
+    this.telegramErrorCode = Number.isInteger(details.telegramErrorCode)
+      ? details.telegramErrorCode
+      : null;
+    this.telegramDescription = typeof details.telegramDescription === 'string'
+      ? details.telegramDescription.slice(0, 200)
+      : null;
+    this.retryAfter = Number.isInteger(details.retryAfter)
+      ? details.retryAfter
+      : null;
   }
 }
 
 class TelegramBotService {
-  constructor({ fetchImpl = globalThis.fetch, env = process.env, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  constructor({
+    fetchImpl = globalThis.fetch,
+    env = process.env,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    logger = console,
+  } = {}) {
     this.fetchImpl = fetchImpl;
     this.env = env;
     this.timeoutMs = timeoutMs;
+    this.logger = logger;
   }
 
   getConfig() {
@@ -28,16 +45,64 @@ class TelegramBotService {
     if (typeof this.fetchImpl !== 'function') throw new TelegramBotError('FETCH_UNAVAILABLE', 503);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const startedAt = Date.now();
     try {
       let response;
       try {
         response = await this.fetchImpl(`https://api.telegram.org/bot${token}/${method}`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal,
         });
-      } catch (_) { throw new TelegramBotError('NETWORK_FAILURE'); }
+      } catch (error) {
+        const failure = controller.signal.aborted || error?.name === 'AbortError'
+          ? 'TIMEOUT'
+          : 'NETWORK_FAILURE';
+        const botError = new TelegramBotError(failure);
+        logTelegramEvent(this.logger, 'bot_api_failed', {
+          method,
+          failure,
+          durationMs: Date.now() - startedAt,
+        }, 'error');
+        throw botError;
+      }
       let body;
-      try { body = await response.json(); } catch (_) { throw new TelegramBotError('INVALID_RESPONSE'); }
-      if (!response.ok || !body?.ok) throw new TelegramBotError('UPSTREAM_REJECTED', response.status >= 500 ? 502 : 400);
+      try {
+        body = await response.json();
+      } catch (_) {
+        const botError = new TelegramBotError('INVALID_RESPONSE');
+        logTelegramEvent(this.logger, 'bot_api_failed', {
+          method,
+          failure: botError.code,
+          httpStatus: response.status,
+          durationMs: Date.now() - startedAt,
+        }, 'error');
+        throw botError;
+      }
+      if (!response.ok || !body?.ok) {
+        const botError = new TelegramBotError(
+          'UPSTREAM_REJECTED',
+          response.status >= 500 ? 502 : 400,
+          {
+            telegramErrorCode: body?.error_code,
+            telegramDescription: body?.description,
+            retryAfter: body?.parameters?.retry_after,
+          },
+        );
+        logTelegramEvent(this.logger, 'bot_api_failed', {
+          method,
+          failure: botError.code,
+          httpStatus: response.status,
+          upstreamErrorCode: botError.telegramErrorCode,
+          upstreamDescription: botError.telegramDescription,
+          retryAfter: botError.retryAfter,
+          durationMs: Date.now() - startedAt,
+        }, 'error');
+        throw botError;
+      }
+      logTelegramEvent(this.logger, 'bot_api_succeeded', {
+        method,
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+      });
       return body.result || {};
     } finally { clearTimeout(timeout); }
   }

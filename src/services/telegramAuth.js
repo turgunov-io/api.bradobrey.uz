@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const { pool: defaultPool } = require('../config/postgres');
 const TelegramBotService = require('./telegram-bot.service');
 const { TelegramBotError } = require('./telegram-bot.service');
+const { logTelegramEvent, maskIdentifier } = require('../utils/telegramAuditLogger');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const LINK_TTL_SECONDS = 5 * 60;
@@ -45,10 +46,17 @@ const sameSecret = (left, right) => {
 };
 
 class TelegramAuthService {
-  constructor({ pool = defaultPool, botService, fetchImpl = globalThis.fetch, env = process.env } = {}) {
+  constructor({
+    pool = defaultPool,
+    botService,
+    fetchImpl = globalThis.fetch,
+    env = process.env,
+    logger = console,
+  } = {}) {
     this.pool = pool;
     this.env = env;
-    this.bot = botService || new TelegramBotService({ fetchImpl, env });
+    this.logger = logger;
+    this.bot = botService || new TelegramBotService({ fetchImpl, env, logger });
   }
 
   getJwtSecret() {
@@ -118,16 +126,37 @@ class TelegramAuthService {
   }
 
   async sendOtp(challenge, code) {
+    const context = {
+      challenge: String(challenge.challengeHash || '').slice(0, 12),
+      chat: maskIdentifier(challenge.chatId),
+      phone: maskIdentifier(challenge.phone),
+    };
+    let sent;
     try {
-      const sent = await this.bot.sendMessage(challenge.chatId, `Ваш код для входа в Bradobrey: ${code}\nКод действует ещё 60 секунд.`, {
+      sent = await this.bot.sendMessage(challenge.chatId, `Ваш код для входа в Bradobrey: ${code}\nКод действует ещё 60 секунд.`, {
         reply_markup: { inline_keyboard: [[{ text: '📋 Копировать код', copy_text: { text: code } }]] },
       });
-      await this.updateChallenge(challenge.challengeHash, { delivery_status: 'sent' });
-      if (sent?.message_id) this.scheduleOtpCountdown(challenge.chatId, sent.message_id, code);
     } catch (error) {
+      logTelegramEvent(this.logger, 'otp_delivery_failed', {
+        ...context,
+        failure: error?.code || 'TELEGRAM_DELIVERY_FAILED',
+      }, 'error');
       await this.updateChallenge(challenge.challengeHash, { status: 'failed', used_at: new Date(), delivery_status: 'failed' }).catch(() => {});
       throw this.mapBotError(error, 'TELEGRAM_CODE_SEND_FAILED');
     }
+    try {
+      await this.updateChallenge(challenge.challengeHash, { delivery_status: 'sent' });
+    } catch (_) {
+      // The message was accepted by Telegram. Keep the pending OTP valid when
+      // only the delivery-status audit write failed after the external send.
+      logTelegramEvent(this.logger, 'otp_delivery_state_unconfirmed', {
+        ...context,
+        failure: 'DELIVERY_STATUS_PERSIST_FAILED',
+      }, 'error');
+    }
+    logTelegramEvent(this.logger, 'otp_delivery_succeeded', context);
+    if (sent?.message_id) this.scheduleOtpCountdown(challenge.chatId, sent.message_id, code);
+    return sent;
   }
 
   scheduleOtpCountdown(chatId, messageId, code) {
@@ -441,6 +470,15 @@ class TelegramAuthService {
     const reserved = await this.reserveVerification(challengeHash, null);
     if (!sameSecret(this.hashOtp(code), reserved.otp_hash)) {
       await this.markInvalidCode(reserved.challenge_hash, Number(reserved.attempts) + 1, reserved.max_attempts);
+      logTelegramEvent(this.logger, 'otp_verification_rejected', {
+        challenge: String(reserved.challenge_hash || '').slice(0, 12),
+        chat: maskIdentifier(reserved.telegram_chat_id),
+        phone: maskIdentifier(reserved.phone),
+        failure: Number(reserved.attempts) + 1 >= Number(reserved.max_attempts)
+          ? 'TOO_MANY_CODE_ATTEMPTS'
+          : 'INVALID_CODE',
+        attempt: Number(reserved.attempts) + 1,
+      });
       throw new TelegramAuthError(400, 'INVALID_CODE', 'Invalid verification code');
     }
     const { account, isNew } = await this.completeLogin({
@@ -456,6 +494,11 @@ class TelegramAuthService {
       language: normalizedLanguage || reserved.language,
     });
     const token = jwt.sign({ sub: account.id, email: account.email || null, phone: account.phone, role: MARKETPLACE_ROLE }, this.getJwtSecret(), { expiresIn: this.env.JWT_EXPIRES_IN || '12h' });
+    logTelegramEvent(this.logger, 'otp_verification_succeeded', {
+      challenge: String(reserved.challenge_hash || '').slice(0, 12),
+      chat: maskIdentifier(reserved.telegram_chat_id),
+      phone: maskIdentifier(reserved.phone),
+    });
     return {
       token,
       accessToken: token,
