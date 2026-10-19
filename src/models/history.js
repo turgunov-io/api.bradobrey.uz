@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
+const { normalizeOptionalDateRange } = require('../utils/statisticsDate');
 
 // Managers can also accept orders, so their barber workspace history is valid.
 const BARBER_HISTORY_ROLES = new Set([
@@ -14,21 +15,6 @@ const QUEUE_TIMESTAMP_KEYS = ['created_at', 'finished_at', 'started_at'];
 // previously omitted, which made the dashboard appear empty for branches that
 // mostly close orders through the rejection flow.
 const HISTORY_STATUSES = ['waiting', 'called', 'swapped', 'transfer_pending', 'in_progress', 'completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
-
-const normalizeHistoryDateBound = (value, endOfDay = false) => {
-    if (value === undefined || value === null || value === '') return null;
-
-    const text = String(value).trim();
-    const dateOnly = /^(\d{4}-\d{2}-\d{2})$/.exec(text);
-    const timestamp = dateOnly
-        ? `${dateOnly[1]}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`
-        : text;
-    const parsed = new Date(timestamp);
-
-    if (Number.isNaN(parsed.getTime())) return undefined;
-    if (dateOnly && parsed.toISOString().slice(0, 10) !== dateOnly[1]) return undefined;
-    return parsed.toISOString();
-};
 
 const toAmount = (value) => {
     const amount = Number(value);
@@ -283,7 +269,7 @@ class History {
                 price_override_reason,
                 branch_id,
                 barber_id,
-                client:clients ( id, name, phone )
+                client:clients ( id, name, phone, first_visit_date )
             `;
 
         const selectWithoutCertificate = `
@@ -299,7 +285,7 @@ class History {
                 price_override_reason,
                 branch_id,
                 barber_id,
-                client:clients ( id, name, phone )
+                client:clients ( id, name, phone, first_visit_date )
             `;
 
         let query = db
@@ -360,11 +346,14 @@ class History {
         const fetchAll = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
         const fromValue = req.query.from || req.query.start_date;
         const toValue = req.query.to || req.query.end_date;
-        const from = normalizeHistoryDateBound(fromValue);
-        const to = normalizeHistoryDateBound(toValue, true);
+        let from = null;
+        let to = null;
 
-        if ((fromValue && !from) || (toValue && !to)) {
-            return res.status(400).json({ error: 'Invalid history date range' });
+        if (fromValue || toValue) {
+            const range = normalizeOptionalDateRange(fromValue, toValue);
+            if (range.error) return res.status(400).json({ error: range.error });
+            from = range.startInclusive;
+            to = range.endExclusive;
         }
 
         const statusesParam = req.query.status;
@@ -394,7 +383,7 @@ class History {
             price_override_reason,
             branch_id,
             barber_id,
-            client:clients ( id, name, phone, rank, completed_visits ),
+            client:clients ( id, name, phone, rank, completed_visits, first_visit_date ),
             barber:barbers ( id, name )
         `, { count: 'exact' })
             .in('status', statuses.length ? statuses : HISTORY_STATUSES)
@@ -410,19 +399,21 @@ class History {
         }
 
         if (from) query = query.gte('created_at', from);
-        if (to) query = query.lte('created_at', to);
+        if (to) query = query.lt('created_at', to);
 
         const { data, error, count } = await query;
 
         if (error) {
-            return res.status(500).json({ error: error.message });
+            console.error('History query failed:', error.message);
+            return res.status(500).json({ code: 'HISTORY_LOAD_FAILED', error: 'Failed to load history' });
         }
 
         let items;
         try {
             items = await prepareHistoryEntries(data || []);
         } catch (amountError) {
-            return res.status(500).json({ error: amountError.message });
+            console.error('History enrichment failed:', amountError.message);
+            return res.status(500).json({ code: 'HISTORY_LOAD_FAILED', error: 'Failed to load history' });
         }
 
         const visits = {};
@@ -475,7 +466,7 @@ class History {
                 price_override_reason,
                 branch_id,
                 barber_id,
-                client:clients ( id, name, phone, rank, completed_visits ),
+                client:clients ( id, name, phone, rank, completed_visits, first_visit_date ),
                 barber:barbers ( id, name )
             `)
             .eq('branch_id', id)
@@ -483,13 +474,15 @@ class History {
             .order('created_at', { ascending: false });
 
         if (error) {
-            return res.status(500).json({ error: error.message });
+            console.error('Branch history query failed:', error.message);
+            return res.status(500).json({ code: 'HISTORY_LOAD_FAILED', error: 'Failed to load history' });
         }
 
         try {
             return res.json({ data: await prepareHistoryEntries(data || []) })
         } catch (amountError) {
-            return res.status(500).json({ error: amountError.message });
+            console.error('Branch history enrichment failed:', amountError.message);
+            return res.status(500).json({ code: 'HISTORY_LOAD_FAILED', error: 'Failed to load history' });
         }
     }
 }

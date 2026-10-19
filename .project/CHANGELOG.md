@@ -284,3 +284,9 @@
 
 - Added an authenticated browser subscription status check scoped to the current user and endpoint. Test push accepts an optional endpoint and targets only that owned browser subscription while preserving legacy user-wide sends when omitted.
 - Added regression coverage for authentication, ownership scoping, exact-device delivery, and missing subscriptions.
+
+# 2026-10-19 — statistics audit fixes
+
+- Added shared Tashkent half-open date normalization for history and legacy statistics queries, including calendar validation and reversed-range rejection.
+- Added first-visit date to history client projections, counted rejection statuses consistently, and replaced raw database error responses with stable generic error codes.
+- Added `test/statisticsDate.test.js`; the audit report is in `C:\project\bradobrey-audit-report\2026-10-19-statistics\AUDIT_REPORT.md`.

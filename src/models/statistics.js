@@ -1,13 +1,10 @@
 const { db } = require('../config/postgres');
 const { classifyCompletedOrder } = require('../services/employeeQuality');
+const { normalizeStatisticsDateRange, toTashkentDateKey } = require('../utils/statisticsDate');
 
 const percent = (count, total) => (total ? Number(((count / total) * 100).toFixed(1)) : 0);
 
-const toDateKey = (value) => {
-  const ts = Date.parse(value);
-  if (Number.isNaN(ts)) return 'unknown';
-  return new Date(ts).toISOString().slice(0, 10);
-};
+const toDateKey = toTashkentDateKey;
 
 const bump = (bucket, key) => {
   const finalKey = key ?? 'unknown';
@@ -57,6 +54,9 @@ class Statistics {
       return res.status(400).json({ error: 'start_date and end_date are required' });
     }
 
+    const dateRange = normalizeStatisticsDateRange(startDate, endDate);
+    if (dateRange.error) return res.status(400).json({ error: dateRange.error });
+
     try {
       const ordersResult = await db.query(
         `select
@@ -84,7 +84,7 @@ class Statistics {
            and q.created_at >= $2
            and q.created_at < $3
          order by q.created_at desc`,
-        [branchId, startDate, endDate]
+        [branchId, dateRange.startInclusive, dateRange.endExclusive]
       );
 
       const orders = ordersResult.rows || [];
@@ -275,7 +275,8 @@ class Statistics {
         orders: preparedOrders,
       });
     } catch (error) {
-      return res.status(500).json({ error: error.message || 'Failed to load manager statistics' });
+      console.error('Manager statistics query failed:', error.message);
+      return res.status(500).json({ code: 'STATISTICS_LOAD_FAILED', error: 'Failed to load manager statistics' });
     }
   }
 
@@ -309,9 +310,17 @@ class Statistics {
       return res.status(400).json({ error: 'start_date and end_date are required' });
     }
 
-    const { data, error } = await this.fetchEntries({ start_date, end_date, ...scope });
+    const dateRange = normalizeStatisticsDateRange(start_date, end_date);
+    if (dateRange.error) return res.status(400).json({ error: dateRange.error });
+
+    const { data, error } = await this.fetchEntries({
+      end_date: dateRange.endExclusive,
+      start_date: dateRange.startInclusive,
+      ...scope,
+    });
     if (error) {
-      return res.status(500).json({ error: error.message });
+      console.error('Statistics query failed:', error.message);
+      return res.status(500).json({ code: 'STATISTICS_LOAD_FAILED', error: 'Failed to load statistics' });
     }
 
     const response = await this.buildResponse(data || [], { start_date, end_date, ...scope });
@@ -323,7 +332,7 @@ class Statistics {
       .from('queue_entries')
       .select('id, client_id, branch_id, barber_id, source, status, payment_method, created_at, finished_at');
 
-    query.gte('created_at', start_date).lte('created_at', end_date);
+    query.gte('created_at', start_date).lt('created_at', end_date);
 
     if (branchId) query.eq('branch_id', branchId);
     if (barberId) query.eq('barber_id', barberId);

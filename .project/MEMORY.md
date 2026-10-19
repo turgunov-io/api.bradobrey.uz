@@ -424,3 +424,6 @@
 # Owner workflow preference (2026-10-19)
 
 - Make requested project changes in the local repositories and push Git changes when requested/appropriate. Do not deploy, pull/overlay source on production, build there, restart production processes, or otherwise modify production until the owner explicitly authorizes a production deployment in that request.
+- Statistics/history date-only filters use `Asia/Tashkent` half-open calendar ranges through `src/utils/statisticsDate.js`; do not revert to UTC `Z` parsing or inclusive end bounds.
+- History responses include `clients.first_visit_date` for period-scoped dashboard new/repeat calculations. Legacy history/statistics handlers return generic 500 codes and log database/provider details server-side.
+- Statistics audit report: `C:\project\bradobrey-audit-report\2026-10-19-statistics\AUDIT_REPORT.md`. No staging/production runtime verification or deployment was performed.
