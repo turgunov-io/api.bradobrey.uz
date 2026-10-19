@@ -375,3 +375,11 @@
 - Added certificate contract tests. Local backend suite: 168/168 passing;
   PostgreSQL integration remained skipped because the local database was absent.
 
+# 2026-10-19 — gift certificate payment rule
+
+- Hardened idempotent certificate booking responses to keep payable total at
+  zero and ignore legacy cashback rows.
+- Added contract coverage for zero payable totals and cashback exclusion.
+- Applied the focused certificate lifecycle migration in production and
+  restarted only `BRADOBREY-BARBER`.
+

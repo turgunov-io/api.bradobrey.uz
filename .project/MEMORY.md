@@ -518,3 +518,12 @@
   certificate but does not rewrite historical `is_used` values. Staging must
   verify legacy data, concurrent claims, completion rollback, and the real
   `A005` row before production rollout; no local PostgreSQL was available.
+
+# Gift certificate payment rule (2026-10-19)
+
+- Certificate-backed bookings always expose `payable_total=0`.
+- Cashback spend is rejected for certificate payment, and completion cashback
+  award is skipped for entries with `certificate_id` or certificate payment.
+- The certificate lifecycle migration was applied to production with a focused
+  transaction and only the API PM2 process was restarted; dashboard was not
+  restarted. No production data was manually edited.

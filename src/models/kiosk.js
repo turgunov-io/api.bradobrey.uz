@@ -1172,36 +1172,40 @@ class Kiosk {
 
                 const existingDiscountedTotal = applyPromoDiscount(existingTotal, promoForDiscount);
 
+                const existingUsesGiftCertificate =
+                    Boolean(existingEntry.certificate_id) || existingEntry.payment_method === 'certificate';
                 let cashback = null;
-                let payableTotal = existingEntry.certificate_id ? 0 : existingDiscountedTotal;
+                let payableTotal = existingUsesGiftCertificate ? 0 : existingDiscountedTotal;
 
-                try {
-                    const { data: cashbackTx, error: cashbackError } = await db
-                        .from('cashback_transactions')
-                        .select('id, amount')
-                        .eq('queue_entry_id', String(existingEntry.id))
-                        .eq('kind', 'spend')
-                        .limit(1)
-                        .maybeSingle();
+                if (!existingUsesGiftCertificate) {
+                    try {
+                        const { data: cashbackTx, error: cashbackError } = await db
+                            .from('cashback_transactions')
+                            .select('id, amount')
+                            .eq('queue_entry_id', String(existingEntry.id))
+                            .eq('kind', 'spend')
+                            .limit(1)
+                            .maybeSingle();
 
-                    if (cashbackError) {
-                        const msg = String(cashbackError.message || '');
-                        if (!(msg.includes("Could not find the 'cashback_transactions'") || msg.includes('cashback_transactions'))) {
-                            return res.status(409).json({ error: cashbackError.message });
+                        if (cashbackError) {
+                            const msg = String(cashbackError.message || '');
+                            if (!(msg.includes("Could not find the 'cashback_transactions'") || msg.includes('cashback_transactions'))) {
+                                return res.status(409).json({ error: cashbackError.message });
+                            }
+                        } else if (cashbackTx?.id) {
+                            const spentAmount = roundMoney(Number(cashbackTx.amount || 0));
+                            const balance = await getWalletBalance(existingEntry.client_id);
+                            cashback = {
+                                used: spentAmount > 0,
+                                spent_amount: spentAmount,
+                                balance,
+                                transaction_id: cashbackTx.id,
+                            };
+                            payableTotal = roundMoney(Math.max(0, payableTotal - spentAmount));
                         }
-                    } else if (cashbackTx?.id) {
-                        const spentAmount = roundMoney(Number(cashbackTx.amount || 0));
-                        const balance = await getWalletBalance(existingEntry.client_id);
-                        cashback = {
-                            used: spentAmount > 0,
-                            spent_amount: spentAmount,
-                            balance,
-                            transaction_id: cashbackTx.id,
-                        };
-                        payableTotal = roundMoney(Math.max(0, payableTotal - spentAmount));
+                    } catch (cashbackUnhandled) {
+                        return res.status(409).json({ error: cashbackUnhandled?.message || 'Failed to load cashback data' });
                     }
-                } catch (cashbackUnhandled) {
-                    return res.status(409).json({ error: cashbackUnhandled?.message || 'Failed to load cashback data' });
                 }
 
                 return res.status(200).json({
@@ -1336,7 +1340,7 @@ class Kiosk {
 
         let cashback = null;
         let payableTotal = certificate ? 0 : discountedTotal;
-        if (useCashback) {
+        if (useCashback && !certificate) {
             const spendAmount = cashbackSpendAmount;
             payableTotal = roundMoney(Math.max(0, discountedTotal - spendAmount));
 

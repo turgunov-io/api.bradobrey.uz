@@ -55,6 +55,7 @@ test('certificate contracts normalize bearer codes and do not expose codes in pu
   );
   const appSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'app.js'), 'utf8');
   const schemaRunner = fs.readFileSync(path.resolve(__dirname, '..', 'scripts', 'apply-schema.sh'), 'utf8');
+  const cashback = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'composable', 'cashback.js'), 'utf8');
 
   assert.match(kiosk, /String\(code \|\| ''\)\.trim\(\)\.toUpperCase\(\)/);
   assert.match(kiosk, /idempotency_key is required for certificate bookings/);
@@ -75,6 +76,11 @@ test('certificate contracts normalize bearer codes and do not expose codes in pu
   assert.match(lifecycleMigration, /expires_at is null or expires_at > now\(\)/);
   assert.match(lifecycleMigration, /CERTIFICATE_UNAVAILABLE/);
   assert.match(lifecycleMigration, /CERTIFICATE_RESERVATION_MISSING/);
+  assert.match(kiosk, /Cashback cannot be used with certificate payment/);
+  assert.match(kiosk, /let payableTotal = certificate \? 0 : discountedTotal/);
+  assert.match(kiosk, /if \(useCashback && !certificate\)/);
+  assert.match(catalogService, /payableTotal = 0/);
+  assert.match(cashback, /usedCertificate[\s\S]*certificate_payment/);
 });
 
 test('certificate lifecycle states distinguish active, reserved, used, and expired', () => {
