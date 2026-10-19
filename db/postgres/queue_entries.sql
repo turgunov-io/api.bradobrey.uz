@@ -67,3 +67,22 @@ begin
 end $$;
 
 create index if not exists idx_queue_entries_certificate_id on queue_entries (certificate_id);
+
+-- Keep certificate references valid for new queue entries without making an
+-- existing deployment fail if it contains historical orphaned IDs. The
+-- constraint can be validated separately after orphan cleanup.
+do $$
+begin
+  if to_regclass('public.certificates') is not null
+     and not exists (
+       select 1 from pg_constraint
+       where conname = 'queue_entries_certificate_id_fkey'
+         and conrelid = 'queue_entries'::regclass
+     ) then
+    alter table queue_entries
+      add constraint queue_entries_certificate_id_fkey
+      foreign key (certificate_id) references certificates(id)
+      on delete restrict
+      not valid;
+  end if;
+end $$;

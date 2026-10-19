@@ -327,13 +327,26 @@ async function getReview(req, res) {
   }
   try {
     const result = await pool.query(
-      `select *
-         from marketplace_reviews
-        where marketplace_client_id = $1
-          and booking_id = $2
-          and (($3::uuid is null and service_id is null)
-            or ($3::uuid is not null and service_id = $3::uuid))
-        order by service_id nulls first, created_at desc`,
+      `with resolved_booking as (
+        select b.id
+          from marketplace_bookings b
+         where b.marketplace_client_id = $1
+           and (b.id = $2 or exists (
+             select 1
+               from marketplace_booking_persons bp
+              where bp.booking_id = b.id
+                and bp.queue_entry_id = $2
+           ))
+         order by case when b.id = $2 then 0 else 1 end, b.created_at desc
+         limit 1
+      )
+      select r.*
+        from marketplace_reviews r
+       where r.marketplace_client_id = $1
+         and r.booking_id = coalesce((select id from resolved_booking), $2)
+          and (($3::uuid is null and r.service_id is null)
+            or ($3::uuid is not null and r.service_id = $3::uuid))
+        order by r.service_id nulls first, r.created_at desc`,
       [clientId, bookingId, serviceId],
     );
     return res.json(serviceId

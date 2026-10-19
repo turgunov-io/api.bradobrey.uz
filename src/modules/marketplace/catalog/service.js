@@ -144,8 +144,8 @@ const validateCertificate = async ({ code, serviceIds, branch }) => {
 
   if (Array.isArray(certificate.service_ids) && certificate.service_ids.length) {
     const allowed = new Set(certificate.service_ids.map(String));
-    const hasCoveredService = serviceIds.some((serviceId) => allowed.has(String(serviceId)));
-    if (!hasCoveredService) {
+    const hasUnsupportedService = serviceIds.some((serviceId) => !allowed.has(String(serviceId)));
+    if (hasUnsupportedService) {
       const err = new Error('Selected services are not covered by this certificate');
       err.statusCode = 400;
       throw err;
@@ -324,28 +324,11 @@ const listBranchServices = async (branchId) => {
 };
 
 const getPaymentOptions = async (barbershopId) => {
-  let { data: certificates, error } = await repo.listActiveCertificates();
-
-  if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-    ({ data: certificates, error } = await repo.listActiveCertificatesFallback());
-    if (Array.isArray(certificates)) {
-      certificates = certificates.map((row) => ({ ...row, marketplace_barbershop_id: null }));
-    }
-  }
-
-  if (isMissingRelationError(error, 'certificates')) {
-    return { payment_methods: PAYMENT_METHODS, certificates: [] };
-  }
-
-  if (error) throw error;
-
-  const now = new Date();
-  const scoped = (certificates || []).filter((certificate) => {
-    if (certificate.expires_at && new Date(certificate.expires_at) < now) return false;
-    return !certificate.marketplace_barbershop_id || certificate.marketplace_barbershop_id === barbershopId;
-  });
-
-  return { payment_methods: PAYMENT_METHODS, certificates: scoped };
+  // Certificate codes are bearer credentials used at booking time. This
+  // public catalog endpoint must advertise the payment method only; listing
+  // active codes would allow any anonymous caller to redeem other clients'
+  // certificates. Validation remains server-side in quote/createBooking.
+  return { payment_methods: PAYMENT_METHODS, certificates: [] };
 };
 
 const quoteBooking = async (payload) => {

@@ -219,3 +219,17 @@ service now requires an existing active Marketplace client for login, returns
 `USER_NOT_REGISTERED` for unknown identities, and protected Marketplace routes
 re-check authoritative database state. Full local API tests passed; production
 deployment and live authenticated verification were not performed.
+
+## Certificate module audit (2026-10-19)
+
+- Certificate administration is authenticated and permission-checked; public
+  payment options no longer return certificate codes or service metadata.
+- Certificate codes are normalized server-side, unsupported services are
+  rejected instead of silently filtered, and certificate-backed site bookings
+  require an idempotency key. Raw database/provider details are not returned.
+- The certificate foreign key is additive and marked NOT VALID so historical
+  orphan rows are not rewritten during deployment.
+- Contract tests passed. Full PostgreSQL transaction/constraint behavior was
+  not verified locally because the integration database was unavailable.
+- Residual risk: certificate consumption remains non-atomic across the complete
+  kiosk booking flow and cancellation does not restore usage.

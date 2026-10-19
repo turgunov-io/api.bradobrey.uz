@@ -3,7 +3,8 @@
 ## 2026-10-19 — Marketplace reviews and booking detail contract
 
 - Added authenticated `GET /api/marketplace/compliance/reviews?booking_id=...`
-  scoped to the Marketplace JWT subject.
+  scoped to the Marketplace JWT subject; it now resolves both Marketplace
+  booking ids and legacy queue-entry ids.
 - Review writes now validate UUID/rating inputs, update the authenticated
   owner's existing review within the 24-hour edit window, preserve idempotent
   replay behavior, and return stable public error codes without DB details.
@@ -334,4 +335,14 @@
   persistence fails.
 - Local backend suite: 155/155 passing. A real user-driven OTP verification is
   still required for end-to-end delivery confirmation.
+
+# 2026-10-19 — certificate module audit and repair
+
+- Protected certificate administration with bearer auth and permission checks.
+- Removed certificate code/metadata disclosure from public payment options.
+- Normalized redemption codes, enforced complete service coverage, required
+  idempotency for certificate-backed site bookings, sanitized errors, and added
+  a guarded certificate foreign key.
+- Added certificate contract tests. Local backend suite: 168/168 passing;
+  PostgreSQL integration remained skipped because the local database was absent.
 

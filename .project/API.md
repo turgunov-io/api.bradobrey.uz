@@ -14,10 +14,11 @@
 
 ## Marketplace reviews
 
-- `GET /api/marketplace/compliance/reviews?booking_id=<uuid>` returns the
-  authenticated client's booking-level review for the completed booking, or
-  `review: null` when none exists. An optional `service_id=<uuid>` selects a
-  service-level review. It never trusts a client-supplied user id.
+- `GET /api/marketplace/compliance/reviews?booking_id=<uuid>` accepts either
+  the Marketplace booking id or one of its legacy `queue_entry_id` values and
+  returns the authenticated client's booking-level review, or `review: null`
+  when none exists. An optional `service_id=<uuid>` selects a service-level
+  review. It never trusts a client-supplied user id.
 - `POST /api/marketplace/compliance/reviews` accepts a rating from 1 to 5 and
   creates a review only for an owned completed visit. Repeating a review for
   the same booking/service updates the owner's review while it is within the
@@ -251,3 +252,16 @@ The selected branch is persisted in `employee_active_branches` and is reflected 
 
 - `POST /api/notifications/push-subscription/status` requires an employee JWT and `{ "endpoint": "https://…" }`; it returns only whether that endpoint is registered to the authenticated user.
 - `POST /api/notifications/test-push` optionally accepts the same endpoint in its JSON body. When supplied, delivery is restricted to the subscription owned by the authenticated user and that exact endpoint. Calls without an endpoint keep the legacy user-wide delivery behavior.
+
+# Certificates
+
+- Certificate administration routes require bearer authentication and the
+  certificates.manage permission, subject to the existing global-admin role
+  preset. Anonymous requests are rejected before database work.
+- Marketplace payment-options endpoints return supported payment methods but do
+  not expose certificate codes or metadata.
+- Certificate redemption in booking uses server-side code/status/expiry/service
+  validation. Codes are normalized to uppercase, every requested service must
+  be covered, and site bookings using a certificate require idempotency_key.
+- The certificate lookup endpoint is authenticated and returns only the
+  minimum data needed by the booking client for allowed-service selection.

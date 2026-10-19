@@ -69,6 +69,43 @@ test('GET review is scoped to the authenticated marketplace client', async () =>
   }
 });
 
+test('GET review resolves a queue entry id to its Marketplace booking', async () => {
+  const compliance = require('../src/models/marketplace/compliance');
+  const { pool } = require('../src/config/postgres');
+  const clientId = '11111111-1111-4111-8111-111111111111';
+  const queueEntryId = '22222222-2222-4222-8222-222222222222';
+  const bookingId = '44444444-4444-4444-8444-444444444444';
+  const review = {
+    id: '33333333-3333-4333-8333-333333333333',
+    marketplace_client_id: clientId,
+    booking_id: bookingId,
+    rating: 4,
+  };
+  const originalQuery = pool.query;
+  const calls = [];
+  pool.query = async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes('select id, is_active from marketplace_clients')) {
+      return { rows: [{ id: clientId, is_active: true }] };
+    }
+    return { rows: [review] };
+  };
+  try {
+    const response = makeResponse();
+    await compliance.getReview(makeRequest({
+      clientId,
+      query: { booking_id: queueEntryId },
+    }), response);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body, { review, reviews: [review] });
+    const reviewCall = calls.find((call) => call.sql.includes('from marketplace_reviews'));
+    assert.match(reviewCall.sql, /queue_entry_id\s*=\s*\$2/i);
+    assert.deepEqual(reviewCall.params, [clientId, queueEntryId, null]);
+  } finally {
+    pool.query = originalQuery;
+  }
+});
+
 test('re-saving an owned review updates it without trusting a client user id', async () => {
   const compliance = require('../src/models/marketplace/compliance');
   const { pool } = require('../src/config/postgres');

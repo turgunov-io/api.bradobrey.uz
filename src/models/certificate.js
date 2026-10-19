@@ -1,4 +1,66 @@
+const jwt = require('jsonwebtoken');
 const { db } = require("../config/postgres");
+
+const GLOBAL_CERTIFICATE_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
+const CERTIFICATE_PERMISSION = 'certificates.manage';
+
+const sendCertificateServerError = (res, error) => {
+  console.error('[certificate] request failed', { code: error?.code || 'UNKNOWN' });
+  return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', code: 'INTERNAL_SERVER_ERROR' });
+};
+
+const requireCertificateAccess = async (req, res) => {
+  const header = String(req.headers?.authorization || '');
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) {
+    res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+    return null;
+  }
+
+  let payload;
+  try {
+    payload = jwt.verify(token, process.env.JWT_SECRET);
+  } catch (_) {
+    res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+    return null;
+  }
+
+  const userId = payload?.sub || payload?.id;
+  const role = String(payload?.role || '').trim().toLowerCase();
+  if (!userId || !role || !['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager'].includes(role)) {
+    res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
+    return null;
+  }
+
+  const { data: user, error: userError } = await db
+    .from('users')
+    .select('id, role')
+    .eq('id', userId)
+    .maybeSingle();
+  if (userError) return sendCertificateServerError(res, userError);
+  if (!user) {
+    res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+    return null;
+  }
+
+  if (GLOBAL_CERTIFICATE_ROLES.has(role)) return { userId, role };
+
+  const permissionResult = await db
+    .from('user_permissions')
+    .select('permission')
+    .eq('user_id', userId)
+    .eq('permission', CERTIFICATE_PERMISSION)
+    .maybeSingle();
+  if (permissionResult.error && !String(permissionResult.error.message || '').includes('user_permissions')) {
+    return sendCertificateServerError(res, permissionResult.error);
+  }
+  if (!permissionResult.data) {
+    res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
+    return null;
+  }
+
+  return { userId, role };
+};
 
 const isMissingColumnError = (error, column) => {
   const message = String(error?.message || error?.details || "").toLowerCase();
@@ -59,6 +121,7 @@ const missingCertificatesResponse = (res) => res.json({
 
 class Certificate {
   async getById(req, res) {
+    if (!await requireCertificateAccess(req, res)) return;
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Certificate id is required" });
 
@@ -74,13 +137,14 @@ class Certificate {
         hint: "Apply db/postgres/certificates.sql",
       });
     }
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return sendCertificateServerError(res, error);
     if (!data) return res.status(404).json({ error: "Certificate not found" });
 
     return res.json({ certificate: data, item: data });
   }
 
   async active(req, res) {
+    if (!await requireCertificateAccess(req, res)) return;
     let { data, error } = await selectCertificates((select) => db
       .from("certificates")
       .select(select)
@@ -91,7 +155,7 @@ class Certificate {
     }
 
     if (error) {
-      return res.status(500).json({ error: error.message });
+      return sendCertificateServerError(res, error);
     }
 
     const now = new Date();
@@ -117,9 +181,11 @@ class Certificate {
   }
 
   async create(req, res) {
+    if (!await requireCertificateAccess(req, res)) return;
     const { code, service_ids, expires_at, metadata, marketplace_barbershop_id } = req.body || {};
 
-    if (!code || typeof code !== "string") {
+    const normalizedCode = typeof code === 'string' ? code.trim().toUpperCase() : '';
+    if (!normalizedCode) {
       return res.status(400).json({ error: "code is required" });
     }
 
@@ -141,7 +207,7 @@ class Certificate {
     const { data: existing, error: existsError } = await db
       .from("certificates")
       .select("id")
-      .eq("code", code)
+      .eq("code", normalizedCode)
       .maybeSingle();
 
     if (existsError) {
@@ -151,14 +217,14 @@ class Certificate {
           hint: "Apply db/postgres/certificates.sql",
         });
       }
-      return res.status(500).json({ error: existsError.message });
+      return sendCertificateServerError(res, existsError);
     }
     if (existing) {
       return res.status(409).json({ error: "Certificate code already exists" });
     }
 
     const payload = {
-      code,
+      code: normalizedCode,
       service_ids,
       expires_at: expiresAtIso,
       metadata: metadata || null,
@@ -196,13 +262,14 @@ class Certificate {
     }
 
     if (insertError) {
-      return res.status(500).json({ error: insertError.message });
+      return sendCertificateServerError(res, insertError);
     }
 
     return res.status(201).json({ certificate: inserted });
   }
 
   async update(req, res) {
+    if (!await requireCertificateAccess(req, res)) return;
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Certificate id is required" });
 
@@ -210,8 +277,9 @@ class Certificate {
     const update = {};
 
     if (code !== undefined) {
-      if (!code || typeof code !== "string") return res.status(400).json({ error: "code cannot be empty" });
-      update.code = code;
+      const normalizedCode = typeof code === 'string' ? code.trim().toUpperCase() : '';
+      if (!normalizedCode) return res.status(400).json({ error: "code cannot be empty" });
+      update.code = normalizedCode;
     }
 
     if (service_ids !== undefined) {
@@ -252,15 +320,29 @@ class Certificate {
         hint: "Apply db/postgres/certificates.sql",
       });
     }
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return sendCertificateServerError(res, error);
     if (!data) return res.status(404).json({ error: "Certificate not found" });
 
     return res.json({ certificate: data, item: data });
   }
 
   async remove(req, res) {
+    if (!await requireCertificateAccess(req, res)) return;
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Certificate id is required" });
+
+    const { data: linkedEntry, error: linkError } = await db
+      .from('queue_entries')
+      .select('id')
+      .eq('certificate_id', id)
+      .limit(1)
+      .maybeSingle();
+    if (linkError && !String(linkError.message || '').includes("certificate_id")) {
+      return sendCertificateServerError(res, linkError);
+    }
+    if (linkedEntry) {
+      return res.status(409).json({ error: 'CERTIFICATE_IN_USE', code: 'CERTIFICATE_IN_USE' });
+    }
 
     const { data, error } = await db
       .from("certificates")
@@ -275,7 +357,7 @@ class Certificate {
         hint: "Apply db/postgres/certificates.sql",
       });
     }
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return sendCertificateServerError(res, error);
     if (!data) return res.status(404).json({ error: "Certificate not found" });
 
     return res.json({ deleted: true, id: data.id });

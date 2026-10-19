@@ -142,10 +142,11 @@ const fetchBranchForBooking = async (branchId) => {
 };
 
 const fetchCertificateForBooking = async (code) => {
+    const normalizedCode = String(code || '').trim().toUpperCase();
     let { data, error } = await db
         .from('certificates')
         .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
-        .eq('code', code)
+        .eq('code', normalizedCode)
         .maybeSingle();
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
@@ -742,6 +743,9 @@ class Kiosk {
         if (normalizedIdempotencyKey && normalizedIdempotencyKey.length > 255) {
             return res.status(400).json({ error: 'idempotency_key is too long (max 255 chars)' });
         }
+        if (normalizedSource === 'site' && effectivePaymentMethod === 'certificate' && !normalizedIdempotencyKey) {
+            return res.status(400).json({ error: 'idempotency_key is required for certificate bookings', code: 'IDEMPOTENCY_KEY_REQUIRED' });
+        }
 
         const normalizedScheduledStartAt = normalizeText(scheduled_start_at);
         const normalizedScheduledEndAt = normalizeText(scheduled_end_at);
@@ -888,11 +892,9 @@ class Kiosk {
             // If certificate has service limits, keep only allowed services
             if (Array.isArray(cert.service_ids) && cert.service_ids.length) {
                 const allowedSet = new Set(cert.service_ids);
-                const filtered = serviceIds.filter((id) => allowedSet.has(id));
-                if (!filtered.length) {
+                if (serviceIds.some((id) => !allowedSet.has(id))) {
                     return res.status(400).json({ error: 'Selected services are not covered by this certificate' });
                 }
-                serviceIds.splice(0, serviceIds.length, ...filtered);
             }
 
             certificate = cert;
@@ -1659,20 +1661,41 @@ class Kiosk {
             return res.status(400).json({ error: 'certificate id is required' });
         }
 
+        const token = getBearerToken(req);
+        if (!token) {
+            return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+        }
+        let payload;
+        try {
+            payload = verifyJwt(token);
+        } catch (_error) {
+            return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+        }
+        if (payload?.role !== MARKETPLACE_ROLE && !CASHBACK_STAFF_ROLES.has(payload?.role)) {
+            return res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
+        }
+
         const { data: cert, error } = await db
             .from('certificates')
-            .select('id, code, expires_at, is_used, metadata, service_ids')
-            .eq('code', id)
+            .select('id, code, expires_at, is_used, service_ids, marketplace_barbershop_id')
+            .eq('code', String(id).trim().toUpperCase())
             .maybeSingle();
 
         if (error) {
-            return res.status(500).json({ error: error.message });
+            console.error('[kiosk-certificate] lookup failed', { code: error.code || 'UNKNOWN' });
+            return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', code: 'INTERNAL_SERVER_ERROR' });
         }
         if (!cert) {
             return res.status(404).json({ error: 'Certificate not found' });
         }
 
         const expired = cert.expires_at && new Date(cert.expires_at) < new Date();
+        if (cert.is_used) {
+            return res.status(400).json({ error: 'Certificate is already used', code: 'CERTIFICATE_ALREADY_USED' });
+        }
+        if (expired) {
+            return res.status(400).json({ error: 'Your certificate is expired', code: 'CERTIFICATE_EXPIRED' });
+        }
 
         return res.json({ certificate: { ...cert, expired } });
     }

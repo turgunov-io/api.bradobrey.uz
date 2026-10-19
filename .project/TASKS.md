@@ -68,3 +68,12 @@
   backend phone authentication now requires the Telegram OTP endpoints.
 - [ ] Verify `telegram_auth_challenges` in the target PostgreSQL database;
   local verification is blocked by DB credentials.
+
+## Certificate module audit — completed locally (2026-10-19)
+
+- [x] Protect certificate administration and remove public certificate secrets.
+- [x] Normalize codes and enforce strict service coverage.
+- [x] Require idempotency for certificate-backed site bookings.
+- [x] Add certificate contract tests and a guarded queue foreign key.
+- [ ] Verify end-to-end redemption and atomic consumption/cancellation on a
+  staging PostgreSQL database before production rollout.

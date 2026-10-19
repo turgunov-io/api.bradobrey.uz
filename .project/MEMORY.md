@@ -472,3 +472,25 @@
   `USER_NOT_REGISTERED`; registration retains the creation branch. Protected
   Marketplace profile, compliance, group-booking, and site-booking paths now
   confirm the JWT subject still exists and is active in `marketplace_clients`.
+
+# Certificate module audit and repair (2026-10-19)
+
+- Certificate admin handlers now require bearer authentication and the
+  certificates.manage permission, with approved global admin roles allowed by
+  the existing role model. Database errors are logged safely and exposed as
+  generic public errors.
+- Marketplace payment-options responses no longer disclose active certificate
+  codes or metadata. Certificate lookup remains authenticated and requires the
+  code supplied by the caller.
+- Certificate codes are normalized to uppercase across kiosk and admin paths.
+  Requested service IDs must all be covered by the certificate; the API no
+  longer silently filters disallowed services. Certificate-backed site booking
+  requires an idempotency key.
+- Added a guarded queue_entries.certificate_id foreign key as NOT VALID to
+  protect new writes without rewriting historical orphan data.
+- Local backend unit/contract suite: 168/168 passed. PostgreSQL integration was
+  skipped because no local integration database was available. No production
+  deployment or data mutation was performed.
+- Remaining risk: kiosk certificate consumption is not atomic with the entire
+  queue/marketplace/payment flow, and cancellation does not restore a used
+  certificate. This needs a staging-backed transactional redesign.

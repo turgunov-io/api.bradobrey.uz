@@ -345,8 +345,8 @@ const validateCertificate = async ({ code, serviceIds, branch }) => {
   }
   if (Array.isArray(certificate.service_ids) && certificate.service_ids.length) {
     const allowed = new Set(certificate.service_ids.map(String));
-    const hasCoveredService = serviceIds.some((serviceId) => allowed.has(String(serviceId)));
-    if (!hasCoveredService) {
+    const hasUnsupportedService = serviceIds.some((serviceId) => !allowed.has(String(serviceId)));
+    if (hasUnsupportedService) {
       const err = new Error('Selected services are not covered by this certificate');
       err.statusCode = 400;
       throw err;
@@ -550,39 +550,9 @@ class MarketplaceCatalog {
     try {
       const id = normalizeId(req.params?.id);
       if (!id) return res.status(400).json({ error: 'id is required' });
-
-      let { data: certificates, error } = await db
-        .from('certificates')
-        .select('id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id')
-        .eq('is_used', false)
-        .order('code', { ascending: true });
-
-      if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-        ({ data: certificates, error } = await db
-          .from('certificates')
-          .select('id, code, service_ids, expires_at, is_used, metadata')
-          .eq('is_used', false)
-          .order('code', { ascending: true }));
-      }
-
-      if (isMissingRelationError(error, 'certificates')) {
-        return res.json({
-          payment_methods: PAYMENT_METHODS,
-          certificates: [],
-        });
-      }
-
-      if (error) return res.status(500).json({ error: error.message });
-
-      const now = new Date();
-      const scopedCertificates = (certificates || []).filter((certificate) => {
-        if (certificate.expires_at && new Date(certificate.expires_at) < now) return false;
-        return !certificate.marketplace_barbershop_id || certificate.marketplace_barbershop_id === id;
-      });
-
       return res.json({
         payment_methods: PAYMENT_METHODS,
-        certificates: scopedCertificates,
+        certificates: [],
       });
     } catch (error) {
       console.error(error);
