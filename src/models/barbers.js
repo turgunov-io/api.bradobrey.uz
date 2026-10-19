@@ -14,6 +14,10 @@ const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/ba
 const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
 const { getEmployeeSessionExpiry, getEmployeeTokenTtlSeconds, validatePersistedEmployeeSession } = require('../utils/employeeSession');
 const queueTransfers = require('./queueTransfers');
+const {
+    certificateLifecycleResponse,
+    isCertificateLifecycleError,
+} = require('../services/certificateLifecycle');
 
 const shiftAutoOffTimers = new Map();
 const breakTimers = new Map(); // barberId -> { timer, startedAt: Date, until: Date }
@@ -2623,6 +2627,10 @@ class Barbers {
             .maybeSingle();
 
         if (updateError) {
+            if (isCertificateLifecycleError(updateError)) {
+                const lifecycle = certificateLifecycleResponse(updateError);
+                return res.status(lifecycle.status).json(lifecycle.body);
+            }
             return res.status(500).json({ error: updateError.message });
         }
         if (!updated) {
@@ -3130,6 +3138,10 @@ class Barbers {
                 .maybeSingle();
 
             if (updateError) {
+                if (isCertificateLifecycleError(updateError)) {
+                    const lifecycle = certificateLifecycleResponse(updateError);
+                    return res.status(lifecycle.status).json(lifecycle.body);
+                }
                 return res.status(500).json({ error: updateError.message });
             }
             if (!data) {

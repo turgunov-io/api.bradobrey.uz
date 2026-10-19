@@ -50,6 +50,7 @@ FILES=(
   employee_quality_ranking.sql
   employee_quality_permissions_backfill.sql
   certificates.sql
+  certificate_lifecycle.sql
   promo_codes.sql
   cashback.sql
   media_assets.sql

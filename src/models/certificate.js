@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { db } = require("../config/postgres");
+const { withCertificateStatus } = require('../services/certificateLifecycle');
 
 const GLOBAL_CERTIFICATE_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
 const CERTIFICATE_PERMISSION = 'certificates.manage';
@@ -80,32 +81,64 @@ const isMissingRelationError = (error, relation) => {
   );
 };
 
-const SELECT_WITH_MARKETPLACE = "id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id, created_at";
-const SELECT_BASE = "id, code, service_ids, expires_at, is_used, metadata, created_at";
+const LIFECYCLE_SELECT = "reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at";
+
+const isMissingLifecycleColumnError = (error) => (
+  isMissingColumnError(error, 'reserved_queue_entry_id')
+  || isMissingColumnError(error, 'reserved_at')
+  || isMissingColumnError(error, 'used_queue_entry_id')
+  || isMissingColumnError(error, 'used_at')
+);
+
+const buildCertificateSelect = ({ lifecycle, marketplace, createdAt }) => {
+  const fields = [
+    'id',
+    'code',
+    'service_ids',
+    'expires_at',
+    'is_used',
+    'metadata',
+  ];
+  if (marketplace) fields.push('marketplace_barbershop_id');
+  if (lifecycle) fields.push(LIFECYCLE_SELECT);
+  if (createdAt) fields.push('created_at');
+  return fields.join(', ');
+};
 
 const selectCertificates = async (queryFactory) => {
-  let { data, error } = await queryFactory(SELECT_WITH_MARKETPLACE);
+  let options = { lifecycle: true, marketplace: true, createdAt: true };
+  let result = { data: null, error: null };
 
-  if (isMissingColumnError(error, "marketplace_barbershop_id")) {
-    ({ data, error } = await queryFactory(SELECT_BASE));
-  }
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    result = await queryFactory(buildCertificateSelect(options));
+    if (!result.error) break;
 
-  if (isMissingColumnError(error, "created_at")) {
-    const fallbackWithMarketplace = SELECT_WITH_MARKETPLACE.replace(", created_at", "");
-    const fallbackBase = SELECT_BASE.replace(", created_at", "");
-    ({ data, error } = await queryFactory(fallbackWithMarketplace));
-    if (isMissingColumnError(error, "marketplace_barbershop_id")) {
-      ({ data, error } = await queryFactory(fallbackBase));
+    if (options.lifecycle && isMissingLifecycleColumnError(result.error)) {
+      options = { ...options, lifecycle: false };
+      continue;
     }
+    if (options.marketplace && isMissingColumnError(result.error, "marketplace_barbershop_id")) {
+      options = { ...options, marketplace: false };
+      continue;
+    }
+    if (options.createdAt && isMissingColumnError(result.error, "created_at")) {
+      options = { ...options, createdAt: false };
+      continue;
+    }
+    break;
   }
+
+  let { data, error } = result;
 
   if (Array.isArray(data)) {
     data = data.map((item) => ({
       ...item,
       marketplace_barbershop_id: item.marketplace_barbershop_id || null,
+      ...withCertificateStatus(item),
     }));
   } else if (data) {
     data.marketplace_barbershop_id = data.marketplace_barbershop_id || null;
+    data = withCertificateStatus(data);
   }
 
   return { data, error };
@@ -276,6 +309,13 @@ class Certificate {
     const { code, service_ids, expires_at, metadata, marketplace_barbershop_id, is_used } = req.body || {};
     const update = {};
 
+    if (is_used !== undefined) {
+      return res.status(400).json({
+        error: "is_used is managed by queue completion",
+        code: 'CERTIFICATE_LIFECYCLE_MANAGED',
+      });
+    }
+
     if (code !== undefined) {
       const normalizedCode = typeof code === 'string' ? code.trim().toUpperCase() : '';
       if (!normalizedCode) return res.status(400).json({ error: "code cannot be empty" });
@@ -303,8 +343,6 @@ class Certificate {
 
     if (metadata !== undefined) update.metadata = metadata || null;
     if (marketplace_barbershop_id !== undefined) update.marketplace_barbershop_id = marketplace_barbershop_id || null;
-    if (is_used !== undefined) update.is_used = Boolean(is_used);
-
     if (!Object.keys(update).length) return res.status(400).json({ error: "No fields to update" });
 
     const { data, error } = await selectCertificates((select) => db

@@ -117,6 +117,13 @@ const validateCertificate = async ({ code, serviceIds, branch }) => {
     if (certificate) certificate.marketplace_barbershop_id = null;
   }
 
+  if (isMissingColumnError(error, 'reserved_queue_entry_id')) {
+    const lifecycleError = new Error('Certificate lifecycle is not configured');
+    lifecycleError.statusCode = 501;
+    lifecycleError.publicCode = 'CERTIFICATE_LIFECYCLE_NOT_CONFIGURED';
+    throw lifecycleError;
+  }
+
   if (error) throw error;
   if (!certificate) {
     const err = new Error('Certificate not found');
@@ -127,6 +134,13 @@ const validateCertificate = async ({ code, serviceIds, branch }) => {
   if (certificate.is_used) {
     const err = new Error('Certificate is already used');
     err.statusCode = 400;
+    throw err;
+  }
+
+  if (certificate.reserved_queue_entry_id) {
+    const err = new Error('Certificate is reserved by another booking');
+    err.statusCode = 409;
+    err.publicCode = 'CERTIFICATE_RESERVED';
     throw err;
   }
 

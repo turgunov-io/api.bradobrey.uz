@@ -14,6 +14,7 @@ const MESSAGE_CODES = [
   [/certificate.*required/i, 'CERTIFICATE_REQUIRED'],
   [/certificate not found/i, 'CERTIFICATE_NOT_FOUND'],
   [/certificate.*already used/i, 'CERTIFICATE_ALREADY_USED'],
+  [/certificate.*reserved/i, 'CERTIFICATE_RESERVED'],
   [/certificate.*expired/i, 'CERTIFICATE_EXPIRED'],
   [/certificate.*not available/i, 'CERTIFICATE_UNAVAILABLE'],
   [/services.*not covered.*certificate/i, 'CERTIFICATE_SERVICES_UNAVAILABLE'],

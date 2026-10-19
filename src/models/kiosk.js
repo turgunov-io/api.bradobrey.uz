@@ -6,6 +6,11 @@ const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { issueKioskSocketTicket } = require('../kioskSocketTicket');
 const { buildAuthenticatedBarberRoster } = require('../utils/kioskBarberPresence');
+const {
+    certificateLifecycleResponse,
+    isCertificateLifecycleError,
+    withCertificateStatus,
+} = require('../services/certificateLifecycle');
 
 const {
     applyPromoDiscount,
@@ -145,15 +150,15 @@ const fetchCertificateForBooking = async (code) => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     let { data, error } = await db
         .from('certificates')
-        .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
+        .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
         .eq('code', normalizedCode)
         .maybeSingle();
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
         ({ data, error } = await db
             .from('certificates')
-            .select('id, code, expires_at, is_used, metadata, service_ids')
-            .eq('code', code)
+            .select('id, code, expires_at, is_used, metadata, service_ids, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
+            .eq('code', normalizedCode)
             .maybeSingle());
 
         if (data) data.marketplace_barbershop_id = null;
@@ -879,9 +884,19 @@ class Kiosk {
                 return res.status(400).json({ error: 'certificate_code is required when payment_method is certificate' });
             }
             const { data: cert, error: certError } = await fetchCertificateForBooking(certificate_code);
+            if (certError && isMissingColumnError(certError, 'reserved_queue_entry_id')) {
+                return res.status(501).json({
+                    error: 'Certificate lifecycle is not configured',
+                    code: 'CERTIFICATE_LIFECYCLE_NOT_CONFIGURED',
+                    hint: 'Apply db/postgres/certificate_lifecycle.sql',
+                });
+            }
             if (certError) return res.status(500).json({ error: certError.message });
             if (!cert) return res.status(404).json({ error: 'Certificate not found' });
             if (cert.is_used) return res.status(400).json({ error: 'Certificate is already used' });
+            if (cert.reserved_queue_entry_id) {
+                return res.status(409).json({ error: 'Certificate is reserved by another booking', code: 'CERTIFICATE_RESERVED' });
+            }
             if (cert.expires_at && new Date(cert.expires_at) < new Date()) {
                 return res.status(400).json({ error: 'Your certificate is expired' });
             }
@@ -1038,6 +1053,10 @@ class Kiosk {
             .maybeSingle();
 
         if (insertError) {
+            if (isCertificateLifecycleError(insertError)) {
+                const lifecycle = certificateLifecycleResponse(insertError);
+                return res.status(lifecycle.status).json(lifecycle.body);
+            }
             if (insertError.code === '23P01') {
                 return res.status(409).json({ error: 'Selected time slot is no longer available' });
             }
@@ -1074,7 +1093,7 @@ class Kiosk {
                 if (existingEntry.certificate_id) {
                     const { data: certRow, error: certError } = await db
                         .from('certificates')
-                        .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
+                        .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
                         .eq('id', existingEntry.certificate_id)
                         .maybeSingle();
 
@@ -1229,6 +1248,7 @@ class Kiosk {
                     updated_at: new Date().toISOString(),
                 }, { onConflict: 'marketplace_client_id,barbershop_id' });
                 if (originError && !isMissingColumnError(originError, 'client_barbershop_origins')) {
+                    await db.from('queue_entries').delete().eq('id', entry.id);
                     return res.status(500).json({ error: originError.message });
                 }
             }
@@ -1311,24 +1331,6 @@ class Kiosk {
                 await db.from('marketplace_bookings').delete().eq('id', createdBooking.id);
                 await db.from('queue_entries').delete().eq('id', entry.id);
                 return res.status(500).json({ error: marketplaceAuditError.message });
-            }
-        }
-
-        if (certificate) {
-            const { data: usedCert, error: useError } = await db
-                .from('certificates')
-                .update({ is_used: true })
-                .eq('id', certificate.id)
-                .eq('is_used', false)
-                .select('id')
-                .maybeSingle();
-
-            if (useError) {
-                return res.status(500).json({ error: useError.message });
-            }
-            if (!usedCert) {
-                await db.from('queue_entries').delete().eq('id', entry.id);
-                return res.status(400).json({ error: 'Certificate already used' });
             }
         }
 
@@ -1677,11 +1679,18 @@ class Kiosk {
 
         const { data: cert, error } = await db
             .from('certificates')
-            .select('id, code, expires_at, is_used, service_ids, marketplace_barbershop_id')
+            .select('id, code, expires_at, is_used, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
             .eq('code', String(id).trim().toUpperCase())
             .maybeSingle();
 
         if (error) {
+            if (isMissingColumnError(error, 'reserved_queue_entry_id')) {
+                return res.status(501).json({
+                    error: 'Certificate lifecycle is not configured',
+                    code: 'CERTIFICATE_LIFECYCLE_NOT_CONFIGURED',
+                    hint: 'Apply db/postgres/certificate_lifecycle.sql',
+                });
+            }
             console.error('[kiosk-certificate] lookup failed', { code: error.code || 'UNKNOWN' });
             return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', code: 'INTERNAL_SERVER_ERROR' });
         }
@@ -1693,11 +1702,14 @@ class Kiosk {
         if (cert.is_used) {
             return res.status(400).json({ error: 'Certificate is already used', code: 'CERTIFICATE_ALREADY_USED' });
         }
+        if (cert.reserved_queue_entry_id) {
+            return res.status(409).json({ error: 'Certificate is reserved by another booking', code: 'CERTIFICATE_RESERVED' });
+        }
         if (expired) {
             return res.status(400).json({ error: 'Your certificate is expired', code: 'CERTIFICATE_EXPIRED' });
         }
 
-        return res.json({ certificate: { ...cert, expired } });
+        return res.json({ certificate: withCertificateStatus({ ...cert, expired }) });
     }
 }
 

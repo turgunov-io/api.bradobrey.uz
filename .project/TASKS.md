@@ -75,5 +75,9 @@
 - [x] Normalize codes and enforce strict service coverage.
 - [x] Require idempotency for certificate-backed site bookings.
 - [x] Add certificate contract tests and a guarded queue foreign key.
+- [x] Add additive reservation/use lifecycle enforcement for booking,
+  completion, cancellation, no-show, not-in-time, reopen, and cleanup paths.
+- [x] Prevent admin/API callers from manually setting `is_used`.
 - [ ] Verify end-to-end redemption and atomic consumption/cancellation on a
-  staging PostgreSQL database before production rollout.
+  staging PostgreSQL database before production rollout; local PostgreSQL is
+  unavailable.

@@ -334,13 +334,13 @@ const fetchPromoCode = async (code) => db
 
 const fetchCertificateByCode = async (code) => db
   .from('certificates')
-  .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id')
+  .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
   .eq('code', code)
   .maybeSingle();
 
 const fetchCertificateByCodeFallback = async (code) => db
   .from('certificates')
-  .select('id, code, expires_at, is_used, metadata, service_ids')
+  .select('id, code, expires_at, is_used, metadata, service_ids, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
   .eq('code', code)
   .maybeSingle();
 

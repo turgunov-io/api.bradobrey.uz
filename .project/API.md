@@ -272,3 +272,15 @@ The selected branch is persisted in `employee_active_branches` and is reflected 
   the booking client for allowed-service selection. It is not mounted below
   `/api/marketplace`, so clients must not prepend the marketplace prefix to
   this shared kiosk path.
+- Certificate-backed queue entries reserve the certificate while their status
+  is `waiting`, `called`, `swapped`, or `in_progress`. Booking does not set
+  `is_used`. The PostgreSQL lifecycle trigger sets `is_used` only when the
+  same queue entry changes to `completed`; `cancelled`, `rejected`, `no_show`,
+  `not_in_time`, and cleanup deletes release an unfinished reservation.
+- Apply `db/postgres/certificate_lifecycle.sql` (included after
+  `certificates.sql` by `scripts/apply-schema.sh`) before enabling this
+  certificate booking flow. If the lifecycle columns are absent, certificate
+  booking fails closed with `CERTIFICATE_LIFECYCLE_NOT_CONFIGURED`.
+- Certificate administration cannot manually set `is_used`; use the queue
+  completion lifecycle. Admin list responses expose a derived `status` of
+  `active`, `reserved`, `used`, or `expired`.

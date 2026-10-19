@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-19 — Certificate reservation and completion lifecycle
+
+- Removed premature `is_used=true` from booking creation. A successful
+  booking now reserves the certificate without consuming it.
+- Added the additive `certificate_lifecycle.sql` migration and queue trigger:
+  concurrent bookings can claim only one reservation, cancellation/rejection/
+  no-show/not-in-time and failed booking cleanup release it, and completion
+  consumes it atomically with the queue status update.
+- Completion is idempotent, expired certificates cannot start a new booking,
+  and an unfinished reserved booking is not released merely because its
+  expiry time passes.
+- Admin certificate updates can no longer manually mutate `is_used`; admin
+  list responses expose the lifecycle status. Local API tests pass 173/173.
+- A real `A005` database row and PostgreSQL concurrency/transaction behavior
+  remain to be verified on staging because no local PostgreSQL was available.
+  No production deployment or data mutation was performed.
+
 ## 2026-10-19 — Certificate lookup URL contract
 
 - Confirmed the single canonical certificate lookup route is

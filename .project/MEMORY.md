@@ -503,6 +503,18 @@
 - Local backend unit/contract suite: 168/168 passed. PostgreSQL integration was
   skipped because no local integration database was available. No production
   deployment or data mutation was performed.
-- Remaining risk: kiosk certificate consumption is not atomic with the entire
-  queue/marketplace/payment flow, and cancellation does not restore a used
-  certificate. This needs a staging-backed transactional redesign.
+- Certificate lifecycle remediation added `db/postgres/certificate_lifecycle.sql`.
+  `queue_entries` now reserves an unused, unexpired certificate atomically on
+  insert; only a transition of that same row to `completed` sets `is_used`,
+  `used_queue_entry_id`, and `used_at`. Cancellation, rejection, no-show,
+  not-in-time, reopened no-show, and queue-row cleanup are handled by the
+  trigger. Expiry is checked for new reservations only; it does not release
+  an existing unfinished reservation.
+- The booking handler no longer updates `certificates.is_used` and fails closed
+  with `CERTIFICATE_LIFECYCLE_NOT_CONFIGURED` until the additive migration is
+  applied. Trigger errors are mapped to stable 409 lifecycle codes without
+  exposing SQL text. Admin cannot manually set `is_used`.
+- The migration's backfill reserves the oldest active queue entry per unused
+  certificate but does not rewrite historical `is_used` values. Staging must
+  verify legacy data, concurrent claims, completion rollback, and the real
+  `A005` row before production rollout; no local PostgreSQL was available.
