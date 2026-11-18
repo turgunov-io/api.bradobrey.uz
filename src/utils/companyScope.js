@@ -46,8 +46,11 @@ async function companyIdOfBranch(branchId) {
 async function legacyDefaultCompanyId() {
   const { data, error } = await db().from('companies').select('id, is_default, status');
   if (error) throw new Error(error.message);
-  const rows = Array.isArray(data) ? data : [];
-  const only = rows.length === 1 && rows[0]?.is_default === true && rows[0]?.status === 'active' ? rows[0] : null;
+  // Suspended companies (e.g. branchless barbershops backfilled by migration
+  // 001) don't end single-company mode; only a second ACTIVE company does,
+  // and activating one is gated by the multi-company preconditions.
+  const active = (Array.isArray(data) ? data : []).filter((row) => row?.status === 'active');
+  const only = active.length === 1 && active[0]?.is_default === true ? active[0] : null;
   return normalizeId(only?.id);
 }
 

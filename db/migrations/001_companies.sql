@@ -126,12 +126,18 @@ begin
      where mb.company_id is null
      order by mb.created_at, mb.id
   loop
-    insert into companies (name, code, logo_url, timezone)
+    -- Extra companies start suspended: activating one is the platform
+    -- owner's decision and goes through the multi-company preconditions gate
+    -- (POST/PATCH /api/platform/companies). An active second company would
+    -- immediately switch off legacy single-company paths (dash login without
+    -- company_code, kiosks without device token).
+    insert into companies (name, code, logo_url, timezone, status)
     values (
       coalesce(nullif(btrim(shop.name), ''), 'Barbershop'),
       'SHOP_' || upper(substr(replace(shop.id::text, '-', ''), 1, 8)),
       shop.logo_url,
-      coalesce(nullif(btrim(shop.timezone), ''), 'Asia/Tashkent')
+      coalesce(nullif(btrim(shop.timezone), ''), 'Asia/Tashkent'),
+      'suspended'
     )
     returning id into new_company;
 

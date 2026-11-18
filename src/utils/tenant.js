@@ -86,7 +86,12 @@ const companyRepo = {
   },
 
   async countCompanies() {
-    const result = await pool().query('select count(*)::int as count from companies');
+    // Only active companies count: a suspended placeholder (e.g. a branchless
+    // barbershop backfilled by migration 001) must not switch off the legacy
+    // single-company paths that deployed kiosks and dash still rely on.
+    const result = await pool().query(
+      "select count(*)::int as count from companies where status = 'active'"
+    );
     return Number(result.rows[0]?.count || 0);
   },
 
