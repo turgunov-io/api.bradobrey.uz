@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('./utils/authToken');
 
 const SOCKET_EMPLOYEE_ROLES = new Set([
   'admin_network',
@@ -31,7 +31,7 @@ function verifySocketToken(socket, secret) {
     throw error;
   }
 
-  const payload = jwt.verify(token, secret);
+  const payload = verifyAny(token, { secret: secret });
   const role = String(payload?.role || '').trim();
   const userId = payload?.sub || payload?.id;
   if (!SOCKET_EMPLOYEE_ROLES.has(role) || !userId) {
@@ -43,10 +43,17 @@ function verifySocketToken(socket, secret) {
   return { payload, token };
 }
 
-function canAccessSocketBranch({ payload, state, branchId }) {
+// branchCompanyId: company of the requested branch (loaded by the caller from
+// branches.company_id). MULTI_TENANCY Phase 1: a branch of another company is
+// never joinable, whatever the role; network admins get every branch of their
+// own company. Role and company come from the DB state, not the token.
+function canAccessSocketBranch({ payload, state, branchId, branchCompanyId }) {
   if (!isSafeBranchId(branchId)) return false;
 
-  const role = String(payload?.role || '').trim();
+  const userCompanyId = state?.user?.company_id;
+  if (!userCompanyId || !branchCompanyId || String(userCompanyId) !== String(branchCompanyId)) return false;
+
+  const role = String(state?.user?.role || payload?.role || '').trim();
   if (role === 'admin_network' || role === 'admin') return true;
 
   const allowedBranchIds = new Set([

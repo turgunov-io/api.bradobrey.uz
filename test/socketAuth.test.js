@@ -11,6 +11,7 @@ const {
 const secret = 'socket-test-secret';
 const branchA = '11111111-1111-4111-8111-111111111111';
 const branchB = '22222222-2222-4222-8222-222222222222';
+const companyId = 'company-1';
 
 function socket({ auth, authorization } = {}) {
   return { handshake: { auth, headers: { authorization } } };
@@ -36,13 +37,14 @@ test('accepts a marketplace client token for the client-scoped socket', () => {
 
 test('branch access uses server-side state and rejects branch spoofing', () => {
   const payload = { sub: 'employee-1', role: 'barber', branchId: branchA };
-  const state = { user: { branch_id: branchA }, barber: { branch_id: branchA }, activeBranches: [] };
-  assert.equal(canAccessSocketBranch({ payload, state, branchId: branchA }), true);
-  assert.equal(canAccessSocketBranch({ payload, state, branchId: branchB }), false);
+  const state = { user: { branch_id: branchA, company_id: companyId }, barber: { branch_id: branchA }, activeBranches: [] };
+  assert.equal(canAccessSocketBranch({ payload, state, branchId: branchA, branchCompanyId: companyId }), true);
+  assert.equal(canAccessSocketBranch({ payload, state, branchId: branchB, branchCompanyId: companyId }), false);
 });
 
 test('network administrators may access an authorized branch while malformed IDs fail', () => {
   const payload = { sub: 'admin-1', role: 'admin_network' };
-  assert.equal(canAccessSocketBranch({ payload, state: {}, branchId: branchB }), true);
-  assert.equal(canAccessSocketBranch({ payload, state: {}, branchId: 'not-a-branch' }), false);
+  const state = { user: { role: 'admin_network', company_id: companyId } };
+  assert.equal(canAccessSocketBranch({ payload, state, branchId: branchB, branchCompanyId: companyId }), true);
+  assert.equal(canAccessSocketBranch({ payload, state, branchId: 'not-a-branch', branchCompanyId: companyId }), false);
 });

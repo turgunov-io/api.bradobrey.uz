@@ -13,7 +13,13 @@
 // `authorize(action)` runs before multer (token, role, permission, target
 // checks) so anonymous callers cannot upload; `checkPayload` runs after body
 // parsing to validate branch, role and permissions in the submitted form.
-const jwt = require('jsonwebtoken');
+//
+// MULTI_TENANCY Phase 1: everything is limited to the actor's company
+// (users.company_id): targets of another company are "not found", a submitted
+// branch must belong to the company, and the directory is filtered by
+// req.employeeManagement.companyId. Suspended companies are rejected.
+const { getBearerToken, verifyAny } = require('../utils/authToken');
+const { checkTenantAccess, companyRepo } = require('../utils/tenant');
 
 const { pool } = require('../config/postgres');
 const { BRANCH_ROLES, NETWORK_ROLES, effectivePermissions } = require('../utils/employeeQualityAccess');
@@ -65,14 +71,17 @@ const normalizeRequestedPermissions = (value) => {
 
 const rankOf = (role) => ROLE_RANK[normalizeRole(role)] || 0;
 
-function getBearerToken(req) {
-  const header = String(req.headers?.authorization || '');
-  return header.startsWith('Bearer ') ? header.slice(7) : null;
-}
-
+// users row + its company status (for checkTenantAccess) and permissions.
 async function loadActorFromDb(userId) {
   const [userResult, permissionResult] = await Promise.all([
-    pool.query('select id, role, branch_id from users where id = $1 limit 1', [userId]),
+    pool.query(
+      `select u.id, u.role, u.branch_id, u.company_id, c.status as company_status
+         from users u
+         left join companies c on c.id = u.company_id
+        where u.id = $1
+        limit 1`,
+      [userId],
+    ),
     pool.query('select permission from user_permissions where user_id = $1', [userId]),
   ]);
   const user = userResult.rows[0];
@@ -82,7 +91,7 @@ async function loadActorFromDb(userId) {
 
 async function loadTargetFromDb(id) {
   const result = await pool.query(
-    `select u.id, u.role, coalesce(b.branch_id, u.branch_id) as branch_id
+    `select u.id, u.role, coalesce(b.branch_id, u.branch_id) as branch_id, u.company_id
        from users u
        left join barbers b on b.id = u.id
       where u.id = $1
@@ -95,6 +104,7 @@ async function loadTargetFromDb(id) {
 function createEmployeeManagementGuard({
   loadActor = loadActorFromDb,
   loadTarget = loadTargetFromDb,
+  loadBranch = (id) => companyRepo.findBranch(id),
   secret,
   validateId = true,
 } = {}) {
@@ -120,7 +130,7 @@ function createEmployeeManagementGuard({
       try {
         const jwtSecret = secret || process.env.JWT_SECRET;
         if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-        payload = jwt.verify(token, jwtSecret);
+        payload = verifyAny(token, { secret: jwtSecret });
       } catch (_error) {
         return deny(res, 401, 'Invalid or expired token');
       }
@@ -131,6 +141,9 @@ function createEmployeeManagementGuard({
       try {
         const actor = await loadActor(String(userId));
         if (!actor?.user) return deny(res, 401, 'Session is no longer valid');
+        const tenantCheck = checkTenantAccess({ payload, user: actor.user });
+        if (!tenantCheck.ok) return res.status(tenantCheck.status).json(tenantCheck.body);
+        const companyId = tenantCheck.tenant.companyId;
 
         // Role comes from the database, not the token, so demotions apply immediately.
         const role = normalizeRole(actor.user.role);
@@ -158,6 +171,10 @@ function createEmployeeManagementGuard({
           if (validateId && !UUID_PATTERN.test(targetId)) return deny(res, 404, 'Employee not found');
           target = await loadTarget(targetId);
           if (!target) return deny(res, 404, 'Employee not found');
+          // Another company's employee does not exist for this caller.
+          if (!companyId || String(target.company_id || '') !== String(companyId)) {
+            return deny(res, 404, 'Employee not found');
+          }
           // Accounts outside the employee hierarchy (merchant, partner, …) are
           // not managed here; rank 0 would otherwise make them editable by anyone.
           if (!ROLE_RANK[normalizeRole(target.role)]) {
@@ -185,10 +202,12 @@ function createEmployeeManagementGuard({
           }
         }
 
+        req.tenant = tenantCheck.tenant;
         req.employeeManagement = {
           action,
           actor: actor.user,
           branchId,
+          companyId,
           isBranchRole,
           permissions,
           role,
@@ -202,7 +221,7 @@ function createEmployeeManagementGuard({
     };
   }
 
-  function checkPayload(req, res, next) {
+  async function checkPayload(req, res, next) {
     const context = req.employeeManagement;
     if (!context) return deny(res, 500, 'Employee management authorization missing');
 
@@ -212,6 +231,22 @@ function createEmployeeManagementGuard({
 
     if (isBranchRole && body.branch_id !== undefined && normalizeId(body.branch_id) !== actorBranchId) {
       return deny(res, 403, 'Branch is outside the authenticated user scope');
+    }
+
+    // Network roles may pick any branch, but only of their own company.
+    const requestedBranchId = normalizeId(body.branch_id);
+    if (!isBranchRole && requestedBranchId) {
+      if (validateId && !UUID_PATTERN.test(requestedBranchId)) return deny(res, 400, 'branch_id is invalid');
+      let branch;
+      try {
+        branch = await loadBranch(requestedBranchId);
+      } catch (error) {
+        console.error('[employee-management] branch lookup failed:', error?.code || error?.message);
+        return deny(res, 500, 'Failed to authorize request');
+      }
+      if (!branch || !context.companyId || String(branch.company_id) !== String(context.companyId)) {
+        return deny(res, 403, 'Branch is outside the authenticated user scope');
+      }
     }
 
     if (body.role !== undefined && !canAssignRole(actorRole, body.role)) {

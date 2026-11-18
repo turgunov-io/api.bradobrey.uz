@@ -240,7 +240,7 @@ The legacy `POST /api/marketplace/auth/phone/request-otp` and
 `TELEGRAM_AUTH_REQUIRED`; they do not create or verify fallback OTPs.
 # Employee branch context
 
-`POST /api/barbers/login` accepts optional `branch_id` for workspace employees. When credentials are valid but more than one active branch is available and `branch_id` is absent, the response is `409` with `code: BRANCH_SELECTION_REQUIRED` and a PII-free `branches` array. Branch access is an allow-list (MULTI_TENANCY 0.7): an employee may select their home branch (`users.branch_id` / `barbers.branch_id`) plus branches with an active (`is_active = true`) `employee_branch_access` row; network roles (`admin_network`, `admin`, `super-manager`) may select every active branch. An explicit inactive `employee_branch_access` row is a server-side deny and always wins. A closed/inactive branch or denied branch returns `403 BRANCH_ACCESS_DENIED`.
+`POST /api/barbers/login` accepts optional `branch_id` for workspace employees. When credentials are valid but more than one active branch is available and `branch_id` is absent, the response is `409` with `code: BRANCH_SELECTION_REQUIRED` and a PII-free `branches` array. Branch access is an allow-list (MULTI_TENANCY 0.7): an employee may select their home branch (`users.branch_id` / `barbers.branch_id`) plus branches with an active (`is_active = true`) `employee_branch_access` row; network roles (`admin_network`, `admin`, `super-manager`) may select every active branch **of their company** (MULTI_TENANCY Phase 1). An explicit inactive `employee_branch_access` row is a server-side deny and always wins. A closed/inactive branch or denied branch returns `403 BRANCH_ACCESS_DENIED`.
 
 The selected branch is persisted in `employee_active_branches` and is reflected in JWT `branchId`, `/api/barbers/me` as `active_branch_id`, Verifix events, kiosk employee visibility, and queue bookings. `users.branch_id`/`barbers.branch_id` remain the permanent assignment. Apply `db/postgres/employee_branches.sql` before enabling multi-branch assignments; the migration is additive and does not rewrite permanent assignments.
 
@@ -284,3 +284,151 @@ The selected branch is persisted in `employee_active_branches` and is reflected 
 - Certificate administration cannot manually set `is_used`; use the queue
   completion lifecycle. Admin list responses expose a derived `status` of
   `active`, `reserved`, `used`, or `expired`.
+
+# Companies (multi-tenancy, Phase 1 step B1)
+
+See `.project/MULTI_TENANCY.md` section 9. One company = one barbershop brand
+with many branches. The kiosk and barber apps enter a **company code** first,
+then pick a branch of that company only.
+
+## `POST /api/companies/resolve`
+
+No auth. Rate-limited per IP (30 / 15 min, `keyBy: 'ip'`; needs `TRUST_PROXY`
+behind a proxy).
+
+Request: `{ "code": "BRADOBREY" }` — trimmed, case-insensitive.
+
+- `200` `{ company: { id, name, code, logo_url, primary_color, currency }, branches: [{ id, name, address }] }` — active branches of that company only, sorted by name.
+- `404` `{ code: "COMPANY_NOT_FOUND", error: "Company not found" }` — unknown, suspended **or malformed** code; always the same body.
+- `400` `{ code: "COMPANY_CODE_REQUIRED" }` — `code` missing.
+- `429` `{ error: "RATE_LIMITED" }` with `Retry-After`.
+
+## `POST /api/kiosk/register`
+
+Body: `{ company_code, branch_id, device_name, enrollment_code? }`.
+
+- `company_code` given: unknown/suspended → `404 COMPANY_NOT_FOUND` (same body as resolve); `branch_id` not of that company, unknown or closed → `403 KIOSK_BRANCH_FORBIDDEN`.
+- `company_code` absent (deployed kiosk apps): allowed only while the platform has exactly one company and it is the active default one (warning `[kiosk] ... without company_code` once per process); otherwise `400 COMPANY_CODE_REQUIRED`.
+- Enrollment, after the company is resolved (security review H1, migration 008): `enrollment_code` must match **that company's own** code (`companies.kiosk_enrollment_code_hash`, SHA-256, constant-time), or a staff bearer token whose user belongs to **the same company** (DB-checked) and whose branch scope covers `branch_id`; otherwise `403 KIOSK_ENROLLMENT_CODE_INVALID`. Env `KIOSK_ENROLLMENT_CODE` is only a legacy fallback for the default company while it is the only company and has no code of its own (unset there = open, with a warning). With 2+ companies a company without its own code enrolls kiosks via staff only. `409 KIOSK_ALREADY_REGISTERED`.
+
+## `PUT /api/kiosk/enrollment-code`
+
+Staff bearer (`staffAccess.requireStaff`, role/company from the DB); only network roles (`admin_network`, `admin`, `super-manager`) of the caller's own company. Body `{ enrollment_code }` (8–128 chars, trimmed) → `200 { updated: true }`; the code is stored hashed and never returned. Branch roles / no company → `403`; invalid code → `400`.
+
+## `/api/monitor/queue/:id/status`, `/api/monitor/queue/:id/cancel`
+
+Queue entries are looked up within the caller's company (kiosk token → kiosk company and branch). Without a kiosk token (legacy, `KIOSK_AUTH_ENFORCE` off) only while exactly one company exists; otherwise `401 KIOSK_TOKEN_REQUIRED`.
+- Success unchanged: `201 { branch_id, kiosk_id, device_token }`.
+
+Kiosk device tokens (`X-Kiosk-Token`) resolve the company via the kiosk's
+branch: `req.kiosk = { id, branchId, companyId }`; a suspended company is
+`403 COMPANY_SUSPENDED`. `GET/DELETE /api/kiosk/devices` only list/delete kiosks
+of the caller's company (another company's kiosk is `404`).
+
+## Staff login: `POST /api/barbers/login`, `POST /api/auth/login`, `POST /api/barbers/admin/login`
+
+New optional body field `company_code`. The user lookup is
+`(company_id, login)`; a workspace branch must belong to that company (the
+branch list in `409 BRANCH_SELECTION_REQUIRED` is company-only).
+
+- `company_code` unknown/suspended → `404 COMPANY_NOT_FOUND`.
+- `company_code` absent → the default company (`companies.is_default`) **only while it is the only company** (counted on every request), warning `[auth] staff login without company_code` — keeps the current barber app and dash (`dash/server/api/barbers/login.post.ts` sends only `login`, `password`, `branch_id?`, `location?`) working until a second company exists. 2+ companies or no default company → `400 COMPANY_CODE_REQUIRED`; default company suspended → `403 COMPANY_SUSPENDED`.
+- Response `user` gains `company_id`; the JWT gains `companyId`.
+
+## Staff tokens and company checks (all staff routes)
+
+Staff JWT: `{ sub, login, role, branchId, companyId, jti? }`, HS256 only
+(`src/utils/authToken.js`). On every request with a staff token
+(`enforceEmployeeAccess`, and the guards in `adminAuth`, `staffAccess`,
+`employeeManagement`, `kioskAuth`, statistics/history auth, sockets) the user's
+`company_id` and company status are loaded from the DB:
+
+- token `companyId` ≠ DB → `401 TOKEN_COMPANY_MISMATCH`; tokens without `companyId` (issued before B1) are accepted and the company is taken from the DB;
+- company suspended → `403 COMPANY_SUSPENDED`; user without company → `403 COMPANY_REQUIRED`;
+- `req.tenant = { companyId, isPlatformOwner }`.
+
+Network roles (`admin_network`, `admin`, `super-manager`) now see **every
+branch of their company** instead of the whole database (branch scopes,
+employee directory, kiosk devices, socket `join_branch`, statistics/history
+branch scopes). Socket `join_branch` for a branch of another company answers
+`{ ok: false, code: "BRANCH_ACCESS_DENIED" }`.
+
+## Platform owner: `/api/platform/*`
+
+`platform_owner` (no company) manages companies only — no statistics, clients
+or company data. With a platform-owner token every other `/api/*` staff route
+answers `403 PLATFORM_OWNER_NO_TENANT_ACCESS`. All company routes check the
+role in the DB (`403 PLATFORM_OWNER_REQUIRED` otherwise).
+
+- `POST /api/platform/login` `{ login, password }` → `200 { token, user: { id, login, role: "platform_owner" } }`; wrong credentials → `400 Invalid credentials`. Rate-limited per IP (20 / 15 min).
+- `GET /api/platform/companies` → `{ companies: [{ id, name, code, status, currency, timezone, logo_url, primary_color, is_default, has_kiosk_enrollment_code, created_at, updated_at }] }` (the enrollment code / its hash are never returned).
+- `POST /api/platform/companies` `{ name, code, currency?, timezone?, logo_url?, primary_color? }` → `201 { company }`. **Gate:** `409 { code: "MULTI_COMPANY_PRECONDITIONS", failed: ["KIOSK_AUTH_ENFORCE"?, "TENANT_STRICT"?] }` unless kiosk auth is enforced and `current_setting('app.tenant_strict')` is `on` (MULTI_TENANCY.md 9.9). `code` is stored upper-case, `^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$`; duplicate (case-insensitive) → `409 COMPANY_CODE_TAKEN`; unknown fields → `400`.
+- `PATCH /api/platform/companies/:id` — any of `name, code, status (active|suspended), currency, timezone, logo_url, primary_color` (`logo_url`/`primary_color` accept `null`), plus `kiosk_enrollment_code` (8–128 chars → stored as SHA-256 hash; `null` clears it; never returned). Unknown id → `404`; suspending the default company → `409 DEFAULT_COMPANY_SUSPEND_FORBIDDEN`; re-activating a suspended non-default company is subject to the same `409 MULTI_COMPANY_PRECONDITIONS` gate as creation.
+- `POST /api/platform/companies/:id/admins` `{ login, password }` → `201 { user: { id, login, role: "admin", company_id } }`. Password 8–128 chars, bcrypt (cost 10). Login taken in the company → `409 LOGIN_TAKEN` (logins are unique per company after migration 007).
+
+# Company data scoping (multi-tenancy, Phase 1 step B2)
+
+See `.project/MULTI_TENANCY.md` sections 9.5, 9.8, 9.9. Response shapes are
+unchanged unless listed here.
+
+## Company context for marketplace (ŞAF) endpoints without a booking
+
+`GET /api/marketplace/compliance/loyalty`, `GET /api/marketplace/compliance/restriction`
+and `GET /api/marketplace/compliance/referral` (only when the client has no
+referral account yet) now take an optional `?branch_id=<uuid>`; the company is
+that branch's company.
+
+- `branch_id` absent: the default company is used **only while the platform has
+  exactly one company**. With two or more companies, or with an unknown /
+  malformed `branch_id` → `400 { code: "BRANCH_REQUIRED", error: "branch_id is required" }`
+  — the same contract as `GET /api/loyalty/ranks` and `GET /api/kiosk/certificate/:id`.
+- `loyalty`: levels (`loyalty_levels`) of that company.
+- `restriction`: `violation_count` counts no-shows at that company with that
+  company's `lookback_days`; `restricted` / `blocked_until` stay account-wide.
+- `referral`: an existing referral account keeps its company (code, balance,
+  invited list are of that company); a new account is created in the resolved
+  company. New codes are unique across all companies; on a (practically
+  impossible) collision → `409 { error: "REFERRAL_CODE_COLLISION_RETRY" }`.
+
+Client impact: the marketplace app (`referral_page.dart`, loyalty/restriction
+screens) does not send `branch_id` yet — fine while there is one company,
+must be updated before a second company is created.
+
+## Referral codes at sign-up
+
+`POST /api/auth/telegram/verify-code`, phone OTP and email registration with a
+referral code: the code must resolve to exactly one referral account; a code
+present in two companies is rejected like an unknown one (`400 Invalid referral code` /
+`INVALID_REFERRAL_CODE`). The referral, its daily limit, expiry and bonus
+settings belong to the code owner's company.
+
+## Marketplace bookings and no-shows
+
+- `POST /api/marketplace/catalog/group-bookings`: limits (`booking_limits`),
+  services (must be active, of the branch's company, branch's own or shared) and
+  prices come from the booked branch's company; the visit is recorded on that
+  company's client with the same phone (created if missing). A branch without a
+  company → `409 { code: "COMPANY_REQUIRED" }`. A service of another company →
+  `400 SERVICE_NOT_AVAILABLE_TODAY` (unchanged code).
+- Cancelling a booking applies the anti-fraud and points rules of the company
+  that owns the booking; confirmed no-shows use that company's
+  `no_show_restrictions`.
+
+## Services and prices (all clients)
+
+A service is used for a queue entry (price, duration, name) only when it
+belongs to the entry's company and is that branch's own or a shared
+(`branch_id` null) service of the same company. Affected: barber
+`PATCH /api/barbers/queue/:id` and `…/edit-before-complete` (`service_ids` of
+another company or branch → `400 One or more service_ids are invalid`),
+`…/complete` (order amount), queue/history totals, kiosk ETA
+(`GET /api/kiosk/barbers/:branch_id`), statistics, finance overview, merchant
+order totals, marketplace active booking. `DELETE /api/merchant/services/:id`
+now deletes only a service of the caller's barbershop (another one → `404`).
+
+## Penalties (`/api/penalties`)
+
+Bound to the caller's company (`403 { code: "COMPANY_REQUIRED" }` without one).
+Network roles see and cancel every penalty of their company, including rows with
+`branch_id` null; branch roles only their branches. `POST` works again (it threw
+`ReferenceError` before).

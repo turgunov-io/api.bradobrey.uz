@@ -11,6 +11,16 @@ const { createKioskRegistry, hashDeviceToken } = require('../src/services/kioskR
 const BRANCH_A = '11111111-1111-4111-8111-111111111111';
 const BRANCH_B = '22222222-2222-4222-8222-222222222222';
 const DEVICE = 'Xiaomi 2505DRP06G [a3c21247e1f09762]';
+// Single default company (MULTI_TENANCY Phase 1): requests without
+// company_code take the legacy path.
+const COMPANY_ID = 'cccccccc-0000-4000-8000-00000000000c';
+const SINGLE_COMPANY = {
+  async countCompanies() { return 1; },
+  async findDefault() { return { id: COMPANY_ID, status: 'active', is_default: true }; },
+  async findActiveByCode() { return null; },
+  async findBranch() { return null; },
+  async findKioskEnrollmentHash() { return null; },
+};
 
 function makeRepo(kiosks = []) {
   const rows = kiosks.map((row) => ({ ...row }));
@@ -43,14 +53,15 @@ const BARBER_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const ARCHIVED_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const MULTI_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const DB_ACTORS = {
-  [ADMIN_ID]: { id: ADMIN_ID, role: 'admin', branchScope: null },
-  [MANAGER_A_ID]: { id: MANAGER_A_ID, role: 'manager', branchScope: [BRANCH_A] },
-  [MANAGER_B_ID]: { id: MANAGER_B_ID, role: 'manager', branchScope: [BRANCH_B] },
-  [BARBER_ID]: { id: BARBER_ID, role: 'barber', branchScope: [BRANCH_A] },
-  [MULTI_ID]: { id: MULTI_ID, role: 'admin_branch', branchScope: [BRANCH_B, BRANCH_A] },
+  [ADMIN_ID]: { id: ADMIN_ID, role: 'admin', branchScope: null, companyId: COMPANY_ID },
+  [MANAGER_A_ID]: { id: MANAGER_A_ID, role: 'manager', branchScope: [BRANCH_A], companyId: COMPANY_ID },
+  [MANAGER_B_ID]: { id: MANAGER_B_ID, role: 'manager', branchScope: [BRANCH_B], companyId: COMPANY_ID },
+  [BARBER_ID]: { id: BARBER_ID, role: 'barber', branchScope: [BRANCH_A], companyId: COMPANY_ID },
+  [MULTI_ID]: { id: MULTI_ID, role: 'admin_branch', branchScope: [BRANCH_B, BRANCH_A], companyId: COMPANY_ID },
 };
 
 const registryWithCode = (code, repo = makeRepo(), loads = []) => createKioskRegistry({
+  companies: SINGLE_COMPANY,
   repo,
   enrollmentCode: () => code,
   loadActor: async (claims) => { loads.push(claims); return DB_ACTORS[claims?.sub] || null; },
@@ -71,10 +82,10 @@ test('register requires a matching enrollment_code when KIOSK_ENROLLMENT_CODE is
 
 test('register keeps the open behaviour (with a warning) when no enrollment code is configured', async () => {
   const warnings = [];
-  const registry = createKioskRegistry({ repo: makeRepo(), enrollmentCode: () => '', warn: (msg) => warnings.push(msg) });
+  const registry = createKioskRegistry({ companies: SINGLE_COMPANY, repo: makeRepo(), enrollmentCode: () => '', warn: (msg) => warnings.push(msg) });
   assert.equal((await registry.register({ branchId: BRANCH_A, deviceName: DEVICE })).status, 201);
   assert.equal((await registry.register({ branchId: BRANCH_A, deviceName: 'other' })).status, 201);
-  assert.equal(warnings.length, 1);
+  assert.equal(warnings.filter((msg) => msg.includes('KIOSK_ENROLLMENT_CODE')).length, 1);
 });
 
 test('staff in scope may register a kiosk without the enrollment code', async () => {
@@ -125,10 +136,10 @@ test('a legacy kiosk re-registers to get a token when it sends the enrollment co
 });
 
 test('authenticateDevice resolves a device token to the kiosk id and branch', async () => {
-  const repo = makeRepo([{ id: 'k9', branch_id: BRANCH_B, device_name: DEVICE, device_token_hash: hashDeviceToken('tok') }]);
+  const repo = makeRepo([{ id: 'k9', branch_id: BRANCH_B, company_id: COMPANY_ID, company_status: 'active', device_name: DEVICE, device_token_hash: hashDeviceToken('tok') }]);
   const registry = registryWithCode('', repo);
 
-  assert.deepEqual(await registry.authenticateDevice('tok'), { id: 'k9', branchId: BRANCH_B });
+  assert.deepEqual(await registry.authenticateDevice('tok'), { id: 'k9', branchId: BRANCH_B, companyId: COMPANY_ID, companyStatus: 'active' });
   assert.equal(await registry.authenticateDevice('nope'), null);
   assert.equal(await registry.authenticateDevice(''), null);
   assert.equal(await registry.authenticateDevice('x'.repeat(1000)), null);

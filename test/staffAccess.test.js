@@ -11,20 +11,20 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || SECRET;
 const { createStaffAccessGuard } = require('../src/middleware/staffAccess');
 
 const ACTORS = {
-  admin: { user: { id: '10000000-0000-4000-8000-000000000001', role: 'admin', branch_id: null }, permissions: [] },
+  admin: { user: { id: '10000000-0000-4000-8000-000000000001', role: 'admin', branch_id: null, company_id: 'company-1', company_status: 'active' }, permissions: [] },
   narrowAdmin: {
-    user: { id: '10000000-0000-4000-8000-000000000002', role: 'admin', branch_id: null },
+    user: { id: '10000000-0000-4000-8000-000000000002', role: 'admin', branch_id: null, company_id: 'company-1', company_status: 'active' },
     permissions: ['dashboard.access', 'services.read'],
   },
   manager: {
-    user: { id: '10000000-0000-4000-8000-000000000003', role: 'manager', branch_id: null },
+    user: { id: '10000000-0000-4000-8000-000000000003', role: 'manager', branch_id: null, company_id: 'company-1', company_status: 'active' },
     permissions: ['dashboard.access', 'services.manage'],
   },
   barber: {
-    user: { id: '10000000-0000-4000-8000-000000000004', role: 'barber', branch_id: null },
+    user: { id: '10000000-0000-4000-8000-000000000004', role: 'barber', branch_id: null, company_id: 'company-1', company_status: 'active' },
     permissions: ['queue.read'],
   },
-  merchant: { user: { id: '10000000-0000-4000-8000-000000000005', role: 'merchant', branch_id: null }, permissions: [] },
+  merchant: { user: { id: '10000000-0000-4000-8000-000000000005', role: 'merchant', branch_id: null, company_id: 'company-1', company_status: 'active' }, permissions: [] },
 };
 
 const GHOST_ID = '10000000-0000-4000-8000-0000000000ff';

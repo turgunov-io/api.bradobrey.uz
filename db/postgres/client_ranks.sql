@@ -12,9 +12,24 @@ create table if not exists client_rank_settings (
   check (gold_min_visits > silver_min_visits)
 );
 
-insert into client_rank_settings (id)
-values (1)
-on conflict (id) do nothing;
+-- Seed row of the DEFAULT company, with company_id set explicitly (MULTI_TENANCY:
+-- no reliance on the tenant trigger's default-company fallback, so
+-- app.tenant_strict = 'on' can be enabled). On a fresh database (before
+-- db/migrations 001–003 add company_id) the legacy id = 1 row is seeded.
+do $$
+begin
+  if to_regclass('public.companies') is not null
+     and exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'client_rank_settings' and column_name = 'company_id') then
+    insert into client_rank_settings (company_id)
+    select c.id
+      from companies c
+     where c.is_default
+       and not exists (select 1 from client_rank_settings s where s.company_id = c.id);
+  else
+    insert into client_rank_settings (id) values (1) on conflict (id) do nothing;
+  end if;
+end $$;
 
 create or replace function public.set_client_rank_settings_updated_at()
 returns trigger
@@ -37,7 +52,9 @@ returns trigger
 language plpgsql
 as $$
 begin
-  perform public.recompute_all_client_ranks();
+  -- Only the clients of the company whose settings changed. to_jsonb keeps
+  -- this valid on a fresh schema where company_id does not exist yet.
+  perform public.recompute_company_client_ranks((to_jsonb(new) ->> 'company_id')::uuid);
   return new;
 end;
 $$;
@@ -85,12 +102,62 @@ select case
 end;
 $$;
 
+-- Company-aware (MULTI_TENANCY B2a); keep identical to
+-- db/migrations/005_company_scoped_functions.sql (test/companySqlFunctions.test.js).
+create or replace function public.recompute_company_client_ranks(p_company_id uuid)
+returns void
+language plpgsql
+as $$
+declare
+  s record;
+begin
+  if p_company_id is null then
+    -- Fresh schema before the tenant migrations: one global settings row.
+    select bronze_min_visits, silver_min_visits, gold_min_visits
+      into s
+      from client_rank_settings
+     where id = 1;
+  else
+    select bronze_min_visits, silver_min_visits, gold_min_visits
+      into s
+      from client_rank_settings
+     where company_id = p_company_id;
+  end if;
+
+  if not found then
+    s.bronze_min_visits := 2;
+    s.silver_min_visits := 5;
+    s.gold_min_visits := 10;
+  end if;
+
+  if p_company_id is null then
+    update clients c
+    set rank = public.compute_client_rank_by_visits(
+          c.completed_visits, s.bronze_min_visits, s.silver_min_visits, s.gold_min_visits),
+        rank_updated_at = now()
+    where public.client_rank_level(public.compute_client_rank_by_visits(
+            c.completed_visits, s.bronze_min_visits, s.silver_min_visits, s.gold_min_visits))
+          > public.client_rank_level(c.rank);
+  else
+    update clients c
+    set rank = public.compute_client_rank_by_visits(
+          c.completed_visits, s.bronze_min_visits, s.silver_min_visits, s.gold_min_visits),
+        rank_updated_at = now()
+    where c.company_id = p_company_id
+      and public.client_rank_level(public.compute_client_rank_by_visits(
+            c.completed_visits, s.bronze_min_visits, s.silver_min_visits, s.gold_min_visits))
+          > public.client_rank_level(c.rank);
+  end if;
+end;
+$$;
+
 create or replace function public.recompute_client_rank(_client_id uuid)
 returns void
 language plpgsql
 as $$
 declare
   s record;
+  v_company_id uuid;
   v_completed integer;
   v_rank text;
   current_rank text;
@@ -101,24 +168,25 @@ begin
     return;
   end if;
 
-  select bronze_min_visits, silver_min_visits, gold_min_visits
-  into s
-  from client_rank_settings
-  where id = 1;
-
-  if not found then
-    s.bronze_min_visits := 2;
-    s.silver_min_visits := 5;
-    s.gold_min_visits := 10;
-  end if;
-
-  select completed_visits, rank
-  into v_completed, current_rank
+  select completed_visits, rank, company_id
+  into v_completed, current_rank, v_company_id
   from clients
   where id = _client_id;
 
   if not found then
     return;
+  end if;
+
+  -- Thresholds of the client's own company.
+  select bronze_min_visits, silver_min_visits, gold_min_visits
+  into s
+  from client_rank_settings
+  where company_id = v_company_id;
+
+  if not found then
+    s.bronze_min_visits := 2;
+    s.silver_min_visits := 5;
+    s.gold_min_visits := 10;
   end if;
 
   v_rank := public.compute_client_rank_by_visits(
@@ -145,35 +213,18 @@ returns void
 language plpgsql
 as $$
 declare
-  s record;
+  company record;
 begin
-  select bronze_min_visits, silver_min_visits, gold_min_visits
-  into s
-  from client_rank_settings
-  where id = 1;
-
-  if not found then
-    s.bronze_min_visits := 2;
-    s.silver_min_visits := 5;
-    s.gold_min_visits := 10;
+  if to_regclass('public.companies') is null or not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'client_rank_settings' and column_name = 'company_id'
+  ) then
+    perform public.recompute_company_client_ranks(null);
+    return;
   end if;
-
-  update clients c
-  set rank = public.compute_client_rank_by_visits(
-        c.completed_visits,
-        s.bronze_min_visits,
-        s.silver_min_visits,
-        s.gold_min_visits
-      ),
-      rank_updated_at = now()
-  where public.client_rank_level(
-        public.compute_client_rank_by_visits(
-          c.completed_visits,
-          s.bronze_min_visits,
-          s.silver_min_visits,
-          s.gold_min_visits
-        )
-      ) > public.client_rank_level(c.rank);
+  for company in select id from companies loop
+    perform public.recompute_company_client_ranks(company.id);
+  end loop;
 end;
 $$;
 

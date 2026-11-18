@@ -1,6 +1,6 @@
 const buckets = new Map();
 const MAX_BUCKETS = 10000;
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 
 const networkIdentity = (req) => String(req.ip || req.headers['x-forwarded-for'] || 'unknown');
 
@@ -13,7 +13,7 @@ const requestIdentity = (req, keyBy) => {
     try {
       // Only a signature-verified subject may own a bucket; jwt.decode would
       // let a client mint a fresh subject per request and bypass the limit.
-      const payload = jwt.verify(header.slice(7), secret);
+      const payload = verifyAny(header.slice(7), { secret: secret });
       const subject = payload?.sub || payload?.id;
       if (subject) return `sub:${subject}`;
     } catch (_) {

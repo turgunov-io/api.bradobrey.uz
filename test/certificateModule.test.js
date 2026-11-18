@@ -112,6 +112,11 @@ function installCertificateLookup(response) {
   };
   db.from = (table) => {
     calls.push({ method: 'from', table });
+    // B2a: marketplace callers without a branch use legacy single-company mode.
+    if (table === 'companies') {
+      const single = { data: [{ id: 'company-1', is_default: true, status: 'active' }], error: null };
+      return { select() { return this; }, then(resolve, reject) { return Promise.resolve(single).then(resolve, reject); } };
+    }
     return query;
   };
   return {
@@ -151,7 +156,7 @@ test('GET /api/kiosk/certificate/:id resolves A005 case-insensitively and preser
     assert.equal(authorizedResponse.statusCode, 200);
     assert.equal(authorizedResponse.body.certificate.code, 'A005');
     assert.deepEqual(
-      mock.calls.find((call) => call.method === 'eq'),
+      mock.calls.find((call) => call.method === 'eq' && call.column === 'code'),
       { method: 'eq', column: 'code', value: 'A005' },
     );
 

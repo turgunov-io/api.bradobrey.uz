@@ -13,6 +13,7 @@
     "backfill:cashback": "node scripts/backfill-cashback.js",
     "sync:cashback-wallets": "node scripts/sync-cashback-wallets.js",
     "db:marketplace:apply": "node scripts/apply-marketplace-migration.js",
+    "migrate": "node scripts/migrate.js",
     "telegram:webhook:set": "node scripts/configure-telegram-webhook.js",
     "test": "node --test test/*.test.js",
     "test:integration": "node --test test/integration/*.integration.test.js"

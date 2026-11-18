@@ -11,7 +11,13 @@ const kiosk = require('../src/models/kiosk');
 
 const BRANCH_A = '11111111-1111-4111-8111-111111111111';
 const BRANCH_B = '22222222-2222-4222-8222-222222222222';
-const KIOSK = { id: '33333333-3333-4333-8333-333333333333', branchId: BRANCH_A };
+const COMPANY = 'cccccccc-0000-4000-8000-00000000000c';
+const KIOSK = { id: '33333333-3333-4333-8333-333333333333', branchId: BRANCH_A, companyId: COMPANY };
+// B2a: company lookups (branch -> company, legacy single-company mode).
+const COMPANY_MOCKS = {
+  branches: [{ data: { id: BRANCH_B, company_id: COMPANY }, error: null }],
+  companies: [{ data: [{ id: COMPANY, is_default: true, status: 'active' }], error: null }],
+};
 
 function installDbMock(responsesByTable) {
   const calls = [];
@@ -42,7 +48,7 @@ function makeRes() {
 const orFilters = (calls) => calls.filter((call) => call.table === 'services' && call.method === 'or').map((call) => call.args[0]);
 
 test('GET /api/kiosk/services is filtered to the authenticated kiosk branch plus shared services', async () => {
-  const mock = installDbMock({ services: [{ data: [], error: null }] });
+  const mock = installDbMock({ ...COMPANY_MOCKS, services: [{ data: [], error: null }] });
   try {
     const res = makeRes();
     await kiosk.services({ query: { branch_id: BRANCH_B }, kiosk: KIOSK, headers: {} }, res);
@@ -54,7 +60,7 @@ test('GET /api/kiosk/services is filtered to the authenticated kiosk branch plus
 });
 
 test('GET /api/kiosk/services falls back to ?branch_id and rejects a malformed one', async () => {
-  const mock = installDbMock({ services: [{ data: [], error: null }] });
+  const mock = installDbMock({ ...COMPANY_MOCKS, services: [{ data: [], error: null }] });
   try {
     const res = makeRes();
     await kiosk.services({ query: { branch_id: BRANCH_B }, headers: {} }, res);
@@ -69,7 +75,7 @@ test('GET /api/kiosk/services falls back to ?branch_id and rejects a malformed o
 });
 
 test('GET /api/kiosk/services without any branch keeps the legacy unfiltered list', async () => {
-  const mock = installDbMock({ services: [{ data: [{ id: 's1', name: 'Cut', is_active: true }], error: null }] });
+  const mock = installDbMock({ ...COMPANY_MOCKS, services: [{ data: [{ id: 's1', name: 'Cut', is_active: true }], error: null }] });
   try {
     const res = makeRes();
     await kiosk.services({ query: {}, headers: {} }, res);
@@ -83,7 +89,7 @@ test('GET /api/kiosk/services without any branch keeps the legacy unfiltered lis
 
 function bookingMocks(services) {
   return {
-    branches: [{ data: { id: BRANCH_A, timezone: 'Asia/Tashkent', marketplace_barbershop_id: null }, error: null }],
+    branches: [{ data: { id: BRANCH_A, company_id: COMPANY, timezone: 'Asia/Tashkent', marketplace_barbershop_id: null }, error: null }],
     barbers: [{ data: { id: 'barber-1', branch_id: BRANCH_A, is_on_shift: true, is_archived: false }, error: null }],
     users: [{ data: { id: 'barber-1', role: 'barber' }, error: null }],
     services: [{ data: services, error: null }],
@@ -208,29 +214,29 @@ test('GET /api/kiosk/services without branch_id is scoped to a bearer employee\'
     { id: 'shared', name: 'S', is_active: true, branch_id: null },
   ];
 
-  const single = installDbMock({ services: [{ data: rows.filter((r) => r.branch_id === BRANCH_A || !r.branch_id), error: null }] });
+  const single = installDbMock({ ...COMPANY_MOCKS, services: [{ data: rows.filter((r) => r.branch_id === BRANCH_A || !r.branch_id), error: null }] });
   try {
     const res = makeRes();
-    await kiosk.services({ query: {}, headers: {}, kioskStaff: { id: 'u', role: 'admin_branch', branchScope: [BRANCH_A] } }, res);
+    await kiosk.services({ query: {}, headers: {}, kioskStaff: { companyId: COMPANY, id: 'u', role: 'admin_branch', branchScope: [BRANCH_A] } }, res);
     assert.deepEqual(orFilters(single.calls), [`branch_id.eq.${BRANCH_A},branch_id.is.null`]);
   } finally {
     single.restore();
   }
 
-  const multi = installDbMock({ services: [{ data: rows, error: null }] });
+  const multi = installDbMock({ ...COMPANY_MOCKS, services: [{ data: rows, error: null }] });
   try {
     const res = makeRes();
-    await kiosk.services({ query: {}, headers: {}, kioskStaff: { id: 'u', role: 'merchant', branchScope: [BRANCH_A, BRANCH_C] } }, res);
+    await kiosk.services({ query: {}, headers: {}, kioskStaff: { companyId: COMPANY, id: 'u', role: 'merchant', branchScope: [BRANCH_A, BRANCH_C] } }, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.payload.services.map((s) => s.id).sort(), ['sa', 'sc', 'shared']);
   } finally {
     multi.restore();
   }
 
-  const network = installDbMock({ services: [{ data: rows, error: null }] });
+  const network = installDbMock({ ...COMPANY_MOCKS, services: [{ data: rows, error: null }] });
   try {
     const res = makeRes();
-    await kiosk.services({ query: {}, headers: {}, kioskStaff: { id: 'u', role: 'admin', branchScope: null } }, res);
+    await kiosk.services({ query: {}, headers: {}, kioskStaff: { companyId: COMPANY, id: 'u', role: 'admin', branchScope: null } }, res);
     assert.equal(res.payload.services.length, 4);
   } finally {
     network.restore();

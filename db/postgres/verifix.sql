@@ -183,4 +183,21 @@ create table if not exists verifix_settings (
   penalty_per_minute numeric(12,2) not null default 0 check (penalty_per_minute >= 0),
   updated_at timestamptz not null default now()
 );
-insert into verifix_settings (id) values (1) on conflict (id) do nothing;
+-- Seed row of the DEFAULT company, with company_id set explicitly (MULTI_TENANCY:
+-- no reliance on the tenant trigger's default-company fallback, so
+-- app.tenant_strict = 'on' can be enabled). On a fresh database (before
+-- db/migrations 001–003 add company_id) the legacy id = 1 row is seeded.
+do $$
+begin
+  if to_regclass('public.companies') is not null
+     and exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'verifix_settings' and column_name = 'company_id') then
+    insert into verifix_settings (company_id)
+    select c.id
+      from companies c
+     where c.is_default
+       and not exists (select 1 from verifix_settings s where s.company_id = c.id);
+  else
+    insert into verifix_settings (id) values (1) on conflict (id) do nothing;
+  end if;
+end $$;

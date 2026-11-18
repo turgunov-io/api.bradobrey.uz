@@ -180,8 +180,9 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
       employee_id: 'barber-1', branch_id: 'branch-1', is_on_shift: true,
       updated_at: new Date().toISOString(), session_id: 'session-1',
       session_expires_at: new Date(Date.now() + 60_000).toISOString(),
-    }], error: null }],
-    services: [{ data: [{ id: 'service-1', duration_minutes: 10 }], error: null }],
+    }], error: null }],
+    branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
+    services: [{ data: [{ id: 'service-1', company_id: 'company-1', branch_id: null, duration_minutes: 10 }], error: null }],
     clients: [{ data: [], error: null }],
   });
 
@@ -213,14 +214,15 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
 
 test('PATCH /api/barbers/queue/:id/edit-before-complete enriches services and emits ETA refresh', async () => {
   const services = [
-    { id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 20, is_active: true },
-    { id: 'service-2', name: 'Beard', base_price: 50, duration_minutes: 10, is_active: true },
+    { id: 'service-1', company_id: 'company-1', branch_id: null, name: 'Haircut', base_price: 100, duration_minutes: 20, is_active: true },
+    { id: 'service-2', company_id: 'company-1', branch_id: null, name: 'Beard', base_price: 50, duration_minutes: 10, is_active: true },
   ];
   const mock = installSessionDbMock({
     queue_entries: [
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: new Date().toISOString(), service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: new Date().toISOString(), service_id: 'service-1', service_ids: ['service-1', 'service-2'], price_override: null }, error: null },
-    ],
+    ],
+    branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [
       { data: services, error: null },
       { data: services, error: null },
@@ -262,8 +264,9 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manua
     queue_entries: [
       { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'], price_override: 1, price_override_reason: 'Округление' }, error: null },
-    ],
-    services: [{ data: [{ id: 'service-1', name: 'Haircut', base_price: 40000, duration_minutes: 20, is_active: true }], error: null }],
+    ],
+    branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
+    services: [{ data: [{ id: 'service-1', company_id: 'company-1', branch_id: null, name: 'Haircut', base_price: 40000, duration_minutes: 20, is_active: true }], error: null }],
   });
 
   try {
@@ -286,15 +289,16 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manua
 
 test('PATCH /api/barbers/queue/:id validates in-progress services and returns enriched totals', async () => {
   const services = [
-    { id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 20, is_active: true },
-    { id: 'service-2', name: 'Beard', base_price: 50, duration_minutes: 10, is_active: true },
+    { id: 'service-1', company_id: 'company-1', branch_id: null, name: 'Haircut', base_price: 100, duration_minutes: 20, is_active: true },
+    { id: 'service-2', company_id: 'company-1', branch_id: null, name: 'Beard', base_price: 50, duration_minutes: 10, is_active: true },
   ];
   const startedAt = new Date().toISOString();
   const mock = installSessionDbMock({
     queue_entries: [
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: startedAt, service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: startedAt, service_id: 'service-1', service_ids: ['service-1', 'service-2'], price_override: null }, error: null },
-    ],
+    ],
+    branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [
       { data: services, error: null },
       { data: services, error: null },
@@ -412,8 +416,9 @@ test('generic queue PATCH treats a repeated terminal status as a read-only no-op
     service_ids: ['service-1'],
   };
   const mock = installSessionDbMock({
-    queue_entries: [{ data: entry, error: null }],
-    services: [{ data: [{ id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 30 }], error: null }],
+    queue_entries: [{ data: entry, error: null }],
+    branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
+    services: [{ data: [{ id: 'service-1', company_id: 'company-1', branch_id: null, name: 'Haircut', base_price: 100, duration_minutes: 30 }], error: null }],
   });
   const token = sessionToken();
 

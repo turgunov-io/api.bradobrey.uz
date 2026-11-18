@@ -7,11 +7,15 @@
 //                                  and a caller-specific 403 message.
 //   createNetworkWriteAuth(opts)   admin auth that additionally requires a
 //                                  network role (network-wide settings writes).
-//   resolveAllowedBranchIds(user)  branch scope of a DB-loaded user: null for
-//                                  network roles (unrestricted), otherwise the
+//   resolveAllowedBranchIds(user)  branch scope of a DB-loaded user
+//                                  ({ id, role, branch_id, company_id }): the
 //                                  list of branch ids the user may act on.
+//                                  Network roles get every branch of THEIR
+//                                  company (MULTI_TENANCY Phase 1), marked
+//                                  isCompanyWideScope(); never null.
 //   isBranchAllowed(scope, id)     membership check against that scope.
-const jwt = require('jsonwebtoken');
+const { getBearerToken, verifyAny } = require('./authToken');
+const { PLATFORM_OWNER_ROLE, checkTenantAccess } = require('./tenant');
 
 // DB-backed helpers are required lazily: config/postgres throws at load time
 // without database env, and token-only callers/tests must not need it.
@@ -30,11 +34,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const normalizeRole = (role) => String(role || '').trim().toLowerCase();
 const isNetworkRole = (role) => networkRoles().has(normalizeRole(role));
 
-function getBearerToken(req) {
-  const header = String(req.headers?.authorization || '');
-  return header.startsWith('Bearer ') ? header.slice(7) : null;
-}
-
 function verifyToken(req, res, secret) {
   const token = getBearerToken(req);
   if (!token) {
@@ -44,7 +43,7 @@ function verifyToken(req, res, secret) {
   try {
     const jwtSecret = secret || process.env.JWT_SECRET;
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-    return jwt.verify(token, jwtSecret);
+    return verifyAny(token, { secret: jwtSecret });
   } catch (_err) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
@@ -85,6 +84,11 @@ function createAdminAuth({
       res.status(403).json({ error: 'Employee access has been revoked' });
       return null;
     }
+    const tenantCheck = checkTenantAccess({ payload, user: state.user });
+    if (!tenantCheck.ok) {
+      res.status(tenantCheck.status).json(tenantCheck.body);
+      return null;
+    }
 
     const role = normalizeRole(state.user.role);
     if (!roles.has(role)) {
@@ -95,6 +99,9 @@ function createAdminAuth({
     return {
       ...payload,
       branch_id: state.user.branch_id || null,
+      company_id: tenantCheck.tenant.companyId,
+      companyId: tenantCheck.tenant.companyId,
+      tenant: tenantCheck.tenant,
       id: state.user.id,
       role,
       sub: state.user.id,
@@ -123,13 +130,28 @@ function createNetworkWriteAuth({
   };
 }
 
+// Company-wide scopes are plain arrays; the marker lets a few legacy
+// handlers keep treating company-level rows (branch_id NULL) as in scope.
+function markCompanyWide(ids) {
+  Object.defineProperty(ids, 'companyWide', { value: true, enumerable: false });
+  return ids;
+}
+const isCompanyWideScope = (scope) => Array.isArray(scope) && scope.companyWide === true;
+
+async function loadCompanyBranchIds(companyId, query) {
+  if (!companyId) return [];
+  const result = await query('select id from branches where company_id = $1', [companyId]);
+  return (result.rows || []).map((row) => String(row.id));
+}
+
 async function loadMerchantBranchIds(user, query) {
   try {
     const result = await query(
       `select b.id
          from branches b
          join users u on u.marketplace_barbershop_id = b.marketplace_barbershop_id
-        where u.id = $1`,
+        where u.id = $1
+          and b.company_id = u.company_id`,
       [user.id],
     );
     const ids = (result.rows || []).map((row) => String(row.id));
@@ -142,8 +164,8 @@ async function loadMerchantBranchIds(user, query) {
 }
 
 /**
- * @param {{ id: string, role: string, branch_id?: string|null }} user DB-loaded user
- * @returns {Promise<string[]|null>} null = unrestricted (network role)
+ * @param {{ id: string, role: string, branch_id?: string|null, company_id?: string|null }} user DB-loaded user
+ * @returns {Promise<string[]>} allowed branch ids (network roles: whole company)
  */
 async function resolveAllowedBranchIds(user, {
   listBranches = (id, fallback) => employeeBranches().listEmployeeBranches(id, fallback),
@@ -151,7 +173,8 @@ async function resolveAllowedBranchIds(user, {
 } = {}) {
   if (!user?.id) return [];
   const role = normalizeRole(user.role);
-  if (networkRoles().has(role)) return null;
+  if (role === PLATFORM_OWNER_ROLE) return [];
+  if (networkRoles().has(role)) return markCompanyWide(await loadCompanyBranchIds(user.company_id, query));
   if (role === 'merchant') return loadMerchantBranchIds(user, query);
 
   const branches = await listBranches(user.id, user.branch_id || null);
@@ -170,7 +193,7 @@ const SESSION_BRANCH_ROLES = new Set(['manager', 'barber', 'super-barber']);
  */
 async function resolveStaffBranchScope(user, sessionBranchId, deps) {
   const role = normalizeRole(user?.role);
-  if (networkRoles().has(role)) return null;
+  if (networkRoles().has(role)) return resolveAllowedBranchIds(user, deps);
   if (SESSION_BRANCH_ROLES.has(role)) return sessionBranchId ? [String(sessionBranchId)] : [];
   return resolveAllowedBranchIds(user, deps);
 }
@@ -180,7 +203,7 @@ const isBranchAllowed = (scope, branchId) => (
 );
 
 // Express middleware: resolves req.branchScope for the caller loaded by a
-// preceding staffAccess guard (req.staffAccess). null = unrestricted.
+// preceding staffAccess guard (req.staffAccess): company-scoped branch ids.
 function createBranchScopeMiddleware({ resolve = resolveAllowedBranchIds } = {}) {
   return async function attachBranchScope(req, res, next) {
     const access = req.staffAccess;
@@ -203,7 +226,7 @@ const attachBranchScope = createBranchScopeMiddleware();
 // Express middleware for routers whose models still parse the token
 // themselves (verifix, kioskAds). For a valid employee token it loads the
 // caller from the database and sets
-//   req.dbActor = { id, role, branch_id, branchScope }
+//   req.dbActor = { id, role, branch_id, branchScope, companyId } (+ req.tenant)
 // with the DB role and branch scope. A missing or invalid token passes
 // through untouched so the model keeps answering 401 itself; a token whose
 // user is gone or archived is rejected here.
@@ -218,7 +241,7 @@ function createDbActorMiddleware({
     let payload = null;
     try {
       const jwtSecret = secret || process.env.JWT_SECRET;
-      if (token && jwtSecret) payload = jwt.verify(token, jwtSecret);
+      if (token && jwtSecret) payload = verifyAny(token, { secret: jwtSecret });
     } catch (_error) {
       payload = null;
     }
@@ -238,12 +261,19 @@ function createDbActorMiddleware({
         res.status(403).json({ error: 'Employee access has been revoked' });
         return;
       }
+      const tenantCheck = checkTenantAccess({ payload, user: state.user });
+      if (!tenantCheck.ok) {
+        res.status(tenantCheck.status).json(tenantCheck.body);
+        return;
+      }
       const role = normalizeRole(state.user.role);
       const sessionBranchId = payload.branchId || payload.branch_id || state.user.branch_id || null;
       const branchScope = await resolveScope({ ...state.user, role }, sessionBranchId);
+      req.tenant = tenantCheck.tenant;
       req.dbActor = {
         branch_id: state.user.branch_id || null,
         branchScope,
+        companyId: tenantCheck.tenant.companyId,
         id: state.user.id,
         role,
         sessionBranchId,
@@ -268,6 +298,7 @@ module.exports = {
   createAdminAuth,
   createNetworkWriteAuth,
   isBranchAllowed,
+  isCompanyWideScope,
   isNetworkRole,
   resolveAllowedBranchIds,
   resolveStaffBranchScope,

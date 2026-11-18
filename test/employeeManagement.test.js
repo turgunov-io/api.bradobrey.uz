@@ -15,25 +15,25 @@ const BRANCH_B = '22222222-2222-4222-8222-222222222222';
 const TARGET_ID = '33333333-3333-4333-8333-333333333333';
 
 const ACTORS = {
-  network: { user: { id: 'u-network', role: 'admin_network', branch_id: null }, permissions: [] },
-  admin: { user: { id: 'u-admin', role: 'admin', branch_id: BRANCH_A }, permissions: [] },
+  network: { user: { id: 'u-network', role: 'admin_network', branch_id: null, company_id: 'company-1', company_status: 'active' }, permissions: [] },
+  admin: { user: { id: 'u-admin', role: 'admin', branch_id: BRANCH_A, company_id: 'company-1', company_status: 'active' }, permissions: [] },
   superManager: {
-    user: { id: 'u-super', role: 'super-manager', branch_id: BRANCH_A },
+    user: { id: 'u-super', role: 'super-manager', branch_id: BRANCH_A, company_id: 'company-1', company_status: 'active', company_id: 'company-1' },
     permissions: ['dashboard.access', 'employees.read', 'employees.create', 'employees.update'],
   },
   manager: {
-    user: { id: 'u-manager', role: 'manager', branch_id: BRANCH_A },
+    user: { id: 'u-manager', role: 'manager', branch_id: BRANCH_A, company_id: 'company-1', company_status: 'active', company_id: 'company-1' },
     permissions: ['dashboard.access', 'employees.read', 'employees.update'],
   },
-  managerNoPerms: { user: { id: 'u-manager2', role: 'manager', branch_id: BRANCH_A }, permissions: [] },
-  barber: { user: { id: 'u-barber', role: 'barber', branch_id: BRANCH_A }, permissions: ['queue.read'] },
+  managerNoPerms: { user: { id: 'u-manager2', role: 'manager', branch_id: BRANCH_A, company_id: 'company-1', company_status: 'active' }, permissions: [] },
+  barber: { user: { id: 'u-barber', role: 'barber', branch_id: BRANCH_A, company_id: 'company-1', company_status: 'active' }, permissions: ['queue.read'] },
 };
 
 const TARGETS = {
-  [TARGET_ID]: { id: TARGET_ID, role: 'barber', branch_id: BRANCH_A },
-  'target-other-branch': { id: 'target-other-branch', role: 'barber', branch_id: BRANCH_B },
-  'target-network': { id: 'target-network', role: 'admin_network', branch_id: null },
-  'target-super': { id: 'target-super', role: 'super-manager', branch_id: BRANCH_A },
+  [TARGET_ID]: { id: TARGET_ID, role: 'barber', branch_id: BRANCH_A, company_id: 'company-1' },
+  'target-other-branch': { id: 'target-other-branch', role: 'barber', branch_id: BRANCH_B, company_id: 'company-1' },
+  'target-network': { id: 'target-network', role: 'admin_network', branch_id: null, company_id: 'company-1' },
+  'target-super': { id: 'target-super', role: 'super-manager', branch_id: BRANCH_A, company_id: 'company-1' },
 };
 
 function makeGuard() {
@@ -41,6 +41,7 @@ function makeGuard() {
     secret: SECRET,
     loadActor: async (userId) => Object.values(ACTORS).find((actor) => actor.user.id === userId) || null,
     loadTarget: async (id) => TARGETS[id] || null,
+    loadBranch: async (id) => ({ id, company_id: 'company-1' }),
     // Fixture ids are readable names, not UUIDs; UUID validation has its own test.
     validateId: false,
   });
@@ -214,7 +215,7 @@ test('non-superusers cannot grant permissions they do not hold', async () => {
 
 test('dashboard users without employees.read can still read the employee directory', async () => {
   ACTORS.directoryOnly = {
-    user: { id: 'u-directory', role: 'manager', branch_id: BRANCH_A },
+    user: { id: 'u-directory', role: 'manager', branch_id: BRANCH_A, company_id: 'company-1', company_status: 'active', company_id: 'company-1' },
     permissions: ['dashboard.access', 'expenses.read'],
   };
   const req = fakeReq({ actor: 'directoryOnly' });
@@ -227,7 +228,7 @@ test('dashboard users without employees.read can still read the employee directo
 });
 
 test('targets with roles outside the employee hierarchy cannot be managed', async () => {
-  TARGETS['target-merchant'] = { id: 'target-merchant', role: 'merchant', branch_id: BRANCH_A };
+  TARGETS['target-merchant'] = { id: 'target-merchant', role: 'merchant', branch_id: BRANCH_A, company_id: 'company-1' };
   const result = await runChain('update', fakeReq({
     actor: 'manager',
     params: { id: 'target-merchant' },
@@ -237,7 +238,7 @@ test('targets with roles outside the employee hierarchy cannot be managed', asyn
 });
 
 test('admins cannot archive or delete their own account', async () => {
-  TARGETS['u-admin'] = { id: 'u-admin', role: 'admin', branch_id: BRANCH_A };
+  TARGETS['u-admin'] = { id: 'u-admin', role: 'admin', branch_id: BRANCH_A, company_id: 'company-1' };
   const result = await runChain('delete', fakeReq({ actor: 'admin', params: { id: 'u-admin' } }));
   assert.equal(result.status, 403);
 });

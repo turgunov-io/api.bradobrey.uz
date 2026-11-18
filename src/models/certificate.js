@@ -1,6 +1,11 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { db } = require("../config/postgres");
 const { withCertificateStatus } = require('../services/certificateLifecycle');
+const { sameId } = require('../utils/companyScope');
+
+// Company scope (MULTI_TENANCY Phase 1 B2a): certificates are unique per
+// (company_id, code); every query below is limited to the caller's company,
+// loaded from users.company_id (never from the request).
 
 const GLOBAL_CERTIFICATE_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
 const CERTIFICATE_PERMISSION = 'certificates.manage';
@@ -20,7 +25,7 @@ const requireCertificateAccess = async (req, res) => {
 
   let payload;
   try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
+    payload = verifyAny(token);
   } catch (_) {
     res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
     return null;
@@ -35,7 +40,7 @@ const requireCertificateAccess = async (req, res) => {
 
   const { data: user, error: userError } = await db
     .from('users')
-    .select('id, role')
+    .select('id, role, company_id')
     .eq('id', userId)
     .maybeSingle();
   if (userError) return sendCertificateServerError(res, userError);
@@ -43,8 +48,15 @@ const requireCertificateAccess = async (req, res) => {
     res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
     return null;
   }
+  const companyId = user.company_id ? String(user.company_id) : null;
+  const tenantCompanyId = req.tenant?.companyId;
+  if (!companyId || (tenantCompanyId && !sameId(tenantCompanyId, companyId))) {
+    res.status(403).json({ error: 'Company context is required', code: 'COMPANY_REQUIRED' });
+    return null;
+  }
 
-  if (GLOBAL_CERTIFICATE_ROLES.has(role)) return { userId, role };
+  // "Global" roles manage every certificate of their company.
+  if (GLOBAL_CERTIFICATE_ROLES.has(role)) return { userId, role, companyId };
 
   const permissionResult = await db
     .from('user_permissions')
@@ -60,8 +72,16 @@ const requireCertificateAccess = async (req, res) => {
     return null;
   }
 
-  return { userId, role };
+  return { userId, role, companyId };
 };
+
+const barbershopInCompany = async (barbershopId, companyId) => {
+  if (!barbershopId) return true;
+  const { data, error } = await db.from('marketplace_barbershops').select('id, company_id').eq('id', barbershopId).maybeSingle();
+  if (error) throw error;
+  return sameId(data?.company_id, companyId);
+};
+const BARBERSHOP_FORBIDDEN = { error: 'Barbershop belongs to another company', code: 'BARBERSHOP_COMPANY_MISMATCH' };
 
 const isMissingColumnError = (error, column) => {
   const message = String(error?.message || error?.details || "").toLowerCase();
@@ -154,7 +174,8 @@ const missingCertificatesResponse = (res) => res.json({
 
 class Certificate {
   async getById(req, res) {
-    if (!await requireCertificateAccess(req, res)) return;
+    const access = await requireCertificateAccess(req, res);
+    if (!access) return;
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Certificate id is required" });
 
@@ -162,6 +183,7 @@ class Certificate {
       .from("certificates")
       .select(select)
       .eq("id", id)
+      .eq("company_id", access.companyId)
       .maybeSingle());
 
     if (isMissingRelationError(error, "certificates")) {
@@ -177,10 +199,12 @@ class Certificate {
   }
 
   async active(req, res) {
-    if (!await requireCertificateAccess(req, res)) return;
+    const access = await requireCertificateAccess(req, res);
+    if (!access) return;
     let { data, error } = await selectCertificates((select) => db
       .from("certificates")
       .select(select)
+      .eq("company_id", access.companyId)
       .order("code", { ascending: true }));
 
     if (isMissingRelationError(error, "certificates")) {
@@ -214,7 +238,8 @@ class Certificate {
   }
 
   async create(req, res) {
-    if (!await requireCertificateAccess(req, res)) return;
+    const access = await requireCertificateAccess(req, res);
+    if (!access) return;
     const { code, service_ids, expires_at, metadata, marketplace_barbershop_id } = req.body || {};
 
     const normalizedCode = typeof code === 'string' ? code.trim().toUpperCase() : '';
@@ -237,9 +262,18 @@ class Certificate {
       expiresAtIso = d.toISOString();
     }
 
+    try {
+      if (!(await barbershopInCompany(marketplace_barbershop_id || null, access.companyId))) {
+        return res.status(403).json(BARBERSHOP_FORBIDDEN);
+      }
+    } catch (checkError) {
+      return sendCertificateServerError(res, checkError);
+    }
+
     const { data: existing, error: existsError } = await db
       .from("certificates")
       .select("id")
+      .eq("company_id", access.companyId)
       .eq("code", normalizedCode)
       .maybeSingle();
 
@@ -257,6 +291,7 @@ class Certificate {
     }
 
     const payload = {
+      company_id: access.companyId,
       code: normalizedCode,
       service_ids,
       expires_at: expiresAtIso,
@@ -295,6 +330,7 @@ class Certificate {
     }
 
     if (insertError) {
+      if (String(insertError.code) === '23505') return res.status(409).json({ error: "Certificate code already exists" });
       return sendCertificateServerError(res, insertError);
     }
 
@@ -302,7 +338,8 @@ class Certificate {
   }
 
   async update(req, res) {
-    if (!await requireCertificateAccess(req, res)) return;
+    const access = await requireCertificateAccess(req, res);
+    if (!access) return;
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Certificate id is required" });
 
@@ -344,11 +381,19 @@ class Certificate {
     if (metadata !== undefined) update.metadata = metadata || null;
     if (marketplace_barbershop_id !== undefined) update.marketplace_barbershop_id = marketplace_barbershop_id || null;
     if (!Object.keys(update).length) return res.status(400).json({ error: "No fields to update" });
+    try {
+      if (!(await barbershopInCompany(update.marketplace_barbershop_id || null, access.companyId))) {
+        return res.status(403).json(BARBERSHOP_FORBIDDEN);
+      }
+    } catch (checkError) {
+      return sendCertificateServerError(res, checkError);
+    }
 
     const { data, error } = await selectCertificates((select) => db
       .from("certificates")
       .update(update)
       .eq("id", id)
+      .eq("company_id", access.companyId)
       .select(select)
       .maybeSingle());
 
@@ -358,6 +403,7 @@ class Certificate {
         hint: "Apply db/postgres/certificates.sql",
       });
     }
+    if (error && String(error.code) === '23505') return res.status(409).json({ error: "Certificate code already exists" });
     if (error) return sendCertificateServerError(res, error);
     if (!data) return res.status(404).json({ error: "Certificate not found" });
 
@@ -365,13 +411,15 @@ class Certificate {
   }
 
   async remove(req, res) {
-    if (!await requireCertificateAccess(req, res)) return;
+    const access = await requireCertificateAccess(req, res);
+    if (!access) return;
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Certificate id is required" });
 
     const { data: linkedEntry, error: linkError } = await db
       .from('queue_entries')
       .select('id')
+      .eq('company_id', access.companyId)
       .eq('certificate_id', id)
       .limit(1)
       .maybeSingle();
@@ -386,6 +434,7 @@ class Certificate {
       .from("certificates")
       .delete()
       .eq("id", id)
+      .eq("company_id", access.companyId)
       .select("id")
       .maybeSingle();
 

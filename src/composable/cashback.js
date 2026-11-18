@@ -1,5 +1,6 @@
 const { db, pool } = require('../config/postgres');
 const { resolveLoyaltyCashbackPercent } = require('../utils/loyalty');
+const { isServiceUsable } = require('../utils/serviceScope');
 
 const DEFAULT_CASHBACK_CONFIG = {
   default_percent: 1,
@@ -21,13 +22,32 @@ const parsePercent = (raw) => {
   return Math.min(n, 100);
 };
 
+// Company of a queue entry (MULTI_TENANCY B2a): cashback/loyalty settings,
+// prices and policies are read for this company only. The entry row, else the
+// client (clients are per company, D3).
+async function getCompanyIdForEntry(entry) {
+  if (entry?.company_id) return String(entry.company_id);
+  if (entry?.id) {
+    const result = await pool.query('select company_id from queue_entries where id = $1', [entry.id]);
+    if (result.rows[0]?.company_id) return String(result.rows[0].company_id);
+  }
+  if (entry?.client_id) {
+    const result = await pool.query('select company_id from clients where id = $1', [entry.client_id]);
+    if (result.rows[0]?.company_id) return String(result.rows[0].company_id);
+  }
+  return null;
+}
+
 async function getCashbackPercentForEntry(entry) {
   const fallback = parsePercent(process.env.CASHBACK_PERCENT);
   if (!entry?.client_id) return fallback;
 
   try {
+    const companyId = await getCompanyIdForEntry(entry);
+    if (!companyId) return fallback;
     const configuredCashback = await pool.query(
-      `select value from platform_settings where key = 'cashback'`,
+      `select value from platform_settings where company_id = $1 and key = 'cashback'`,
+      [companyId],
     );
     if (configuredCashback.rows[0]?.value && typeof configuredCashback.rows[0].value === 'object') {
       const config = { ...DEFAULT_CASHBACK_CONFIG, ...configuredCashback.rows[0].value };
@@ -54,7 +74,8 @@ async function getCashbackPercentForEntry(entry) {
     if (!marketplaceClient.rows[0]) return fallback;
 
     const settings = await pool.query(
-      `select value from platform_settings where key = 'loyalty_levels'`,
+      `select value from platform_settings where company_id = $1 and key = 'loyalty_levels'`,
+      [companyId],
     );
     return resolveLoyaltyCashbackPercent(
       marketplaceClient.rows[0].status_points,
@@ -91,18 +112,22 @@ const getServiceIdsFromEntry = (entry) => {
   return [];
 };
 
-async function getServicesTotal(serviceIds) {
+// Prices of the entry's company and branch (or shared) only: a foreign
+// service id adds nothing (MULTI_TENANCY D1, utils/serviceScope).
+async function getServicesTotal(serviceIds, companyId, branchId = null) {
   const ids = Array.isArray(serviceIds) ? serviceIds.filter(Boolean) : [];
-  if (!ids.length) return 0;
+  if (!ids.length || !companyId) return 0;
 
   const { data, error } = await db
     .from('services')
-    .select('id,base_price')
+    .select('id,base_price,branch_id,company_id')
+    .eq('company_id', companyId)
     .in('id', ids);
 
   if (error) throw error;
 
-  const total = (data || []).reduce((sum, row) => {
+  const usable = (data || []).filter((row) => isServiceUsable(row, { companyId, branchId }));
+  const total = usable.reduce((sum, row) => {
     const price = Number(row?.base_price);
     return sum + (Number.isFinite(price) ? price : 0);
   }, 0);
@@ -521,7 +546,8 @@ async function computeCashbackTotalsForQueueEntry(entry) {
   }
 
   const serviceIds = getServiceIdsFromEntry(entry);
-  const total = getOverrideTotal(entry) ?? await getServicesTotal(serviceIds);
+  const override = getOverrideTotal(entry);
+  const total = override ?? await getServicesTotal(serviceIds, await getCompanyIdForEntry(entry), entry.branch_id);
   const promo = await getPromoForOrder(entry.id);
   const discountedTotal = applyPromoDiscount(total, promo);
 
@@ -550,7 +576,10 @@ async function spendCashbackForQueueEntry(entry, amountInput) {
   }
 
   let maxRedeemShare = 1;
-  const { data: policy } = await db.from('platform_settings').select('value').eq('key', 'cashback_policy').maybeSingle();
+  const policyCompanyId = await getCompanyIdForEntry(entry);
+  const { data: policy } = policyCompanyId
+    ? await db.from('platform_settings').select('value').eq('company_id', policyCompanyId).eq('key', 'cashback_policy').maybeSingle()
+    : { data: null };
   const configuredShare = Number(policy?.value?.max_redeem_share ?? policy?.value?.maxRedeemShare);
   if (Number.isFinite(configuredShare)) maxRedeemShare = Math.min(1, Math.max(0, configuredShare));
   const maxSpend = roundMoney(discountedTotal * maxRedeemShare);
@@ -738,6 +767,7 @@ async function awardCashbackForCompletedQueueEntry(entry) {
 }
 
 module.exports = {
+  getCompanyIdForEntry,
   roundMoney,
   parsePercent,
   applyPromoDiscount,

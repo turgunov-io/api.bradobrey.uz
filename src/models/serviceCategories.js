@@ -1,4 +1,21 @@
 const { db } = require('../config/postgres');
+const { companyIdOfBranch, requireTenantCompany, sameId } = require('../utils/companyScope');
+
+// Company scope (MULTI_TENANCY Phase 1 B2a): categories and the services they
+// rename are always filtered by company_id = req.tenant company. A category's
+// branch / marketplace barbershop must belong to the same company.
+const COMPANY_FORBIDDEN = { code: 'BRANCH_COMPANY_MISMATCH', error: 'Branch belongs to another company' };
+
+const payloadInCompany = async (payload, companyId) => {
+  if (payload.branch_id && !sameId(await companyIdOfBranch(payload.branch_id), companyId)) return false;
+  if (payload.marketplace_barbershop_id) {
+    const { data, error } = await db.from('marketplace_barbershops')
+      .select('id, company_id').eq('id', payload.marketplace_barbershop_id).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!sameId(data?.company_id, companyId)) return false;
+  }
+  return true;
+};
 
 const CATEGORY_SELECT = 'id, branch_id, marketplace_barbershop_id, name, sort_order, is_active, created_at, updated_at';
 
@@ -98,13 +115,14 @@ const normalizePayload = (body = {}, { partial = false } = {}) => {
   return { payload };
 };
 
-const loadServicesForCategories = async (categories) => {
+const loadServicesForCategories = async (categories, companyId) => {
   const names = Array.from(new Set((categories || []).map((item) => item?.name).filter(Boolean)));
   if (!names.length) return new Map();
 
   const { data, error } = await db
     .from('services')
     .select('id, name, duration_minutes, base_price, category, image, is_active')
+    .eq('company_id', companyId)
     .in('category', names);
 
   if (error) return new Map();
@@ -120,12 +138,13 @@ const loadServicesForCategories = async (categories) => {
   return map;
 };
 
-const syncServiceCategoryName = async ({ branchId, marketplaceBarbershopId, oldName, newName }) => {
+const syncServiceCategoryName = async ({ companyId, branchId, marketplaceBarbershopId, oldName, newName }) => {
   if (!oldName || oldName === newName) return null;
 
   let query = db
     .from('services')
     .update({ category: newName || null, updated_at: new Date().toISOString() })
+    .eq('company_id', companyId)
     .eq('category', oldName);
 
   if (branchId) query = query.eq('branch_id', branchId);
@@ -142,10 +161,13 @@ class ServiceCategories {
     const activeFilter = parseBoolean(req.query?.active, undefined);
     const branchId = normalizeId(req.query?.branch_id || req.query?.object_id);
     const marketplaceBarbershopId = normalizeId(req.query?.marketplace_barbershop_id);
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
     let query = db
       .from('service_categories')
-      .select(CATEGORY_SELECT, { count: 'exact' });
+      .select(CATEGORY_SELECT, { count: 'exact' })
+      .eq('company_id', companyId);
 
     if (branchId) query = query.eq('branch_id', branchId);
     if (marketplaceBarbershopId) query = query.eq('marketplace_barbershop_id', marketplaceBarbershopId);
@@ -164,7 +186,7 @@ class ServiceCategories {
       return res.status(500).json({ error: error.message });
     }
 
-    const servicesByCategory = await loadServicesForCategories(data || []);
+    const servicesByCategory = await loadServicesForCategories(data || [], companyId);
     const items = (data || []).map((row) => categoryItem(row, servicesByCategory.get(row.name) || []));
 
     return res.json({ items, total: count ?? items.length });
@@ -173,10 +195,17 @@ class ServiceCategories {
   async create(req, res) {
     const { payload, error: payloadError } = normalizePayload(req.body || {});
     if (payloadError) return res.status(400).json({ error: payloadError });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
+    try {
+      if (!(await payloadInCompany(payload, companyId))) return res.status(403).json(COMPANY_FORBIDDEN);
+    } catch (checkError) {
+      return res.status(500).json({ error: checkError.message });
+    }
 
     const { data, error } = await db
       .from('service_categories')
-      .insert(payload)
+      .insert({ ...payload, company_id: companyId })
       .select(CATEGORY_SELECT)
       .maybeSingle();
 
@@ -196,11 +225,19 @@ class ServiceCategories {
     const { payload, error: payloadError } = normalizePayload(req.body || {}, { partial: true });
     if (payloadError) return res.status(400).json({ error: payloadError });
     if (!Object.keys(payload).length) return res.status(400).json({ error: 'No fields to update' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
+    try {
+      if (!(await payloadInCompany(payload, companyId))) return res.status(403).json(COMPANY_FORBIDDEN);
+    } catch (checkError) {
+      return res.status(500).json({ error: checkError.message });
+    }
 
     const { data: existing, error: existingError } = await db
       .from('service_categories')
       .select(CATEGORY_SELECT)
       .eq('id', id)
+      .eq('company_id', companyId)
       .maybeSingle();
 
     if (existingError) {
@@ -213,6 +250,7 @@ class ServiceCategories {
       .from('service_categories')
       .update({ ...payload, updated_at: new Date().toISOString() })
       .eq('id', id)
+      .eq('company_id', companyId)
       .select(CATEGORY_SELECT)
       .maybeSingle();
 
@@ -221,6 +259,7 @@ class ServiceCategories {
 
     try {
       await syncServiceCategoryName({
+        companyId,
         branchId: data.branch_id,
         marketplaceBarbershopId: data.marketplace_barbershop_id,
         newName: data.name,
@@ -236,11 +275,14 @@ class ServiceCategories {
   async remove(req, res) {
     const id = normalizeId(req.params?.id);
     if (!id) return res.status(400).json({ error: 'Category id is required' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
     const { data: existing, error: existingError } = await db
       .from('service_categories')
       .select(CATEGORY_SELECT)
       .eq('id', id)
+      .eq('company_id', companyId)
       .maybeSingle();
 
     if (existingError) {
@@ -251,6 +293,7 @@ class ServiceCategories {
 
     try {
       await syncServiceCategoryName({
+        companyId,
         branchId: existing.branch_id,
         marketplaceBarbershopId: existing.marketplace_barbershop_id,
         newName: null,
@@ -264,6 +307,7 @@ class ServiceCategories {
       .from('service_categories')
       .delete()
       .eq('id', id)
+      .eq('company_id', companyId)
       .select('id')
       .maybeSingle();
 

@@ -1,6 +1,7 @@
 const { db, pool } = require("../config/postgres");
 const { toAbsolutePublicUrl } = require("../config/uploads");
 const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
+const { companyIdOfBranch, requireTenantCompany, sameId } = require("../utils/companyScope");
 
 const DEFAULT_CATEGORY_LABEL = "Uncategorized";
 
@@ -77,17 +78,26 @@ const groupServicesByCategory = (services = []) => {
     }));
 };
 
-// Branch scope (MULTI_TENANCY 0.4). Network roles see and manage everything.
-// Other roles read services of their allowed branches plus shared (NULL
-// branch) services, and may only modify services of their allowed branches.
-// scope: null = unrestricted, otherwise an array of allowed branch ids.
+// Company scope (MULTI_TENANCY Phase 1 B2a): every read and write is limited
+// to services.company_id = the tenant company (req.tenant, never the body).
+// A service with branch_id NULL is shared by all branches of ITS company.
+// Branch scope (MULTI_TENANCY 0.4) on top: network roles (company-wide scope)
+// manage every service of the company; other roles read services of their
+// allowed branches plus the company's shared services, and may only modify
+// services of their allowed branches.
+// scope: null = unrestricted (internal), otherwise an array of branch ids.
 const inScope = (scope, branchId) => (
     branchId !== null && branchId !== undefined && scope.includes(String(branchId))
 );
 const canReadService = (scope, branchId) => (
     scope === null || branchId === null || branchId === undefined || inScope(scope, branchId)
 );
-const canModifyService = (scope, branchId) => scope === null || inScope(scope, branchId);
+// Network roles hold a company-wide scope (utils/adminAuth isCompanyWideScope)
+// and edit company-level services (branch_id NULL) — of their company only,
+// because every query below is filtered by company_id.
+const canModifyService = (scope, branchId) => scope === null
+    || inScope(scope, branchId)
+    || (scope?.companyWide === true && (branchId === null || branchId === undefined));
 
 // routers/services.js resolves req.branchScope (from the DB-loaded actor)
 // after the staffAccess guard. A request that went through the guard but has
@@ -98,9 +108,25 @@ const resolveScope = async (req) => {
 };
 
 const SCOPE_FORBIDDEN = { error: "Service is outside your branch scope" };
+const COMPANY_FORBIDDEN = { code: "BRANCH_COMPANY_MISMATCH", error: "Branch belongs to another company" };
 
-const loadServiceBranch = async (id) => {
-    const { data, error } = await db.from("services").select("id, branch_id").eq("id", id).maybeSingle();
+// A target branch must belong to the tenant company (the DB guard trigger
+// rejects it too; this gives a clean 403 instead of a 500).
+const branchInCompany = async (branchId, companyId) => {
+    if (branchId === null || branchId === undefined) return true;
+    return sameId(await companyIdOfBranch(branchId), companyId);
+};
+
+// marketplace_barbershops.company_id is 1:1 with the company (D1).
+const barbershopInCompany = async (barbershopId, companyId) => {
+    if (!barbershopId) return true;
+    const { data, error } = await db.from("marketplace_barbershops").select("id, company_id").eq("id", barbershopId).maybeSingle();
+    if (error) throw new Error(error.message);
+    return sameId(data?.company_id, companyId);
+};
+
+const loadServiceBranch = async (id, companyId) => {
+    const { data, error } = await db.from("services").select("id, branch_id").eq("id", id).eq("company_id", companyId).maybeSingle();
     if (error) throw new Error(error.message);
     return data;
 };
@@ -121,12 +147,14 @@ class Services {
             category: normalizeCategory(item.category),
             sort_order: item.sort_order,
         }));
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
         try {
             const scope = await resolveScope(req);
             if (scope !== null) {
                 const existing = await pool.query(
-                    'SELECT id, branch_id FROM services WHERE id = ANY($1::uuid[])',
-                    [normalizedItems.map(item => item.id)]
+                    'SELECT id, branch_id FROM services WHERE id = ANY($1::uuid[]) AND company_id = $2',
+                    [normalizedItems.map(item => item.id), companyId]
                 );
                 if (existing.rows.some(row => !canModifyService(scope, row.branch_id))) {
                     return res.status(403).json(SCOPE_FORBIDDEN);
@@ -142,8 +170,8 @@ class Services {
             const result = await client.query(`
                 UPDATE services AS s SET sort_order = i.sort_order, category = i.category, updated_at = now()
                 FROM jsonb_to_recordset($1::jsonb) AS i(id uuid, category text, sort_order integer)
-                WHERE s.id = i.id RETURNING s.id
-            `, [JSON.stringify(normalizedItems)]);
+                WHERE s.id = i.id AND s.company_id = $2 RETURNING s.id
+            `, [JSON.stringify(normalizedItems), companyId]);
             if (result.rowCount !== normalizedItems.length) {
                 await client.query('ROLLBACK');
                 return res.status(409).json({ error: 'Service list changed. Refresh and try again.' });
@@ -160,8 +188,10 @@ class Services {
 
     async list(req, res) {
         const { active, grouped, include_inactive } = req.query || {};
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
 
-        let query = db.from("services").select("*");
+        let query = db.from("services").select("*").eq("company_id", companyId);
 
         if (active !== undefined) {
             const activeFlag = String(active).toLowerCase() === "true" || active === "1";
@@ -198,11 +228,14 @@ class Services {
     async getById(req, res) {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: "Service id is required" });
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
 
         const { data, error } = await db
             .from("services")
             .select("*")
             .eq("id", id)
+            .eq("company_id", companyId)
             .maybeSingle();
 
         if (error) return res.status(500).json({ error: error.message });
@@ -249,19 +282,26 @@ class Services {
             return res.status(400).json({ error: "base_price must be a non-negative number" });
         }
 
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
+
         let targetBranchId = normalizeText(branch_id);
-        // Only network roles (scope null) may link a marketplace merchant.
+        // Only network roles (company-wide scope) may link a marketplace
+        // merchant, and only their own company's barbershop.
         let marketplaceBarbershopId = null;
         try {
             const scope = await resolveScope(req);
-            if (scope === null) marketplaceBarbershopId = normalizeText(marketplace_barbershop_id);
-            if (scope !== null) {
-                // Branch-level staff cannot create network-wide (NULL branch)
+            const companyWide = scope === null || scope?.companyWide === true;
+            if (companyWide) marketplaceBarbershopId = normalizeText(marketplace_barbershop_id);
+            if (!companyWide) {
+                // Branch-level staff cannot create company-wide (NULL branch)
                 // services; default to their home branch when none is given.
                 targetBranchId = targetBranchId || normalizeText(req.staffAccess?.actor?.branch_id);
                 if (!targetBranchId) return res.status(422).json({ error: "branch_id is required" });
-                if (!canModifyService(scope, targetBranchId)) return res.status(403).json(SCOPE_FORBIDDEN);
             }
+            if (scope !== null && !canModifyService(scope, targetBranchId)) return res.status(403).json(SCOPE_FORBIDDEN);
+            if (!(await branchInCompany(targetBranchId, companyId))) return res.status(403).json(COMPANY_FORBIDDEN);
+            if (!(await barbershopInCompany(marketplaceBarbershopId, companyId))) return res.status(403).json(COMPANY_FORBIDDEN);
         } catch (scopeError) {
             return res.status(500).json({ error: scopeError.message });
         }
@@ -280,6 +320,7 @@ class Services {
             .insert({
                 base_price: priceValue,
                 branch_id: targetBranchId,
+                company_id: companyId,
                 category: normalizedCategory,
                 duration_minutes: durationValue,
                 image: uploadedImageUrl !== undefined
@@ -343,17 +384,26 @@ class Services {
 
         // marketplace_barbershop_id links a service to a marketplace merchant;
         // only network roles (scope null) may set it, others are ignored.
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
         let canSetMarketplace = false;
         try {
             const scope = await resolveScope(req);
-            canSetMarketplace = scope === null;
+            canSetMarketplace = scope === null || scope?.companyWide === true;
+            const existing = await loadServiceBranch(id, companyId);
+            if (!existing) return res.status(404).json({ error: "Service not found" });
             if (scope !== null) {
-                const existing = await loadServiceBranch(id);
-                if (!existing) return res.status(404).json({ error: "Service not found" });
                 if (!canModifyService(scope, existing.branch_id)) return res.status(403).json(SCOPE_FORBIDDEN);
                 if (branch_id !== undefined && !canModifyService(scope, normalizeText(branch_id))) {
                     return res.status(403).json(SCOPE_FORBIDDEN);
                 }
+            }
+            if (branch_id !== undefined && !(await branchInCompany(normalizeText(branch_id), companyId))) {
+                return res.status(403).json(COMPANY_FORBIDDEN);
+            }
+            if (canSetMarketplace && marketplace_barbershop_id !== undefined
+                && !(await barbershopInCompany(normalizeText(marketplace_barbershop_id), companyId))) {
+                return res.status(403).json(COMPANY_FORBIDDEN);
             }
         } catch (scopeError) {
             return res.status(500).json({ error: scopeError.message });
@@ -394,6 +444,7 @@ class Services {
             .from("services")
             .update(update)
             .eq("id", id)
+            .eq("company_id", companyId)
             .select("*")
             .maybeSingle();
 
@@ -408,14 +459,14 @@ class Services {
             req.params?.id ?? req.body?.id ?? req.body?.service_id ?? req.query?.id ?? req.query?.service_id
         );
         if (!id) return res.status(400).json({ error: "Service id is required" });
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
 
         try {
             const scope = await resolveScope(req);
-            if (scope !== null) {
-                const existing = await loadServiceBranch(id);
-                if (!existing) return res.status(404).json({ error: "Service not found" });
-                if (!canModifyService(scope, existing.branch_id)) return res.status(403).json(SCOPE_FORBIDDEN);
-            }
+            const existing = await loadServiceBranch(id, companyId);
+            if (!existing) return res.status(404).json({ error: "Service not found" });
+            if (scope !== null && !canModifyService(scope, existing.branch_id)) return res.status(403).json(SCOPE_FORBIDDEN);
         } catch (scopeError) {
             return res.status(500).json({ error: scopeError.message });
         }
@@ -424,6 +475,7 @@ class Services {
             .from("services")
             .delete()
             .eq("id", id)
+            .eq("company_id", companyId)
             .select("id")
             .maybeSingle();
 
@@ -433,6 +485,7 @@ class Services {
                     .from("services")
                     .update({ is_active: false, updated_at: new Date().toISOString() })
                     .eq("id", id)
+                    .eq("company_id", companyId)
                     .select("id")
                     .maybeSingle();
 

@@ -80,9 +80,9 @@ const snapshotResponse = ({ branchId = null, period, row = null }) => ({
 });
 
 // Branch scope (MULTI_TENANCY 0.5). routers/finance.js sets req.branchScope
-// from the DB-loaded caller: null for network roles, otherwise the allowed
-// branch ids. Network roles keep the network-wide overview (a requested
-// branch is ignored, as before); other roles get only their branches, and a
+// from the DB-loaded caller: the allowed branch ids (network roles: every
+// branch of their company, Phase 1). Network roles keep the company-wide
+// overview (a requested branch is ignored, as before); other roles get only their branches, and a
 // requested branch outside their scope is rejected.
 const scopeOf = (req) => {
   if (req?.branchScope !== undefined) return req.branchScope;
@@ -92,6 +92,9 @@ const scopeOf = (req) => {
 const resolveBranchFilter = (req, requestedBranchId) => {
   const scope = scopeOf(req);
   if (scope === null) return { branchFilter: null };
+  // Network roles: company-wide overview (a requested branch is ignored, as
+  // before), now limited to the branches of their company.
+  if (scope.companyWide === true) return { branchFilter: scope.map(String) };
   const requested = normalizeId(requestedBranchId);
   if (!requested) return { branchFilter: scope.map(String) };
   if (!scope.includes(requested)) {
@@ -100,12 +103,25 @@ const resolveBranchFilter = (req, requestedBranchId) => {
   return { branchFilter: [requested] };
 };
 
+// MULTI_TENANCY B2: every finance query is bound to the caller's company
+// (req.tenant from staffAccess, i.e. users.company_id). Fails closed.
+const requireCompany = (req, res) => {
+  const companyId = normalizeId(req?.tenant?.companyId);
+  if (!companyId) res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+  return companyId;
+};
+
 class Finance {
   async overview(req, res) {
+    const companyId = requireCompany(req, res);
+    if (!companyId) return;
     const { period, from, to } = periodRange(req.query?.period);
     const filter = resolveBranchFilter(req, req.query?.branch_id || req.query?.object_id);
     if (filter.error) return res.status(filter.status).json({ error: filter.error });
     const { branchFilter } = filter;
+    // Company-wide scopes also see company-level purchases/expenses
+    // (warehouse_purchases.branch_id NULL); the company filter bounds them.
+    const purchaseBranchFilter = scopeOf(req)?.companyWide === true ? null : branchFilter;
 
     try {
       const turnoverResult = await db.query(
@@ -126,16 +142,19 @@ class Finance {
              end
            ) service_ref(service_id) on true
            left join services s on s.id = service_ref.service_id
+                                  and s.company_id = q.company_id
+                                  and (s.branch_id is null or s.branch_id = q.branch_id)
            where q.status = 'completed'
              and q.finished_at >= $1
              and q.finished_at < $2
              and ($3::text[] is null or q.branch_id::text = any($3::text[]))
+             and q.company_id = $4
            group by q.id
          )
          select coalesce(sum(ce.amount), 0)::numeric as total,
                 count(ce.id)::int as orders_count
          from completed_entries ce`,
-        [from, to, branchFilter]
+        [from, to, branchFilter, companyId]
       );
 
       const branchesResult = await db.query(
@@ -156,10 +175,13 @@ class Finance {
              end
            ) service_ref(service_id) on true
            left join services s on s.id = service_ref.service_id
+                                  and s.company_id = q.company_id
+                                  and (s.branch_id is null or s.branch_id = q.branch_id)
            where q.status = 'completed'
              and q.finished_at >= $1
              and q.finished_at < $2
              and ($3::text[] is null or q.branch_id::text = any($3::text[]))
+             and q.company_id = $4
            group by q.id
          )
          select b.id as branch_id,
@@ -169,17 +191,19 @@ class Finance {
          from branches b
          left join completed_entries ce on ce.branch_id = b.id
          where ($3::text[] is null or b.id::text = any($3::text[]))
+           and b.company_id = $4
          group by b.id, b.name
          order by b.name asc`,
-        [from, to, branchFilter]
+        [from, to, branchFilter, companyId]
       );
 
       const salaryResult = await db.query(
         `select branch_id, payload
          from finance_snapshots
          where period = $1
-           and ($2::text[] is null or branch_id::text = any($2::text[]))`,
-        [period, branchFilter]
+           and ($2::text[] is null or branch_id::text = any($2::text[]))
+           and company_id = $3`,
+        [period, branchFilter, companyId]
       );
 
       const salaryByBranch = new Map();
@@ -236,8 +260,9 @@ class Finance {
              and purchased_at >= $1
              and purchased_at < $2
              and ($3::text[] is null or branch_id::text = any($3::text[]))
+             and company_id = $4
            group by branch_id`,
-          [from, to, branchFilter]
+          [from, to, purchaseBranchFilter, companyId]
         );
 
         for (const row of purchasesResult.rows || []) {
@@ -292,6 +317,8 @@ class Finance {
   }
 
   async get(req, res) {
+    const companyId = requireCompany(req, res);
+    if (!companyId) return;
     const branchId = normalizeId(req.query?.branch_id || req.query?.object_id);
     const period = normalizePeriod(req.query?.period) || currentPeriod();
 
@@ -305,6 +332,7 @@ class Finance {
       .from('finance_snapshots')
       .select('branch_id, period, payload, updated_at')
       .eq('branch_id', branchId)
+      .eq('company_id', companyId)
       .eq('period', period)
       .maybeSingle();
 
@@ -325,11 +353,20 @@ class Finance {
 
     if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
     if (!period) return res.status(400).json({ error: 'period must be YYYY-MM' });
+    const companyId = requireCompany(req, res);
+    if (!companyId) return;
+    try {
+      const branch = await db.query('select 1 from branches where id = $1 and company_id = $2 limit 1', [branchId, companyId]);
+      if (!branch.rows?.[0]) return res.status(403).json({ error: 'Branch is outside your access scope' });
+    } catch (error) {
+      return res.status(500).json({ error: 'Failed to verify branch' });
+    }
 
     const { data, error } = await db
       .from('finance_snapshots')
       .upsert({
         branch_id: branchId,
+        company_id: companyId,
         payload,
         period,
         updated_at: new Date().toISOString(),

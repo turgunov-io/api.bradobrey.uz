@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../../utils/authToken');
 const { pool } = require('../../config/postgres');
 const catalogService = require('../../modules/marketplace/catalog/service');
 const { PAYMENT_METHODS } = require('../../modules/marketplace/catalog/constants');
@@ -10,7 +10,7 @@ async function getClientId(req, res) {
     return null;
   }
   try {
-    const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET);
+    const payload = verifyAny(header.slice(7));
     if (payload?.role !== 'marketplace' || !(payload.sub || payload.id)) {
       res.status(403).json({ error: 'Marketplace user token is required' });
       return null;
@@ -75,14 +75,7 @@ async function create(req, res) {
   try {
     await dbClient.query('BEGIN');
     const clientResult = await dbClient.query(
-      `select mc.id, mc.phone, mc.email, mc.is_active,
-              (select legacy.id
-                 from clients legacy
-                where regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
-                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
-                  and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
-                order by (legacy.phone = mc.phone) desc, legacy.id
-                limit 1) as legacy_client_id
+      `select mc.id, mc.phone, mc.email, mc.is_active
          from marketplace_clients mc
         where mc.id = $1 for update`,
       [marketplaceClientId]
@@ -123,10 +116,14 @@ async function create(req, res) {
       }
     }
 
-    const branchResult = await dbClient.query('select id, timezone, work_hours, marketplace_barbershop_id, is_active from branches where id = $1', [branchId]);
+    const branchResult = await dbClient.query('select id, company_id, timezone, work_hours, marketplace_barbershop_id, is_active from branches where id = $1', [branchId]);
     if (!branchResult.rows[0] || branchResult.rows[0].is_active === false) { await dbClient.query('ROLLBACK'); return res.status(404).json({ error: 'Branch not found' }); }
+    // MULTI_TENANCY: everything below (settings, services, prices, the legacy
+    // client, the queue entries) belongs to the company of the booked branch.
+    const companyId = branchResult.rows[0].company_id;
+    if (!companyId) { await dbClient.query('ROLLBACK'); return res.status(409).json({ code: 'COMPANY_REQUIRED', error: 'Branch has no company' }); }
 
-    const limitsResult = await dbClient.query(`select value from platform_settings where key = 'booking_limits'`);
+    const limitsResult = await dbClient.query(`select tenant_setting('booking_limits', $1::uuid) as value`, [companyId]);
     const limits = limitsResult.rows[0]?.value || {};
     const dailyLimit = Number(limits.max_daily_bookings || 5);
     const dailyCount = await dbClient.query(
@@ -152,11 +149,11 @@ async function create(req, res) {
 
     if (branchResult.rows[0].marketplace_barbershop_id) {
       await dbClient.query(
-        `insert into client_barbershop_origins (marketplace_client_id, barbershop_id)
-         values ($1, $2)
+        `insert into client_barbershop_origins (marketplace_client_id, barbershop_id, company_id)
+         values ($1, $2, $3)
          on conflict (marketplace_client_id, barbershop_id) do update set
            last_booking_at = now(), booking_count = client_barbershop_origins.booking_count + 1, updated_at = now()`,
-        [marketplaceClientId, branchResult.rows[0].marketplace_barbershop_id]
+        [marketplaceClientId, branchResult.rows[0].marketplace_barbershop_id, companyId]
       );
     }
 
@@ -167,8 +164,10 @@ async function create(req, res) {
     if (barbersResult.rows.length !== new Set(normalizedPersons.map((person) => person.barberId)).size) { await dbClient.query('ROLLBACK'); return res.status(400).json({ error: 'One or more barbers are not available for this branch' }); }
 
     const servicesResult = await dbClient.query(
-      `select id, duration_minutes, base_price from services where id = any($1::uuid[]) and is_active = true and (branch_id is null or branch_id = $2)`,
-      [allServiceIds, branchId]
+      `select id, duration_minutes, base_price from services
+        where id = any($1::uuid[]) and is_active = true
+          and company_id = $3 and (branch_id is null or branch_id = $2)`,
+      [allServiceIds, branchId, companyId]
     );
     if (servicesResult.rows.length !== allServiceIds.length) { await dbClient.query('ROLLBACK'); return res.status(400).json({ error: 'SERVICE_NOT_AVAILABLE_TODAY' }); }
     const serviceById = new Map(servicesResult.rows.map((service) => [String(service.id), service]));
@@ -204,11 +203,23 @@ async function create(req, res) {
        values ($1, 'BOOKING_CREATED', $2::jsonb)`,
       [marketplaceClientId, JSON.stringify({ booking_id: booking.id })]
     );
-    const legacyClientResult = marketplaceClient.legacy_client_id
-      ? { rows: [{ id: marketplaceClient.legacy_client_id }] }
+    // D3: one phone in two companies = two clients. Find this company's
+    // client by phone digits, else create it in this company.
+    const existingLegacy = await dbClient.query(
+      `select id from clients
+        where company_id = $1
+          and regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+        order by (phone = $2) desc, id
+        limit 1`,
+      [companyId, String(marketplaceClient.phone)]
+    );
+    const legacyClientResult = existingLegacy.rows[0]
+      ? existingLegacy
       : await dbClient.query(
-        `insert into clients (name, phone) values ($1, $2) returning id`,
-        [normalizedPersons[0].displayName, marketplaceClient.phone]
+        `insert into clients (company_id, name, phone) values ($1, $2, $3)
+         on conflict (company_id, phone) do update set phone = excluded.phone
+         returning id`,
+        [companyId, normalizedPersons[0].displayName, marketplaceClient.phone]
       );
     const legacyClientId = legacyClientResult.rows[0].id;
     const createdPersons = [];
@@ -216,9 +227,9 @@ async function create(req, res) {
       const person = normalizedPersons[index];
       const serviceIds = person.serviceIds;
       const entryResult = await dbClient.query(
-        `insert into queue_entries (client_id, branch_id, barber_id, service_id, service_ids, source, status, payment_method)
-         values ($1, $2, $3, $4, $5::uuid[], 'site', 'waiting', $6) returning id, status, created_at`,
-        [legacyClientId, branchId, person.barberId, serviceIds[0], serviceIds, paymentMethod]
+        `insert into queue_entries (client_id, branch_id, barber_id, service_id, service_ids, source, status, payment_method, company_id)
+         values ($1, $2, $3, $4, $5::uuid[], 'site', 'waiting', $6, $7) returning id, status, created_at`,
+        [legacyClientId, branchId, person.barberId, serviceIds[0], serviceIds, paymentMethod, companyId]
       );
       const entry = entryResult.rows[0];
       const personResult = await dbClient.query(
@@ -228,8 +239,9 @@ async function create(req, res) {
       );
       await dbClient.query(
         `insert into marketplace_booking_person_services (person_id, service_id, price, duration_minutes)
-         select $1, id, coalesce(base_price, 0), duration_minutes from services where id = any($2::uuid[])`,
-        [personResult.rows[0].id, serviceIds]
+         select $1, id, coalesce(base_price, 0), duration_minutes from services
+          where id = any($2::uuid[]) and company_id = $3 and (branch_id is null or branch_id = $4)`,
+        [personResult.rows[0].id, serviceIds, companyId, branchId]
       );
       createdPersons.push({ ...personResult.rows[0], service_ids: serviceIds, queue_entry: entry });
     }

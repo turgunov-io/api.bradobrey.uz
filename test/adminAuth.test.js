@@ -25,7 +25,8 @@ function responseRecorder() {
 }
 
 const bearer = (payload) => ({ headers: { authorization: `Bearer ${jwt.sign(payload, SECRET)}` } });
-const stateWithRole = (role) => async (id) => ({ user: { id, role, branch_id: 'branch-1' }, barber: null });
+// Multi-tenancy: DB users carry their company (MULTI_TENANCY Phase 1).
+const stateWithRole = (role) => async (id) => ({ user: { id, role, branch_id: 'branch-1', company_id: 'company-1', company_status: 'active' }, barber: null });
 
 test('admin loyalty endpoints require an authenticated administrator role', async () => {
   const authorize = createAdminAuth({ secret: SECRET, loadState: stateWithRole('admin_network') });

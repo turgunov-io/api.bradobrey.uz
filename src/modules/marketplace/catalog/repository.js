@@ -1,5 +1,6 @@
 const { db } = require('../../../config/postgres');
 const { OPERATIONAL_BARBER_ROLES, ACTIVE_QUEUE_STATUSES } = require('./constants');
+const { loadBranchServices, loadServicesForEntries } = require('../../../utils/serviceScope');
 const {
   isMissingColumnError,
   isMissingRelationError,
@@ -70,10 +71,16 @@ const getBranch = async (branchId) => {
   return { data: applyEffectiveMarketplaceSchedule(data), error };
 };
 
-const getActiveServices = async () => {
+// Company scope (MULTI_TENANCY B2a): the catalog shows the services of the
+// branch's company only — that branch's own services plus the company's shared
+// (branch_id NULL) ones. Prices never mix between companies.
+const getActiveServices = async ({ companyId, branchId } = {}) => {
+  if (!companyId || !branchId) return [];
   const { data, error } = await db
     .from('services')
     .select('id, name, duration_minutes, base_price, category, is_active')
+    .eq('company_id', companyId)
+    .or(`branch_id.eq.${branchId},branch_id.is.null`)
     .eq('is_active', true)
     .order('category', { ascending: true, nullsFirst: false })
     .order('base_price', { ascending: true })
@@ -132,19 +139,13 @@ const getBranchOperationalBarbers = async (branchId) => {
     )).filter(Boolean)
   ));
 
-  let serviceDurationById = new Map();
-  if (serviceIds.length) {
-    const { data: services, error: servicesError } = await db
-      .from('services')
-      .select('id, duration_minutes')
-      .in('id', serviceIds);
-
-    if (servicesError) throw servicesError;
-    serviceDurationById = new Map((services || []).map((service) => [
-      String(service?.id),
-      Number(service?.duration_minutes || 0),
-    ]));
-  }
+  // All active entries are in branchId: only that branch's company services
+  // (own branch or shared) count (MULTI_TENANCY D1).
+  const branchServices = await loadBranchServices(serviceIds, { branchId, columns: 'duration_minutes' });
+  const serviceDurationById = new Map(branchServices.map((service) => [
+    String(service?.id),
+    Number(service?.duration_minutes || 0),
+  ]));
 
   // Use the last 20 completed services per barber to adjust ETA. A value of
   // 1.0 means the nominal service duration is accurate; the clamp prevents a
@@ -153,23 +154,16 @@ const getBranchOperationalBarbers = async (branchId) => {
   try {
     const { data: completed } = await db
       .from('queue_entries')
-      .select('id, barber_id, service_id, service_ids, started_at, finished_at')
+      .select('id, barber_id, branch_id, company_id, service_id, service_ids, started_at, finished_at')
       .in('barber_id', barberIds)
       .eq('status', 'completed')
       .order('finished_at', { ascending: false })
       .limit(Math.max(20, barberIds.length * 20));
-    const historyServiceIds = Array.from(new Set((completed || []).flatMap((entry) => serviceIdsForEntry(entry))));
-    if (historyServiceIds.length) {
-      const { data: historyServices } = await db
-        .from('services')
-        .select('id, duration_minutes')
-        .in('id', historyServiceIds);
-      for (const service of historyServices || []) serviceDurationById.set(String(service.id), Number(service.duration_minutes || 0));
-    }
+    const historyServicesFor = await loadServicesForEntries(completed || [], 'duration_minutes');
     for (const barberId of barberIds) {
       const rows = (completed || []).filter((entry) => String(entry.barber_id) === String(barberId)).slice(0, 20);
       const ratios = rows.map((entry) => {
-        const nominal = serviceIdsForEntry(entry).reduce((sum, id) => sum + (serviceDurationById.get(String(id)) || 0), 0);
+        const nominal = historyServicesFor(entry).reduce((sum, service) => sum + Number(service.duration_minutes || 0), 0);
         const actual = entry.started_at && entry.finished_at
           ? (new Date(entry.finished_at).getTime() - new Date(entry.started_at).getTime()) / 60000
           : 0;
@@ -314,39 +308,46 @@ const listAllBranchesMarketplaceLinks = async () => db
   .from('branches')
   .select('id, marketplace_barbershop_id, is_active');
 
-const listActiveCertificates = async () => db
+const listActiveCertificates = async (companyId) => db
   .from('certificates')
   .select('id, code, service_ids, expires_at, is_used, metadata, marketplace_barbershop_id')
+  .eq('company_id', companyId)
   .eq('is_used', false)
   .order('code', { ascending: true });
 
-const listActiveCertificatesFallback = async () => db
+const listActiveCertificatesFallback = async (companyId) => db
   .from('certificates')
   .select('id, code, service_ids, expires_at, is_used, metadata')
+  .eq('company_id', companyId)
   .eq('is_used', false)
   .order('code', { ascending: true });
 
-const fetchPromoCode = async (code) => db
+// Codes are unique per (company_id, code).
+const fetchPromoCode = async (code, companyId) => db
   .from('promo_codes')
   .select('*')
+  .eq('company_id', companyId)
   .eq('code', code)
   .maybeSingle();
 
-const fetchCertificateByCode = async (code) => db
+const fetchCertificateByCode = async (code, companyId) => db
   .from('certificates')
   .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
+  .eq('company_id', companyId)
   .eq('code', code)
   .maybeSingle();
 
-const fetchCertificateByCodeFallback = async (code) => db
+const fetchCertificateByCodeFallback = async (code, companyId) => db
   .from('certificates')
   .select('id, code, expires_at, is_used, metadata, service_ids, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
+  .eq('company_id', companyId)
   .eq('code', code)
   .maybeSingle();
 
-const fetchServicesByIds = async (serviceIds) => db
+const fetchServicesByIds = async (serviceIds, companyId) => db
   .from('services')
-  .select('id, name, duration_minutes, base_price, category, is_active')
+  .select('id, name, duration_minutes, base_price, category, is_active, branch_id')
+  .eq('company_id', companyId)
   .in('id', serviceIds);
 
 const fetchBarberById = async (barberId) => db

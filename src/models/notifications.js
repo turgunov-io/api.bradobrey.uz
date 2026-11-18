@@ -1,8 +1,9 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const webpush = require('web-push');
 const { db } = require('../config/postgres');
 const { classifyCompletedOrder } = require('../services/employeeQuality');
 const marketplacePush = require('../services/marketplacePush');
+const { loadBranchServices } = require('../utils/serviceScope');
 const EMPLOYEE_ROLES = ['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'super-barber', 'barber'];
 
 function configureWebPush() {
@@ -55,11 +56,46 @@ function authenticate(req, res) {
     const token = (req.headers.authorization || '').replace(/^Bearer /, '');
     if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
     try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET);
+        const payload = verifyAny(token);
         if (!EMPLOYEE_ROLES.includes(payload?.role)) { res.status(403).json({ error: 'Notifications are not available for this role' }); return null; }
         return payload;
     }
     catch (_error) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
+}
+
+// MULTI_TENANCY B2: fan-out recipients are staff of the SAME company as the
+// event's branch (network roles = that company's network, never the whole DB).
+const NETWORK_RECIPIENT_ROLES = ['admin_network', 'admin', 'super-manager'];
+const RECIPIENTS_FOR_BRANCH_SQL = `
+    select u.id, u.role, u.branch_id, b.company_id
+      from branches b
+      join users u on u.company_id = b.company_id
+     where b.id = $1
+       and u.role = any($2::text[])`;
+
+async function loadBranchRecipients(branchId) {
+    if (!branchId) return [];
+    const result = await db.query(RECIPIENTS_FOR_BRANCH_SQL, [branchId, EMPLOYEE_ROLES]);
+    return result.rows || [];
+}
+
+// Pure: which company users get an event of `branchId`.
+function selectRecipients(users, branchId, networkRoles) {
+    return (users || []).filter(user => networkRoles.includes(user.role) || String(user.branch_id) === String(branchId));
+}
+
+// Company of the caller, from the DB (never from the token); null if the
+// account is gone, has no company, or the company is suspended.
+async function loadActiveCompanyId(userId) {
+    const result = await db.query(
+        `select u.company_id
+           from users u
+           join companies c on c.id = u.company_id
+          where u.id = $1 and c.status = 'active'
+          limit 1`,
+        [userId],
+    );
+    return result.rows?.[0]?.company_id ? String(result.rows[0].company_id) : null;
 }
 
 function normalizePersistedQualityAssessment(assessment) {
@@ -86,8 +122,12 @@ async function createSuspiciousOrderNotifications(entry) {
         ? assessment.service_ids
         : [...(Array.isArray(entry.service_ids) ? entry.service_ids : []), ...(entry.service_id ? [entry.service_id] : [])]
     ).filter(Boolean)));
-    const { data: services, error: serviceError } = ids.length ? await db.from('services').select('id, name, duration_minutes').in('id', ids) : { data: [], error: null };
-    if (serviceError) throw new Error(serviceError.message);
+    // Only the order's company/branch services count (MULTI_TENANCY D1).
+    const services = await loadBranchServices(ids, {
+        branchId: entry.branch_id,
+        companyId: entry.company_id || null,
+        columns: 'name, duration_minutes',
+    });
     const expected = ids.reduce((sum, id) => sum + (Number((services || []).find(s => String(s.id) === String(id))?.duration_minutes) || 0), 0);
     const quality = assessment || {
         ...classifyCompletedOrder({
@@ -105,12 +145,11 @@ async function createSuspiciousOrderNotifications(entry) {
     if (entry.status !== 'completed' || !activeSuspicion) return;
     const actual = quality.actual_minutes;
     const assessedExpected = Number(quality.expected_duration_minutes ?? quality.expected_minutes ?? expected);
-    const [{ data: barber }, { data: branch }, { data: recipients, error: recipientError }] = await Promise.all([
+    const [{ data: barber }, { data: branch }, recipients] = await Promise.all([
         db.from('barbers').select('name').eq('id', entry.barber_id).maybeSingle(),
         db.from('branches').select('name').eq('id', entry.branch_id).maybeSingle(),
-        db.from('users').select('id, role, branch_id').in('role', EMPLOYEE_ROLES),
+        loadBranchRecipients(entry.branch_id),
     ]);
-    if (recipientError) throw new Error(recipientError.message);
     const barberName = barber?.name || 'Неизвестный барбер';
     const branchName = branch?.name || 'Неизвестный филиал';
     const clientName = entry.client?.name || 'Клиент';
@@ -120,8 +159,8 @@ async function createSuspiciousOrderNotifications(entry) {
         .join(', ') || 'Услуга не указана';
     const title = `${clientName} — информация по заказу`;
     const body = `Филиал: ${branchName} • Мастер: ${barberName} • Услуга: ${serviceNames} • Время: ${Math.round(actual)} мин. из ${assessedExpected} мин.`;
-    const rows = (recipients || []).filter(user => ['admin_network', 'admin', 'super-manager', 'super-barber'].includes(user.role) || String(user.branch_id) === String(entry.branch_id)).map(user => ({
-        recipient_user_id: user.id, type: 'suspicious_order', title, body, order_id: entry.id, branch_id: entry.branch_id,
+    const rows = selectRecipients(recipients, entry.branch_id, [...NETWORK_RECIPIENT_ROLES, 'super-barber']).map(user => ({
+        recipient_user_id: user.id, type: 'suspicious_order', title, body, order_id: entry.id, branch_id: entry.branch_id, company_id: user.company_id,
         data: {
             branch_name: branchName,
             barber_name: barberName,
@@ -138,11 +177,11 @@ async function createSuspiciousOrderNotifications(entry) {
         const inserted = [];
         for (const row of rows) {
             const result = await db.query(`
-                insert into notifications (recipient_user_id, type, title, body, order_id, branch_id, data)
-                values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                insert into notifications (recipient_user_id, type, title, body, order_id, branch_id, data, company_id)
+                values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
                 on conflict (recipient_user_id, type, order_id) do nothing
                 returning recipient_user_id, title, body, order_id, branch_id, data
-            `, [row.recipient_user_id, row.type, row.title, row.body, row.order_id, row.branch_id, JSON.stringify(row.data || {})]);
+            `, [row.recipient_user_id, row.type, row.title, row.body, row.order_id, row.branch_id, JSON.stringify(row.data || {}), row.company_id]);
             inserted.push(...(result.rows || []));
         }
         await Promise.allSettled(inserted.map(notification => sendPushToUser(notification.recipient_user_id, {
@@ -157,21 +196,20 @@ async function createSuspiciousOrderNotifications(entry) {
 }
 
 async function createLocationWarningNotifications({ barberId, branchId, event }) {
-    const [{ data: barber }, { data: branch }, { data: recipients, error }] = await Promise.all([
+    const [{ data: barber }, { data: branch }, recipients] = await Promise.all([
         db.from('barbers').select('name').eq('id', barberId).maybeSingle(),
         db.from('branches').select('name').eq('id', branchId).maybeSingle(),
-        db.from('users').select('id, role, branch_id').in('role', EMPLOYEE_ROLES),
+        loadBranchRecipients(branchId),
     ]);
-    if (error) throw new Error(error.message);
     const title = 'Барбер вошёл вне рабочего места';
     const body = `Барбер ${barber?.name || 'Неизвестный барбер'} выполнил вход вне радиуса филиала ${branch?.name || branchId}.`;
-    const rows = (recipients || []).filter(user => ['admin_network', 'admin', 'super-manager'].includes(user.role) || String(user.branch_id) === String(branchId));
+    const rows = selectRecipients(recipients, branchId, NETWORK_RECIPIENT_ROLES);
     for (const recipient of rows) {
         await db.query(`
-          insert into notifications (recipient_user_id, type, title, body, branch_id, data)
-          values ($1, 'barber_location_warning', $2, $3, $4, $5::jsonb)
+          insert into notifications (recipient_user_id, type, title, body, branch_id, data, company_id)
+          values ($1, 'barber_location_warning', $2, $3, $4, $5::jsonb, $6)
           on conflict do nothing
-        `, [recipient.id, title, body, branchId, JSON.stringify({ barber_id: barberId, event_id: event?.id || null, distance_meters: event?.distance_meters || null })]);
+        `, [recipient.id, title, body, branchId, JSON.stringify({ barber_id: barberId, event_id: event?.id || null, distance_meters: event?.distance_meters || null }), recipient.company_id]);
     }
 }
 
@@ -370,7 +408,12 @@ class Notifications {
         const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.date || '')) ? String(req.body.date) : new Date().toISOString().slice(0, 10);
         const from = `${date}T00:00:00.000Z`;
         const to = new Date(Date.parse(from) + 86400000).toISOString();
-        const { data: orders, error } = await db.from('queue_entries').select('id, status, created_at, started_at, finished_at, service_id, service_ids, branch_id, barber_id, client:clients ( name )').eq('status', 'completed').gte('finished_at', from).lt('finished_at', to);
+        // MULTI_TENANCY B2: only the caller's company orders are re-checked.
+        let companyId;
+        try { companyId = await loadActiveCompanyId(payload.sub || payload.id); }
+        catch (_error) { return res.status(500).json({ error: 'Failed to resolve company' }); }
+        if (!companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+        const { data: orders, error } = await db.from('queue_entries').select('id, status, created_at, started_at, finished_at, service_id, service_ids, branch_id, barber_id, client:clients ( name )').eq('company_id', companyId).eq('status', 'completed').gte('finished_at', from).lt('finished_at', to);
         if (error) return res.status(500).json({ error: error.message });
         let suspiciousCount = 0;
         for (const order of orders || []) {
@@ -401,5 +444,5 @@ module.exports = {
     createLocationWarningNotifications,
     sendQueueTransferPush,
     ensureNotificationsTable,
-    _private: { normalizePersistedQualityAssessment, transferOutcomeCopy },
+    _private: { normalizePersistedQualityAssessment, transferOutcomeCopy, selectRecipients, RECIPIENTS_FOR_BRANCH_SQL },
 };

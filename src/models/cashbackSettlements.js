@@ -2,10 +2,12 @@
 //
 // Authorization (MULTI_TENANCY 0.6, H2): the caller is loaded from the DB by
 // createAdminAuth (role + archived status from the DB, never the token).
-// Network roles are unrestricted; admin_branch / merchant are limited to
+// MULTI_TENANCY B2: every query is bound to the caller's company (network
+// roles = whole company, rows with branch_id NULL included).
+// Network roles are unrestricted within it; admin_branch / merchant are limited to
 // resolveAllowedBranchIds() — an out-of-scope branch is 403, no branch lists
 // only the allowed branches.
-const { createAdminAuth, isBranchAllowed, resolveAllowedBranchIds } = require('../utils/adminAuth');
+const { createAdminAuth, isBranchAllowed, isCompanyWideScope, resolveAllowedBranchIds } = require('../utils/adminAuth');
 const { NETWORK_ROLES } = require('../utils/employeeQualityAccess');
 
 const SETTLEMENT_ROLES = new Set([...NETWORK_ROLES, 'admin_network', 'admin_branch', 'admin', 'merchant']);
@@ -23,6 +25,8 @@ function normalizeId(value) {
   return text || null;
 }
 
+const callerCompanyId = (auth) => normalizeId(auth?.companyId || auth?.company_id || auth?.tenant?.companyId);
+
 const outOfScope = (res) => res.status(403).json({ error: 'Settlement is outside the administrator branch scope' });
 
 class CashbackSettlements {
@@ -37,9 +41,16 @@ class CashbackSettlements {
   async authorize(req, res) {
     const auth = await this.authorizeAdmin(req, res);
     if (!auth) return null;
+    const companyId = callerCompanyId(auth);
+    if (!companyId) {
+      res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+      return null;
+    }
     try {
       const branchScope = await this.resolveScope(auth);
-      return { ...auth, branchScope };
+      // A company-wide scope does not narrow by branch: the company filter
+      // already applies and keeps company-level rows (branch_id NULL).
+      return { ...auth, companyId, branchScope: isCompanyWideScope(branchScope) ? null : branchScope };
     } catch (error) {
       console.error('[cashback-settlements] scope resolution failed:', error?.code || error?.message);
       res.status(500).json({ error: 'Failed to authorize request' });
@@ -60,8 +71,8 @@ class CashbackSettlements {
     const requestedBranch = normalizeId(req.query?.branch_id);
     if (requestedBranch && !isBranchAllowed(auth.branchScope, requestedBranch)) return outOfScope(res);
 
-    const params = [];
-    const filters = [];
+    const params = [auth.companyId];
+    const filters = ['s.company_id = $1'];
     if (requestedBranch) {
       params.push(requestedBranch);
       filters.push(`s.branch_id = $${params.length}`);
@@ -73,7 +84,7 @@ class CashbackSettlements {
       params.push(status);
       filters.push(`s.status = $${params.length}`);
     }
-    const where = filters.length ? `where ${filters.join(' and ')}` : '';
+    const where = `where ${filters.join(' and ')}`;
     const limit = Math.min(Math.max(Number(req.query?.limit) || 100, 1), 500);
     params.push(limit);
 
@@ -112,9 +123,9 @@ class CashbackSettlements {
       const locked = await client.query(
         `select id, branch_id, status, metadata
            from cashback_settlements
-          where id = $1
+          where id = $1 and company_id = $2
           for update`,
-        [id],
+        [id, auth.companyId],
       );
       const row = locked.rows[0];
       if (!row) {

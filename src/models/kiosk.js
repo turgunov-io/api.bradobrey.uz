@@ -1,12 +1,14 @@
 const { db } = require("../config/postgres");
 const { toAbsolutePublicUrl } = require("../config/uploads");
-const jwt = require("jsonwebtoken");
+const { verifyAny } = require('../utils/authToken');
 const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { issueKioskSocketTicket } = require('../kioskSocketTicket');
 const { kioskRegistry } = require('../services/kioskRegistration');
 const { buildAuthenticatedBarberRoster } = require('../utils/kioskBarberPresence');
+const { legacyDefaultCompanyId, resolveRequestCompanyId, sameId, tenantCompanyId } = require('../utils/companyScope');
+const { loadBranchServices, loadServicesForEntries } = require('../utils/serviceScope');
 const {
     certificateLifecycleResponse,
     isCertificateLifecycleError,
@@ -36,6 +38,13 @@ let warnedUnscopedServices = false;
 // req.kiosk (legacy / KIOSK_AUTH_ENFORCE off) behaviour is unchanged.
 const isOutsideKioskBranch = (req, entry) => Boolean(req.kiosk)
     && String(entry?.branch_id || '').toLowerCase() !== String(req.kiosk.branchId).toLowerCase();
+
+// Queue lookups by id (security review H2): the company comes from the
+// authenticated context (kiosk token / staff); without one (legacy kiosk,
+// KIOSK_AUTH_ENFORCE off) only while exactly one company exists. null = the
+// caller must answer 401.
+const queueLookupCompanyId = async (req) => tenantCompanyId(req) || legacyDefaultCompanyId();
+const KIOSK_TOKEN_REQUIRED = Object.freeze({ error: 'Kiosk device token is required', code: 'KIOSK_TOKEN_REQUIRED' });
 
 const isMissingActivePresenceTable = (error) => {
     if (error?.code === '42P01') return true;
@@ -122,7 +131,7 @@ const getBearerToken = (req) => {
 const verifyJwt = (token) => {
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-    return jwt.verify(token, jwtSecret);
+    return verifyAny(token, { secret: jwtSecret });
 };
 
 const isMissingColumnError = (error, column) => {
@@ -137,14 +146,14 @@ const isMissingColumnError = (error, column) => {
 const fetchBranchForBooking = async (branchId) => {
     let { data, error } = await db
         .from('branches')
-        .select('id, timezone, marketplace_barbershop_id')
+        .select('id, company_id, timezone, marketplace_barbershop_id')
         .eq('id', branchId)
         .maybeSingle();
 
     if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
         ({ data, error } = await db
             .from('branches')
-            .select('id, timezone')
+            .select('id, company_id, timezone')
             .eq('id', branchId)
             .maybeSingle());
 
@@ -154,11 +163,13 @@ const fetchBranchForBooking = async (branchId) => {
     return { data, error };
 };
 
-const fetchCertificateForBooking = async (code) => {
+// Certificates are unique per (company_id, code) (MULTI_TENANCY D1/B2a).
+const fetchCertificateForBooking = async (code, companyId) => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     let { data, error } = await db
         .from('certificates')
         .select('id, code, expires_at, is_used, metadata, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
+        .eq('company_id', companyId)
         .eq('code', normalizedCode)
         .maybeSingle();
 
@@ -166,6 +177,7 @@ const fetchCertificateForBooking = async (code) => {
         ({ data, error } = await db
             .from('certificates')
             .select('id, code, expires_at, is_used, metadata, service_ids, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
+            .eq('company_id', companyId)
             .eq('code', normalizedCode)
             .maybeSingle());
 
@@ -223,30 +235,14 @@ const serviceItem = (req, service) => {
     };
 };
 
-const serviceIdsForEntry = (entry = {}) => {
-    if (Array.isArray(entry.service_ids) && entry.service_ids.length) return entry.service_ids.filter(Boolean);
-    return entry.service_id ? [entry.service_id] : [];
-};
-
+// Durations of the entry's own company/branch services only (MULTI_TENANCY D1).
 const estimatedMinutesForQueue = async (entries = []) => {
-    const serviceIds = Array.from(new Set(entries.flatMap(serviceIdsForEntry)));
-    if (!serviceIds.length) return new Map(entries.map((entry) => [entry.id, 0]));
-
-    const { data: services, error } = await db
-        .from('services')
-        .select('id, duration_minutes')
-        .in('id', serviceIds);
-
-    if (error) throw error;
-
-    const durationByServiceId = new Map(
-        (services || []).map((service) => [String(service.id), Number(service.duration_minutes || 0)])
-    );
+    const servicesFor = await loadServicesForEntries(entries, 'duration_minutes');
 
     return new Map(entries.map((entry) => [
         entry.id,
-        serviceIdsForEntry(entry).reduce((sum, serviceId) => (
-            sum + (durationByServiceId.get(String(serviceId)) || 0)
+        servicesFor(entry).reduce((sum, service) => (
+            sum + Number(service.duration_minutes || 0)
         ), 0),
     ]));
 };
@@ -256,10 +252,31 @@ class Kiosk {
         return res.json({ status: "ok" });
     }
 
-    async config(_req, res) {
+    // Company-scoped (MULTI_TENANCY B2a): a kiosk token (or staff token) gets
+    // the branches and ads of its own company only. Without any token the
+    // legacy list is kept ONLY while the platform has a single company
+    // (deployed kiosks / barber app read the branch list from here before
+    // registering); with 2+ companies the list is empty and clients must use
+    // POST /api/companies/resolve (company code -> its branches).
+    async config(req, res) {
+        let companyId;
+        try {
+            companyId = await resolveRequestCompanyId(req);
+        } catch (companyError) {
+            return res.status(500).json({ error: companyError.message || "Failed to resolve company" });
+        }
+        if (!companyId) {
+            return res.status(200).json({
+                entry: [],
+                ads: { regular: [], kids: [], updated_at: null },
+                code: 'COMPANY_CODE_REQUIRED',
+            });
+        }
+
         const { data, error } = await db
             .from("branches")
-            .select("id, name, address");
+            .select("id, name, address")
+            .eq("company_id", companyId);
 
         if (error || !data) {
             return res.status(500).json({ error: error?.message || "Failed to load branches" });
@@ -269,7 +286,7 @@ class Kiosk {
         const { data: adsData, error: adsError } = await db
             .from('kiosk_ad_settings')
             .select('regular_urls, kids_urls, updated_at')
-            .eq('id', 1)
+            .eq('company_id', companyId)
             .maybeSingle();
 
         if (!adsError && adsData) {
@@ -289,7 +306,7 @@ class Kiosk {
     // Rate-limited (routers/kiosk.js); needs KIOSK_ENROLLMENT_CODE or staff when
     // the code is configured, see services/kioskRegistration.js.
     async register(req, res) {
-        const { branch_id, device_name, enrollment_code } = req.body || {};
+        const { company_code, branch_id, device_name, enrollment_code } = req.body || {};
         // Verified claims only identify the caller; the registry loads the
         // employee (role, archived, allowed branches) from the DB.
         let actorClaims = null;
@@ -303,6 +320,7 @@ class Kiosk {
         }
         try {
             const result = await kioskRegistry.register({
+                companyCode: company_code,
                 branchId: branch_id,
                 deviceName: device_name,
                 enrollmentCode: enrollment_code,
@@ -481,12 +499,12 @@ class Kiosk {
 
         let servicesById = {};
         if (allServiceIds.length) {
-            const { data: services, error: servicesError } = await db
-                .from("services")
-                .select("id, duration_minutes, name")
-                .in("id", allServiceIds);
-
-            if (servicesError) {
+            // All entries are in branch_id: only this company's services of
+            // this branch (or shared) count (MULTI_TENANCY D1).
+            let services;
+            try {
+                services = await loadBranchServices(allServiceIds, { branchId: branch_id, columns: 'duration_minutes, name' });
+            } catch (servicesError) {
                 return res.status(500).json({ error: servicesError.message });
             }
 
@@ -605,7 +623,20 @@ class Kiosk {
             return res.status(400).json({ error: 'branch_id is invalid' });
         }
 
-        let query = db.from("services").select("*");
+        // Prices never mix between companies: company from the kiosk/staff
+        // token, else the requested branch, else legacy single-company mode.
+        // Unknown company (2+ companies, no token, no branch): empty list.
+        let companyId;
+        try {
+            companyId = await resolveRequestCompanyId(req, { branchId });
+        } catch (companyError) {
+            return res.status(500).json({ error: companyError.message });
+        }
+        if (!companyId) {
+            return res.status(200).json(grouped === "true" || grouped === "1" ? { categories: [] } : { services: [], categories: [] });
+        }
+
+        let query = db.from("services").select("*").eq("company_id", companyId);
         if (branchId) {
             query = query.or(`branch_id.eq.${branchId},branch_id.is.null`);
         } else if (!staffScope && !warnedUnscopedServices) {
@@ -785,6 +816,15 @@ class Kiosk {
         const { data: branch, error: branchError } = await fetchBranchForBooking(branch_id);
         if (branchError) return res.status(500).json({ error: branchError.message });
         if (!branch) return res.status(404).json({ error: 'Branch not found' });
+        // Everything below (services/prices, client, promo, certificate,
+        // cashback policy) is resolved inside the company of the branch being
+        // booked. An authenticated kiosk/staff caller must belong to it.
+        const companyId = branch.company_id;
+        if (!companyId) return res.status(500).json({ error: 'Branch has no company' });
+        const callerCompanyId = tenantCompanyId(req);
+        if (callerCompanyId && !sameId(callerCompanyId, companyId)) {
+            return res.status(403).json({ error: 'Branch belongs to another company', code: 'BRANCH_COMPANY_MISMATCH' });
+        }
 
         const normalizedIdempotencyKey = normalizeText(idempotency_key);
         if (normalizedIdempotencyKey && normalizedIdempotencyKey.length > 255) {
@@ -833,6 +873,7 @@ class Kiosk {
             .from('barbers')
             .select('id, branch_id, is_on_shift, is_archived')
             .eq('id', barber_id)
+            .eq('company_id', companyId)
             .maybeSingle();
         if (barberError) return res.status(500).json({ error: barberError.message });
         if (!barber) return res.status(404).json({ error: 'Barber not found' });
@@ -863,6 +904,7 @@ class Kiosk {
         const { data: services, error: servicesError } = await db
             .from('services')
             .select('id, is_active, base_price, branch_id')
+            .eq('company_id', companyId)
             .in('id', serviceIds);
         if (servicesError) return res.status(500).json({ error: servicesError.message });
         if (!services || services.length !== serviceIds.length) {
@@ -895,6 +937,7 @@ class Kiosk {
             const { data: promoData, error: promoError } = await db
                 .from('promo_codes')
                 .select('*')
+                .eq('company_id', companyId)
                 .eq('code', normalizedPromoCode)
                 .maybeSingle();
 
@@ -930,7 +973,7 @@ class Kiosk {
             if (!certificate_code) {
                 return res.status(400).json({ error: 'certificate_code is required when payment_method is certificate' });
             }
-            const { data: cert, error: certError } = await fetchCertificateForBooking(certificate_code);
+            const { data: cert, error: certError } = await fetchCertificateForBooking(certificate_code, companyId);
             if (certError && isMissingColumnError(certError, 'reserved_queue_entry_id')) {
                 return res.status(501).json({
                     error: 'Certificate lifecycle is not configured',
@@ -973,9 +1016,11 @@ class Kiosk {
 
         let clientId;
         let marketplaceBookingTablesAvailable = true;
+        // Same phone at two companies = two different clients (D3).
         const { data: existingClient, error: clientLookupError } = await db
             .from('clients')
             .select('id, name')
+            .eq('company_id', companyId)
             .eq('phone', normalizedPhone)
             .maybeSingle();
         if (clientLookupError) return res.status(500).json({ error: clientLookupError.message });
@@ -988,7 +1033,7 @@ class Kiosk {
         } else {
             const { data: newClient, error: clientCreateError } = await db
                 .from('clients')
-                .insert({ name: effectiveCustomerName, phone: normalizedPhone })
+                .insert({ company_id: companyId, name: effectiveCustomerName, phone: normalizedPhone })
                 .select('id')
                 .maybeSingle();
             if (clientCreateError) return res.status(500).json({ error: clientCreateError.message });
@@ -1046,6 +1091,7 @@ class Kiosk {
             const { data: cashbackPolicy } = await db
                 .from('platform_settings')
                 .select('value')
+                .eq('company_id', companyId)
                 .eq('key', 'cashback_policy')
                 .maybeSingle();
             const configuredShare = Number(
@@ -1112,6 +1158,7 @@ class Kiosk {
                 const { data: existingEntry, error: existingEntryError } = await db
                     .from('queue_entries')
                     .select(queueEntrySelect)
+                    .eq('company_id', companyId)
                     .eq('idempotency_key', normalizedIdempotencyKey)
                     .maybeSingle();
 
@@ -1168,12 +1215,14 @@ class Kiosk {
                         ? [existingEntry.service_id]
                         : [];
 
-                const { data: existingServices, error: existingServicesError } = await db
-                    .from('services')
-                    .select('id, base_price')
-                    .in('id', existingServiceIds);
-
-                if (existingServicesError) {
+                let existingServices;
+                try {
+                    existingServices = await loadBranchServices(existingServiceIds, {
+                        branchId: existingEntry.branch_id,
+                        companyId,
+                        columns: 'base_price',
+                    });
+                } catch (existingServicesError) {
                     return res.status(409).json({ error: existingServicesError.message });
                 }
 
@@ -1603,11 +1652,20 @@ class Kiosk {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: 'queue id is required' });
 
+        let companyId;
+        try {
+            companyId = await queueLookupCompanyId(req);
+        } catch (_companyError) {
+            return res.status(500).json({ error: 'Failed to resolve company' });
+        }
+        if (!companyId) return res.status(401).json({ ...KIOSK_TOKEN_REQUIRED });
+
         const queueSelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, started_at, finished_at';
         const { data: entry, error } = await db
             .from('queue_entries')
             .select(queueSelect)
             .eq('id', id)
+            .eq('company_id', companyId)
             .maybeSingle();
 
         if (error) return res.status(500).json({ error: error.message });
@@ -1626,6 +1684,7 @@ class Kiosk {
             .select(queueSelect)
             .eq('branch_id', entry.branch_id)
             .eq('barber_id', entry.barber_id)
+            .eq('company_id', companyId)
             .in('status', ACTIVE_QUEUE_STATUSES)
             .order('created_at', { ascending: true });
 
@@ -1662,10 +1721,22 @@ class Kiosk {
         const { id } = req.params || {};
         if (!id) return res.status(400).json({ error: 'queue id is required' });
 
+        let companyId;
+        try {
+            companyId = await queueLookupCompanyId(req);
+        } catch (_companyError) {
+            return res.status(500).json({ error: 'Failed to resolve company' });
+        }
+        if (!companyId) return res.status(401).json({ ...KIOSK_TOKEN_REQUIRED });
+
         const queueSelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, finished_at';
         const finishedAt = new Date().toISOString();
-        // An authenticated kiosk can only cancel entries of its own branch.
-        const scopeToKiosk = (query) => (req.kiosk ? query.eq('branch_id', req.kiosk.branchId) : query);
+        // Always the caller's company; an authenticated kiosk additionally
+        // only its own branch.
+        const scopeToKiosk = (query) => {
+            const scoped = query.eq('company_id', companyId);
+            return req.kiosk ? scoped.eq('branch_id', req.kiosk.branchId) : scoped;
+        };
         const { data: cancelled, error } = await scopeToKiosk(db
             .from('queue_entries')
             .update({ status: 'cancelled', finished_at: finishedAt })
@@ -1717,12 +1788,12 @@ class Kiosk {
         }
 
         // An authenticated kiosk (middleware/kioskAuth.js) or a marketplace/staff JWT.
+        let payload = null;
         if (!req.kiosk) {
             const token = getBearerToken(req);
             if (!token) {
                 return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
             }
-            let payload;
             try {
                 payload = verifyJwt(token);
             } catch (_error) {
@@ -1733,9 +1804,27 @@ class Kiosk {
             }
         }
 
+        // Codes are unique per company: kiosk/staff token company, else the
+        // branch the marketplace client books (?branch_id), else legacy
+        // single-company mode. Unknown company -> 400 BRANCH_REQUIRED.
+        const requestedBranchId = normalizeText(req.query?.branch_id);
+        if (requestedBranchId && !UUID_PATTERN.test(requestedBranchId)) {
+            return res.status(400).json({ error: 'branch_id is invalid' });
+        }
+        let companyId;
+        try {
+            companyId = await resolveRequestCompanyId(req, { branchId: requestedBranchId });
+        } catch (_companyError) {
+            return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', code: 'INTERNAL_SERVER_ERROR' });
+        }
+        if (!companyId) {
+            return res.status(400).json({ error: 'branch_id is required', code: 'BRANCH_REQUIRED' });
+        }
+
         const { data: cert, error } = await db
             .from('certificates')
             .select('id, code, expires_at, is_used, service_ids, marketplace_barbershop_id, reserved_queue_entry_id, reserved_at, used_queue_entry_id, used_at')
+            .eq('company_id', companyId)
             .eq('code', String(id).trim().toUpperCase())
             .maybeSingle();
 

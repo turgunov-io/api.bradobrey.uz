@@ -225,7 +225,8 @@ test('statistics authentication denies anonymous/empty permissions and trusts DB
 
     let permissionRows = [];
     pool.query = async (sql) => {
-      if (/from users/i.test(sql)) return { rows: [{ id: userId, role: 'manager', branch_id: branchA }] };
+      if (/from users/i.test(sql)) return { rows: [{ id: userId, role: 'manager', branch_id: branchA, company_id: 'company-1', company_status: 'active' }] };
+      if (/from branches where company_id/i.test(sql)) return { rows: [{ id: branchA }, { id: branchB }] };
       if (/from user_permissions/i.test(sql)) return { rows: permissionRows };
       throw new Error(`Unexpected query: ${sql}`);
     };
@@ -333,11 +334,12 @@ test('suspicious notification renders persisted actual_duration_minutes instead 
       },
       error: null,
     }],
-    services: [{ data: [{ id: 'service-1', name: 'Haircut', duration_minutes: 999 }], error: null }],
+    services: [{ data: [{ id: 'service-1', name: 'Haircut', duration_minutes: 999, company_id: 'company-1', branch_id: null }], error: null }],
     barbers: [{ data: { name: 'Barber' }, error: null }],
     branches: [{ data: { name: 'Branch' }, error: null }],
-    users: [{ data: [{ id: 'manager-1', role: 'manager', branch_id: 'branch-1' }], error: null }],
   };
+  // Recipients come from one company-bound SQL query (MULTI_TENANCY B2).
+  const recipients = [{ id: 'manager-1', role: 'manager', branch_id: 'branch-1', company_id: 'company-1' }];
   const inserts = [];
   const builder = (response) => ({
     select() { return this; },
@@ -348,6 +350,7 @@ test('suspicious notification renders persisted actual_duration_minutes instead 
   });
   db.from = (table) => builder(responses[table].shift());
   db.query = async (sql, params) => {
+    if (/join users u on u\.company_id = b\.company_id/.test(sql)) return { rows: recipients };
     inserts.push({ sql, params });
     return { rows: [] };
   };
@@ -357,6 +360,7 @@ test('suspicious notification renders persisted actual_duration_minutes instead 
       id: 'order-1',
       status: 'completed',
       branch_id: 'branch-1',
+      company_id: 'company-1',
       barber_id: 'barber-1',
       service_ids: ['service-1'],
       started_at: '2026-10-04T10:00:00Z',
@@ -414,7 +418,7 @@ test('migration contract uses exact v1 reasons, atomic snapshots, and approximat
   assert.doesNotMatch(sql, /coalesce\(q\.finished_at,\s*terminal_event\.occurred_at\)/i);
   assert.match(sql, /payments_queue_entry_id_idx/i);
   const model = fs.readFileSync(path.join(__dirname, '..', 'src', 'models', 'employeeQuality.js'), 'utf8');
-  assert.match(model, /const params = \[access\.range\.startInclusive, access\.range\.endExclusive, branchId, employeeId\];/);
+  assert.match(model, /const params = \[access\.range\.startInclusive, access\.range\.endExclusive, branchId, employeeId, requireAccessCompanyId\(access\)\];/);
   assert.match(model, /a\.branch_id = \$4::uuid/);
   assert.match(model, /e\.branch_id = \$5::uuid/);
   assert.match(model, /employee_id: access\.scope\.employeeId \|\| null/);

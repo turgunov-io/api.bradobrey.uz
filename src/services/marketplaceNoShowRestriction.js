@@ -1,4 +1,5 @@
 const { pool } = require('../config/postgres');
+const { readTenantSetting } = require('../utils/tenantSettings');
 
 const DEFAULTS = {
   enabled: true,
@@ -13,12 +14,8 @@ async function registerConfirmedNoShow(queueEntryId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const settingResult = await client.query(
-      "select value from platform_settings where key = 'no_show_restrictions'",
-    );
-    const settings = { ...DEFAULTS, ...(settingResult.rows[0]?.value || {}) };
     const entryResult = await client.query(
-      `select q.id, q.client_id, q.status, mc.id as marketplace_client_id
+      `select q.id, q.client_id, q.status, q.company_id, mc.id as marketplace_client_id
          from queue_entries q
          left join marketplace_booking_persons bp on bp.queue_entry_id = q.id
          left join marketplace_bookings mb on mb.id = bp.booking_id
@@ -32,6 +29,9 @@ async function registerConfirmedNoShow(queueEntryId) {
       await client.query('ROLLBACK');
       return null;
     }
+    // Rules of the company whose order was missed (MULTI_TENANCY B2); no
+    // company -> built-in defaults, never another company's row.
+    const settings = { ...DEFAULTS, ...((await readTenantSetting(client, 'no_show_restrictions', entry.company_id)) || {}) };
 
     let marketplaceClientId = entry.marketplace_client_id;
     if (!marketplaceClientId && entry.client_id) {
@@ -49,10 +49,10 @@ async function registerConfirmedNoShow(queueEntryId) {
     }
 
     const inserted = await client.query(
-      `insert into marketplace_no_show_violations (queue_entry_id, marketplace_client_id, reason)
-       values ($1, $2, 'NO_SHOW') on conflict (queue_entry_id) do nothing
+      `insert into marketplace_no_show_violations (queue_entry_id, marketplace_client_id, reason, company_id)
+       values ($1, $2, 'NO_SHOW', $3) on conflict (queue_entry_id) do nothing
        returning id`,
-      [queueEntryId, marketplaceClientId],
+      [queueEntryId, marketplaceClientId, entry.company_id],
     );
     if (!inserted.rows[0]) {
       const current = await client.query(
@@ -69,8 +69,9 @@ async function registerConfirmedNoShow(queueEntryId) {
     );
     const violationCountResult = await client.query(
       `select count(*)::int as count from marketplace_no_show_violations
-        where marketplace_client_id = $1 and created_at >= now() - ($2::int * interval '1 day')`,
-      [marketplaceClientId, Number(settings.lookback_days)],
+        where marketplace_client_id = $1 and created_at >= now() - ($2::int * interval '1 day')
+          and company_id is not distinct from $3::uuid`,
+      [marketplaceClientId, Number(settings.lookback_days), entry.company_id],
     );
     const violationCount = Number(violationCountResult.rows[0]?.count || 0);
     let blockedUntil = clientResult.rows[0]?.blocked_until || null;

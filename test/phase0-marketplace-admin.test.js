@@ -14,6 +14,7 @@ const marketplaceClients = require('../src/models/marketplace/clients');
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
 const CLIENT_ID = '22222222-2222-4222-8222-222222222222';
+const COMPANY_ID = 'cccccccc-0000-4000-8000-00000000000c';
 
 function chain(response, calls, table) {
   const query = {
@@ -38,7 +39,10 @@ function installMocks({ dbRole, archived = false }) {
   db.from = (table) => {
     calls.push({ table, method: 'from' });
     if (table === 'users') {
-      return chain({ data: dbRole ? { id: USER_ID, login: 'u', role: dbRole, branch_id: null } : null, error: null }, calls, table);
+      return chain({ data: dbRole ? { id: USER_ID, login: 'u', role: dbRole, branch_id: null, company_id: COMPANY_ID } : null, error: null }, calls, table);
+    }
+    if (table === 'companies') {
+      return chain({ data: { id: COMPANY_ID, status: 'active' }, error: null }, calls, table);
     }
     if (table === 'barbers') {
       return chain({ data: archived ? { id: USER_ID, is_archived: true } : null, error: null }, calls, table);

@@ -10,6 +10,7 @@ const {
   normalizeText,
 } = require('./helpers');
 const repo = require('./repository');
+const { companyIdOfBranch } = require('../../../utils/companyScope');
 const {
   addDaysToDateString,
   getZonedDateString,
@@ -58,11 +59,24 @@ const isScopedToDifferentBarbershop = (benefit, branch) => (
   benefit.marketplace_barbershop_id !== branch?.marketplace_barbershop_id
 );
 
-const validatePromo = async ({ code, total, branch }) => {
+// Company of the branch being booked (MULTI_TENANCY B2a). Marketplace
+// clients carry no tenant: services, prices, promo codes and certificates are
+// always resolved inside the company that owns the branch.
+const branchCompanyIdOrThrow = async (branch) => {
+  const companyId = branch?.id ? await companyIdOfBranch(branch.id) : null;
+  if (!companyId) {
+    const err = new Error('Branch not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  return companyId;
+};
+
+const validatePromo = async ({ code, total, branch, companyId }) => {
   const normalizedCode = normalizeCode(code);
   if (!normalizedCode) return { promo: null, discountedTotal: roundMoney(total) };
 
-  const { data: promo, error } = await repo.fetchPromoCode(normalizedCode);
+  const { data: promo, error } = await repo.fetchPromoCode(normalizedCode, companyId);
   if (error) throw error;
 
   if (!promo) {
@@ -103,7 +117,7 @@ const validatePromo = async ({ code, total, branch }) => {
   };
 };
 
-const validateCertificate = async ({ code, serviceIds, branch }) => {
+const validateCertificate = async ({ code, serviceIds, branch, companyId }) => {
   const normalizedCode = normalizeCode(code);
   if (!normalizedCode) {
     const err = new Error('certificate_code is required when payment_method is certificate');
@@ -111,9 +125,9 @@ const validateCertificate = async ({ code, serviceIds, branch }) => {
     throw err;
   }
 
-  let { data: certificate, error } = await repo.fetchCertificateByCode(normalizedCode);
+  let { data: certificate, error } = await repo.fetchCertificateByCode(normalizedCode, companyId);
   if (isMissingColumnError(error, 'marketplace_barbershop_id')) {
-    ({ data: certificate, error } = await repo.fetchCertificateByCodeFallback(normalizedCode));
+    ({ data: certificate, error } = await repo.fetchCertificateByCodeFallback(normalizedCode, companyId));
     if (certificate) certificate.marketplace_barbershop_id = null;
   }
 
@@ -308,9 +322,10 @@ const getBranchOrThrow = async (branchId) => {
 
 const getBranchDetails = async (branchId) => {
   const branch = await getBranchOrThrow(branchId);
+  const companyId = await branchCompanyIdOrThrow(branch);
   const [barbers, services] = await Promise.all([
     repo.getBranchOperationalBarbers(branchId),
-    repo.getActiveServices(),
+    repo.getActiveServices({ companyId, branchId }),
   ]);
 
   return {
@@ -328,8 +343,9 @@ const listBranchBarbers = async (branchId) => {
 };
 
 const listBranchServices = async (branchId) => {
-  await getBranchOrThrow(branchId);
-  const services = await repo.getActiveServices();
+  const branch = await getBranchOrThrow(branchId);
+  const companyId = await branchCompanyIdOrThrow(branch);
+  const services = await repo.getActiveServices({ companyId, branchId });
   return {
     items: services,
     categories: groupServicesByCategory(services),
@@ -359,6 +375,7 @@ const quoteBooking = async (payload) => {
   }
 
   const branch = await getBranchOrThrow(branchId);
+  const companyId = await branchCompanyIdOrThrow(branch);
 
   const { data: barber, error: barberError } = await repo.fetchBarberById(barberId);
   if (barberError) throw barberError;
@@ -376,10 +393,16 @@ const quoteBooking = async (payload) => {
     throw err;
   }
 
-  const { data: services, error: servicesError } = await repo.fetchServicesByIds(serviceIds);
+  const { data: services, error: servicesError } = await repo.fetchServicesByIds(serviceIds, companyId);
   if (servicesError) throw servicesError;
   if (!services || services.length !== serviceIds.length) {
     const err = new Error('One or more service_ids are invalid');
+    err.statusCode = 400;
+    throw err;
+  }
+  // Only this branch's services or the company's shared ones.
+  if (services.some((service) => service.branch_id != null && String(service.branch_id).toLowerCase() !== String(branchId).toLowerCase())) {
+    const err = new Error('One or more services are not available in this branch');
     err.statusCode = 400;
     throw err;
   }
@@ -411,6 +434,7 @@ const quoteBooking = async (payload) => {
     code: wantsCertificate ? null : payload?.promo_code,
     total,
     branch,
+    companyId,
   });
 
   let certificate = null;
@@ -426,6 +450,7 @@ const quoteBooking = async (payload) => {
       code: payload?.certificate_code,
       serviceIds,
       branch,
+      companyId,
     });
 
     payableTotal = 0;
@@ -544,6 +569,7 @@ const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durati
 
 const listAvailability = async ({ branchId, barberId, serviceIds, date }) => {
   const branch = await getBranchOrThrow(branchId);
+  const companyId = await branchCompanyIdOrThrow(branch);
   const timezone = branch.timezone || DEFAULT_TIMEZONE;
 
   const now = new Date();
@@ -566,7 +592,7 @@ const listAvailability = async ({ branchId, barberId, serviceIds, date }) => {
 
   const durationMinutes = cleanedServiceIds.length
     ? await (async () => {
-      const { data: services, error } = await repo.fetchServicesByIds(cleanedServiceIds);
+      const { data: services, error } = await repo.fetchServicesByIds(cleanedServiceIds, companyId);
       if (error) throw error;
       const total = (services || []).reduce((sum, s) => sum + Number(s?.duration_minutes || 0), 0);
       return Math.max(1, Number.isFinite(total) ? total : 0);

@@ -73,38 +73,81 @@ const getNextLocalMidnightUtc = (date, timeZone) => {
     }, timeZone);
 };
 
-const normalizeTimeZone = (value) => {
-    const timeZone = String(value || '').trim() || DEFAULT_TIMEZONE;
-
+const isValidTimeZone = (value) => {
     try {
-        getFormatter(timeZone).format(new Date());
-        return timeZone;
+        getFormatter(value).format(new Date());
+        return true;
     } catch (_error) {
-        console.warn(`[queue-auto-close] Invalid timezone "${timeZone}", falling back to ${DEFAULT_TIMEZONE}`);
-        return DEFAULT_TIMEZONE;
+        return false;
     }
 };
 
-async function closePreviousDayOpenQueueEntries({ io = null, now = new Date(), timeZone } = {}) {
-    const normalizedTimeZone = normalizeTimeZone(timeZone || process.env.QUEUE_AUTO_CLOSE_TIMEZONE || process.env.TZ);
-    const cutoffIso = getLocalDayStartUtc(now, normalizedTimeZone).toISOString();
+const normalizeTimeZone = (value, fallback = DEFAULT_TIMEZONE) => {
+    const timeZone = String(value || '').trim() || fallback;
+    if (isValidTimeZone(timeZone)) return timeZone;
+    console.warn(`[queue-auto-close] Invalid timezone "${timeZone}", falling back to ${fallback}`);
+    return isValidTimeZone(fallback) ? fallback : DEFAULT_TIMEZONE;
+};
+
+// MULTI_TENANCY B2: every company (and every branch) closes the previous day
+// at ITS local midnight. Effective timezone: branch.timezone, else
+// companies.timezone, else the process fallback. Pure: groups the targets by
+// timezone so one UPDATE per timezone covers all companies/branches in it.
+//   branches:  [{ id, timezone, company_timezone }]
+//   companies: [{ id, timezone }]   (for queue entries without a branch)
+// -> Map<timezone, { branchIds: string[], companyIds: string[] }>
+function groupTargetsByTimezone({ branches = [], companies = [], fallbackTimeZone = DEFAULT_TIMEZONE } = {}) {
+    const groups = new Map();
+    const group = (timeZone) => {
+        if (!groups.has(timeZone)) groups.set(timeZone, { branchIds: [], companyIds: [] });
+        return groups.get(timeZone);
+    };
+    for (const branch of branches) {
+        const timeZone = normalizeTimeZone(branch.timezone, normalizeTimeZone(branch.company_timezone, fallbackTimeZone));
+        group(timeZone).branchIds.push(String(branch.id));
+    }
+    for (const company of companies) {
+        group(normalizeTimeZone(company.timezone, fallbackTimeZone)).companyIds.push(String(company.id));
+    }
+    return groups;
+}
+
+const CLOSE_SQL = `
+    update queue_entries
+       set finished_at = $1, status = 'no_show'
+     where created_at < $2
+       and status = any($3::text[])
+       and (
+         branch_id = any($4::uuid[])
+         or (branch_id is null and company_id = any($5::uuid[]))
+       )
+    returning id, branch_id, barber_id, status, company_id`;
+
+async function loadCloseTargets() {
+    const [branches, companies] = await Promise.all([
+        db.query(`select b.id, b.timezone, c.timezone as company_timezone
+                   from branches b
+                   join companies c on c.id = b.company_id`),
+        db.query('select id, timezone from companies'),
+    ]);
+    return { branches: branches.rows || [], companies: companies.rows || [] };
+}
+
+async function closePreviousDayOpenQueueEntries({ io = null, now = new Date(), timeZone, loadTargets = loadCloseTargets } = {}) {
+    const fallbackTimeZone = normalizeTimeZone(timeZone || process.env.QUEUE_AUTO_CLOSE_TIMEZONE || process.env.TZ);
     const finishedAt = now.toISOString();
+    const targets = await loadTargets();
+    const groups = groupTargetsByTimezone({ ...targets, fallbackTimeZone });
 
-    const { data, error } = await db
-        .from('queue_entries')
-        .update({
-            finished_at: finishedAt,
-            status: 'no_show',
-        })
-        .lt('created_at', cutoffIso)
-        .in('status', OPEN_NO_SHOW_STATUSES)
-        .select('id, branch_id, barber_id, status');
-
-    if (error) {
-        throw new Error(error.message);
+    const rows = [];
+    const cutoffs = {};
+    for (const [groupTimeZone, { branchIds, companyIds }] of groups) {
+        const cutoffIso = getLocalDayStartUtc(now, groupTimeZone).toISOString();
+        cutoffs[groupTimeZone] = cutoffIso;
+        const result = await db.query(CLOSE_SQL, [finishedAt, cutoffIso, OPEN_NO_SHOW_STATUSES, branchIds, companyIds]);
+        rows.push(...(result.rows || []));
     }
 
-    const rows = Array.isArray(data) ? data : [];
     await registerConfirmedNoShows(rows.map((row) => row.id));
     const branchIds = Array.from(new Set(rows.map((row) => row.branch_id).filter(Boolean)));
 
@@ -131,9 +174,10 @@ async function closePreviousDayOpenQueueEntries({ io = null, now = new Date(), t
 
     return {
         closed_count: rows.length,
-        cutoff: cutoffIso,
+        cutoff: cutoffs[fallbackTimeZone] || Object.values(cutoffs)[0] || null,
+        cutoffs,
         status: 'ok',
-        timeZone: normalizedTimeZone,
+        timeZone: fallbackTimeZone,
     };
 }
 
@@ -168,9 +212,26 @@ function startQueueAutoCloseScheduler({ io = null } = {}) {
         }
     };
 
-    const scheduleNext = () => {
+    // Companies/branches may use different timezones, so wake at the earliest
+    // next local midnight among them (re-read every cycle; the default
+    // timezone is always included). Running for an already-closed timezone is
+    // a no-op, so an early wake-up is harmless.
+    const nextWakeUp = async (now) => {
+        let zones = [timeZone];
+        try {
+            const targets = await loadCloseTargets();
+            zones = [...groupTargetsByTimezone({ ...targets, fallbackTimeZone: timeZone }).keys(), timeZone];
+        } catch (error) {
+            console.error('[queue-auto-close] timezone lookup failed:', error.message);
+        }
+        return zones
+            .map((zone) => getNextLocalMidnightUtc(now, zone))
+            .reduce((earliest, candidate) => (candidate < earliest ? candidate : earliest));
+    };
+
+    const scheduleNext = async () => {
         const now = new Date();
-        const nextMidnight = getNextLocalMidnightUtc(now, timeZone);
+        const nextMidnight = await nextWakeUp(now);
         const delayMs = Math.max(1000, nextMidnight.getTime() - now.getTime());
 
         schedulerTimer = setTimeout(async () => {
@@ -182,14 +243,14 @@ function startQueueAutoCloseScheduler({ io = null } = {}) {
             schedulerTimer.unref();
         }
 
-        console.log(`[queue-auto-close] Next cleanup at ${nextMidnight.toISOString()} (${timeZone} midnight)`);
+        console.log(`[queue-auto-close] Next cleanup at ${nextMidnight.toISOString()} (earliest local midnight)`);
     };
 
     if (String(process.env.QUEUE_AUTO_CLOSE_ON_STARTUP || 'true').toLowerCase() !== 'false') {
         run('startup cleanup');
     }
 
-    scheduleNext();
+    void scheduleNext();
 
     return {
         stop: stopQueueAutoCloseScheduler,
@@ -208,6 +269,8 @@ function stopQueueAutoCloseScheduler() {
 
 module.exports = {
     closePreviousDayOpenQueueEntries,
+    groupTargetsByTimezone,
+    getLocalDayStartUtc,
     startQueueAutoCloseScheduler,
     stopQueueAutoCloseScheduler,
 };

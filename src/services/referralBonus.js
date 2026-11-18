@@ -1,6 +1,12 @@
 const { pool } = require('../config/postgres');
 
-async function creditReferralToCashbackWallet(client, { referralTransactionId, referrerClientId, amount, bookingId, queueEntryId }) {
+// Company scope (MULTI_TENANCY B2a): marketplace clients are still global
+// (Phase 5), but cashback wallets, clients and settings are per company. The
+// company is always the one of the referral row, and a bonus is only settled
+// for a completed queue entry of that same company (q.company_id =
+// r.company_id) — never "any company where this phone exists".
+async function creditReferralToCashbackWallet(client, { referralTransactionId, referrerClientId, amount, bookingId, queueEntryId, companyId }) {
+  if (!companyId) throw new Error('Referral company is required for cashback wallet');
   const referrer = await client.query(
     `select phone, coalesce(nullif(display_name, ''), 'Client') as display_name
        from marketplace_clients
@@ -14,20 +20,21 @@ async function creditReferralToCashbackWallet(client, { referralTransactionId, r
   const existingLegacyClient = await client.query(
     `select id
        from clients
-      where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
+      where company_id = $2
+        and regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
             regexp_replace($1, '[^0-9]', '', 'g')
       order by (phone = $1) desc, id
       limit 1
       for update`,
-    [phone],
+    [phone, companyId],
   );
   const legacyClientId = existingLegacyClient.rows[0]?.id || (
     await client.query(
-      `insert into clients (name, phone)
-       values ($1, $2)
-       on conflict (phone) do update set name = coalesce(nullif(clients.name, ''), excluded.name)
+      `insert into clients (company_id, name, phone)
+       values ($3, $1, $2)
+       on conflict (company_id, phone) do update set name = coalesce(nullif(clients.name, ''), excluded.name)
        returning id`,
-      [referrer.rows[0].display_name, phone],
+      [referrer.rows[0].display_name, phone, companyId],
     )
   ).rows[0]?.id;
   if (!legacyClientId) throw new Error('Unable to resolve referrer cashback wallet');
@@ -56,7 +63,7 @@ async function creditReferralToCashbackWallet(client, { referralTransactionId, r
 async function backfillReferralWallets(client, { limit = 100 } = {}) {
   const result = await client.query(
       `select rt.id as referral_transaction_id, rt.booking_id, rt.queue_entry_id, rt.amount,
-            r.referrer_client_id
+            r.referrer_client_id, r.company_id
        from referral_transactions rt
        join referrals r on r.id = rt.referral_id
       where not exists (
@@ -72,7 +79,14 @@ async function backfillReferralWallets(client, { limit = 100 } = {}) {
     const savepoint = `referral_wallet_backfill_${index}`;
     await client.query(`savepoint ${savepoint}`);
     try {
-      if (await creditReferralToCashbackWallet(client, row)) credited += 1;
+      if (await creditReferralToCashbackWallet(client, {
+        referralTransactionId: row.referral_transaction_id,
+        referrerClientId: row.referrer_client_id,
+        amount: row.amount,
+        bookingId: row.booking_id,
+        queueEntryId: row.queue_entry_id,
+        companyId: row.company_id,
+      })) credited += 1;
       await client.query(`release savepoint ${savepoint}`);
     } catch (error) {
       await client.query(`rollback to savepoint ${savepoint}`);
@@ -88,9 +102,10 @@ async function backfillReferralWallets(client, { limit = 100 } = {}) {
 
 async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
   const referrals = await client.query(
-    `select r.id as referral_id, r.referrer_client_id, first_visit.booking_id,
+    `select r.id as referral_id, r.referrer_client_id, r.company_id, first_visit.booking_id,
             first_visit.queue_entry_id,
-            coalesce((select (value ->> 'referral_points')::integer from platform_settings where key = 'status_points'), 15) as points
+            coalesce((select (value ->> 'referral_points')::integer from platform_settings
+                       where company_id = r.company_id and key = 'status_points'), 15) as points
        from referrals r
        join lateral (
          select b.id as booking_id, q.id as queue_entry_id
@@ -98,6 +113,7 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
            join marketplace_booking_persons bp on bp.booking_id = b.id
            join queue_entries q on q.id = bp.queue_entry_id
           where b.marketplace_client_id = r.referred_client_id and q.status = 'completed'
+            and q.company_id = r.company_id
           order by q.created_at, q.id limit 1
        ) first_visit on true
       where r.expires_at > now()
@@ -114,7 +130,8 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
     await client.query('select id from marketplace_clients where id = $1 for update', [row.referrer_client_id]);
     const cap = await client.query(
       `select coalesce((value ->> 'daily_positive_limit')::integer, 20) as daily_limit
-         from platform_settings where key = 'status_points'`,
+         from platform_settings where company_id = $1 and key = 'status_points'`,
+      [row.company_id],
     );
     const earned = await client.query(
       `select coalesce(sum(amount), 0) as total from status_point_transactions
@@ -124,9 +141,9 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
     );
     if (Number(earned.rows[0]?.total || 0) + points > Number(cap.rows[0]?.daily_limit ?? 20)) continue;
     const oldClient = await client.query(
-      `select status_points, marketplace_loyalty_level(status_points) as old_level
+      `select status_points, marketplace_loyalty_level(status_points, $2) as old_level
          from marketplace_clients where id = $1`,
-      [row.referrer_client_id],
+      [row.referrer_client_id, row.company_id],
     );
     const insertion = await client.query(
       `insert into status_point_transactions
@@ -139,8 +156,8 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
     if (!insertion.rows[0]) continue;
     const updated = await client.query(
       `update marketplace_clients set status_points = status_points + $2
-        where id = $1 returning status_points, marketplace_loyalty_level(status_points) as new_level`,
-      [row.referrer_client_id, points],
+        where id = $1 returning status_points, marketplace_loyalty_level(status_points, $3) as new_level`,
+      [row.referrer_client_id, points, row.company_id],
     );
     if (oldClient.rows[0]?.old_level !== updated.rows[0]?.new_level) {
       await client.query(
@@ -160,15 +177,17 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
 async function backfillMissingReferralBindings(client, { limit = 500 } = {}) {
   await client.query(
     `insert into referrals
-      (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
+      (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id, company_id)
      select candidate.referrer_client_id,
             candidate.referred_client_id,
             candidate.referral_code,
             candidate.registered_at + (candidate.expiry_days::text || ' days')::interval,
             candidate.source_ip,
-            candidate.device_id
+            candidate.device_id,
+            candidate.company_id
        from (
          select distinct on (mc.id)
+                ra.company_id,
                 ra.marketplace_client_id as referrer_client_id,
                 mc.id as referred_client_id,
                 ra.referral_code,
@@ -185,11 +204,19 @@ async function backfillMissingReferralBindings(client, { limit = 500 } = {}) {
            join referral_accounts ra
              on upper(ra.referral_code) = upper(trim(otp.referral_code))
           left join lateral (
-            select value from platform_settings where key = 'referral' limit 1
+            select value from platform_settings
+             where company_id = ra.company_id and key = 'referral' limit 1
           ) settings on true
           where otp.used = true
             and nullif(trim(otp.referral_code), '') is not null
             and ra.marketplace_client_id <> mc.id
+            -- A code that exists in two companies is ambiguous: never bind it
+            -- to an arbitrary company (MULTI_TENANCY B2).
+            and not exists (
+              select 1 from referral_accounts other
+               where upper(other.referral_code) = upper(ra.referral_code)
+                 and other.company_id is distinct from ra.company_id
+            )
             and not exists (
               select 1 from referrals existing
                where existing.referred_client_id = mc.id
@@ -223,25 +250,33 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
                       when pay.id is null and q.payment_method in ('payme', 'click', 'cash', 'card') then
                         coalesce(
                           q.price_override,
-                          (select sum(s.base_price) from services s where s.id = any(q.service_ids)),
-                          (select s.base_price from services s where s.id = q.service_id),
+                          (select sum(s.base_price) from services s
+                            where s.company_id = q.company_id and s.id = any(q.service_ids)
+                              and (s.branch_id is null or s.branch_id = q.branch_id)),
+                          (select s.base_price from services s
+                            where s.company_id = q.company_id and s.id = q.service_id
+                              and (s.branch_id is null or s.branch_id = q.branch_id)),
                           0
                         )
                       else 0
                     end
                   ), 0)
               )::numeric, 2) as paid_money,
+              r.company_id,
               coalesce((select (value ->> 'bonus_percent')::numeric
-                          from platform_settings where key = 'referral'), 1) as bonus_percent
+                          from platform_settings
+                         where company_id = r.company_id and key = 'referral'), 1) as bonus_percent
          from referrals r
          join marketplace_clients referred_mc
            on referred_mc.id = r.referred_client_id
          join clients referred_c
-           on regexp_replace(coalesce(referred_c.phone, ''), '[^0-9]', '', 'g') =
+           on referred_c.company_id = r.company_id
+          and regexp_replace(coalesce(referred_c.phone, ''), '[^0-9]', '', 'g') =
               regexp_replace(coalesce(referred_mc.phone, ''), '[^0-9]', '', 'g')
           and regexp_replace(coalesce(referred_mc.phone, ''), '[^0-9]', '', 'g') <> ''
          join queue_entries q
            on q.client_id = referred_c.id
+          and q.company_id = r.company_id
           and q.status = 'completed'
          left join lateral (
            select bp.booking_id
@@ -257,7 +292,7 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
             select 1 from referral_transactions rt
              where rt.referral_id = r.id and rt.queue_entry_id = q.id
           )
-        group by r.id, r.referrer_client_id, linked_booking.booking_id, q.id
+        group by r.id, r.referrer_client_id, r.company_id, linked_booking.booking_id, q.id
         order by q.updated_at asc
         limit $1`,
       params,
@@ -296,6 +331,7 @@ async function settlePendingReferralBonuses({ limit = 100, referrerClientId = nu
           amount: bonus,
           bookingId: row.booking_id,
           queueEntryId: row.queue_entry_id,
+          companyId: row.company_id,
         });
         await client.query(`release savepoint ${savepoint}`);
         settled += 1;

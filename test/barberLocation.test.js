@@ -36,12 +36,18 @@ test('location control is skipped until a branch has an enabled location policy'
   assert.equal(isLocationControlEnabled({ is_enabled: true }), true);
 });
 
-test('location event lookup filters by exact event and branch', async () => {
+// MULTI_TENANCY B2: the location admin is loaded from the DB (role, company).
+const COMPANY_A = 'aaaaaaaa-0000-4000-8000-00000000000a';
+const actorRow = (role, extra = {}) => ({ id: 'admin-1', role, branch_id: null, company_id: COMPANY_A, company_status: 'active', ...extra });
+const isActorQuery = (sql) => /from users u\s+left join companies c/.test(sql);
+
+test('location event lookup filters by company, exact event and branch', async () => {
   const originalQuery = db.query;
   process.env.JWT_SECRET = 'location-contract-test-secret';
   let query;
   let values;
   db.query = async (sql, params) => {
+    if (isActorQuery(sql)) return { rows: [actorRow('admin_network')] };
     query = sql;
     values = params;
     return { rows: [{ id: 'event-42', branch_id: 'branch-7' }] };
@@ -57,8 +63,8 @@ test('location event lookup filters by exact event and branch', async () => {
   };
   try {
     await listLocationEvents(req, res);
-    assert.match(query, /e\.branch_id = \$1 and e\.id = \$2/);
-    assert.deepEqual(values, ['branch-7', 'event-42', 1]);
+    assert.match(query, /e\.company_id = \$1 and e\.branch_id = \$2 and e\.id = \$3/);
+    assert.deepEqual(values, [COMPANY_A, 'branch-7', 'event-42', 1]);
     assert.equal(res.body.items[0].id, 'event-42');
   } finally {
     db.query = originalQuery;
@@ -71,9 +77,12 @@ test('branch-scoped location administrators cannot read events outside their bra
   let databaseCalled = false;
   let listQuery;
   let listValues;
-  db.query = async (sql, params) => { databaseCalled = true; listQuery = sql; listValues = params; return { rows: [] }; };
+  db.query = async (sql, params) => {
+    if (isActorQuery(sql)) return { rows: [actorRow('admin_branch')] };
+    databaseCalled = true; listQuery = sql; listValues = params; return { rows: [] };
+  };
   const makeRequest = (query) => ({
-    headers: { authorization: `Bearer ${jwt.sign({ role: 'admin_branch', branchId: 'branch-7' }, process.env.JWT_SECRET)}` },
+    headers: { authorization: `Bearer ${jwt.sign({ role: 'admin_branch', sub: 'admin-1', branchId: 'branch-7' }, process.env.JWT_SECRET)}` },
     query,
   });
   const makeResponse = () => ({
@@ -88,8 +97,8 @@ test('branch-scoped location administrators cannot read events outside their bra
     const unfiltered = makeResponse();
     await listLocationEvents(makeRequest({}), unfiltered);
     assert.equal(unfiltered.statusCode, 200);
-    assert.match(listQuery, /where e\.branch_id = \$1/);
-    assert.deepEqual(listValues, ['branch-7', 50]);
+    assert.match(listQuery, /where e\.company_id = \$1 and e\.branch_id = \$2/);
+    assert.deepEqual(listValues, [COMPANY_A, 'branch-7', 50]);
     assert.equal(databaseCalled, true);
   } finally {
     db.query = originalQuery;

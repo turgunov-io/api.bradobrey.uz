@@ -1,7 +1,8 @@
 const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../../utils/authToken');
 const { pool } = require('../../config/postgres');
 const { settlePendingReferralBonuses } = require('../../services/referralBonus');
+const { COMPANY_CONTEXT_REQUIRED, readTenantSetting, resolveMarketplaceContextCompanyId } = require('../../utils/tenantSettings');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,7 +34,7 @@ async function authClient(req, res) {
   }
   let payload;
   try {
-    payload = jwt.verify(header.slice(7), process.env.JWT_SECRET);
+    payload = verifyAny(header.slice(7));
   } catch (_) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
@@ -75,9 +76,9 @@ async function getClient(clientId) {
     : null;
 }
 
-async function getPlatformSetting(key, fallback) {
-  const result = await pool.query('select value from platform_settings where key = $1', [key]);
-  return result.rows[0]?.value || fallback;
+// Settings of ONE company (MULTI_TENANCY B2): no company -> fallback.
+async function getPlatformSetting(key, fallback, companyId, queryable = null) {
+  return (await readTenantSetting(queryable, key, companyId)) || fallback;
 }
 
 async function activeBooking(req, res) {
@@ -109,6 +110,8 @@ async function activeBooking(req, res) {
             select coalesce(sum(s.duration_minutes), 0)::int as total_minutes
               from services s
              where s.id = any(coalesce(q2.service_ids, array[q2.service_id]::uuid[]))
+               and s.company_id = q2.company_id
+               and (s.branch_id is null or s.branch_id = q2.branch_id)
           ) duration
          where q2.barber_id = q.barber_id
            and q2.status in ('waiting', 'called', 'swapped', 'transfer_pending', 'in_progress')
@@ -120,6 +123,7 @@ async function activeBooking(req, res) {
       'service_names', coalesce((select json_agg(s.name order by s.name)
           from marketplace_booking_person_services ps
           join services s on s.id = ps.service_id
+                         and s.company_id = coalesce(q.company_id, br.company_id)
          where ps.person_id = p.id), '[]'::json)
     ) order by p.person_index) filter (where p.id is not null), '[]'::json) as persons
      from marketplace_bookings b
@@ -193,7 +197,11 @@ async function loyalty(req, res) {
   if (!clientId) return;
   const client = await getClient(clientId);
   if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
-  const settings = await getPlatformSetting('loyalty_levels', {});
+  // Levels are company rules; without a branch the default company is used
+  // only while it is the only company.
+  const companyId = await resolveMarketplaceContextCompanyId(req);
+  if (!companyId) return res.status(400).json({ ...COMPANY_CONTEXT_REQUIRED });
+  const settings = await getPlatformSetting('loyalty_levels', {}, companyId);
   const points = Number(client.status_points || 0);
   const levels = Object.entries(settings)
     .map(([name, value]) => ({ name, min_points: Number(value.min_points || 0), cashback_percent: Number(value.cashback_percent || 0) }))
@@ -209,14 +217,17 @@ async function restrictionStatus(req, res) {
   const client = await getClient(clientId);
   if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
   const active = client.blocked_until && new Date(client.blocked_until) > new Date();
+  const companyId = await resolveMarketplaceContextCompanyId(req);
+  if (!companyId) return res.status(400).json({ ...COMPANY_CONTEXT_REQUIRED });
   let violationCount = 0;
   try {
     const violations = await pool.query(
       `select count(*)::int as count
          from marketplace_no_show_violations
         where marketplace_client_id = $1
+          and company_id = $3
           and created_at >= now() - ($2::int * interval '1 day')`,
-      [clientId, Number((await getPlatformSetting('no_show_restrictions', {})).lookback_days || 365)],
+      [clientId, Number((await getPlatformSetting('no_show_restrictions', {}, companyId)).lookback_days || 365), companyId],
     );
     violationCount = Number(violations.rows[0]?.count || 0);
   } catch (error) {
@@ -244,13 +255,29 @@ async function referral(req, res) {
     } catch (settlementError) {
       console.error('[marketplace-referral] immediate settlement failed:', settlementError.message);
     }
-    const code = `BR${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
-    const result = await pool.query(
-      `insert into referral_accounts (marketplace_client_id, referral_code) values ($1, $2)
-       on conflict (marketplace_client_id) do update set referral_code = referral_accounts.referral_code
-       returning referral_code`,
-      [clientId, code]
+    // One referral account per marketplace client, bound to ONE company
+    // (MULTI_TENANCY B2). An existing account keeps its company; a new one
+    // needs the company context (?branch_id, or the only company).
+    let result = await pool.query(
+      'select referral_code, company_id from referral_accounts where marketplace_client_id = $1',
+      [clientId],
     );
+    if (!result.rows[0]) {
+      const companyId = await resolveMarketplaceContextCompanyId(req);
+      if (!companyId) return res.status(400).json({ ...COMPANY_CONTEXT_REQUIRED });
+      result = await pool.query(
+        `insert into referral_accounts (marketplace_client_id, referral_code, company_id)
+         select $1, $2, $3
+          where not exists (select 1 from referral_accounts where referral_code = $2)
+         on conflict (marketplace_client_id) do update set referral_code = referral_accounts.referral_code
+         returning referral_code, company_id`,
+        // Codes stay unique across ALL companies so sign-up (which has no
+        // company context) can resolve a code to exactly one account.
+        [clientId, `BR${crypto.randomBytes(5).toString('hex').toUpperCase()}`, companyId]
+      );
+      if (!result.rows[0]) return res.status(409).json({ error: 'REFERRAL_CODE_COLLISION_RETRY' });
+    }
+    const referralCompanyId = result.rows[0].company_id;
     const balance = await pool.query(
       `select coalesce((
                 select sum(case
@@ -265,18 +292,20 @@ async function referral(req, res) {
               coalesce((select sum(rt.amount)
                           from referral_transactions rt
                           join referrals rr on rr.id = rt.referral_id
-                         where rr.referrer_client_id = mc.id), 0) as referral_bonus_earned
+                         where rr.referrer_client_id = mc.id
+                           and rr.company_id = $2), 0) as referral_bonus_earned
          from marketplace_clients mc
          left join lateral (
            select legacy.id
              from clients legacy
-            where regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
+            where legacy.company_id = $2
+              and regexp_replace(coalesce(legacy.phone, ''), '[^0-9]', '', 'g') =
                   regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
               and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
             order by (legacy.phone = mc.phone) desc, legacy.id
             limit 1
          ) c on true
-        where mc.id = $1`, [clientId]
+        where mc.id = $1`, [clientId, referralCompanyId]
     );
     const invited = await pool.query(
       `select r.id, r.expires_at, r.activated_at, r.created_at,
@@ -286,8 +315,9 @@ async function referral(req, res) {
          join marketplace_clients mc on mc.id = r.referred_client_id
          left join referral_transactions rt on rt.referral_id = r.id
         where r.referrer_client_id = $1
+          and r.company_id = $2
         group by r.id, mc.email, mc.phone
-        order by r.created_at desc`, [clientId]
+        order by r.created_at desc`, [clientId, referralCompanyId]
     );
     return res.json({
       referral_code: result.rows[0].referral_code,
@@ -600,7 +630,6 @@ async function cancelBooking(req, res) {
   if (!clientId) return;
   const bookingId = String(req.params.id || '').trim();
   const requestId = String(req.body?.request_id || req.get('Idempotency-Key') || '').trim() || null;
-  const settings = await getPlatformSetting('anti_fraud', { cancel_cooldown_minutes: 15, cancel_block_threshold: 3, block_hours: 24 });
   const client = await getClient(clientId);
   if (!client) return res.status(404).json({ error: 'Marketplace client not found' });
   if (client.blocked_until && new Date(client.blocked_until) > new Date()) return res.status(403).json({ error: 'ACCOUNT_BLOCKED' });
@@ -657,7 +686,12 @@ async function cancelBooking(req, res) {
                   from marketplace_booking_persons bp
                   join queue_entries q on q.id = bp.queue_entry_id
                  where bp.booking_id = b.id and q.status = 'in_progress'
-              ) as has_in_progress_person
+              ) as has_in_progress_person,
+              (select q.company_id
+                 from marketplace_booking_persons bp
+                 join queue_entries q on q.id = bp.queue_entry_id
+                where bp.booking_id = b.id
+                limit 1) as company_id
          from marketplace_bookings b
         where b.marketplace_client_id = $2 and b.status = 'ACTIVE'
           and (b.id = $1 or exists (
@@ -674,6 +708,14 @@ async function cancelBooking(req, res) {
       return res.status(409).json({ error: 'BOOKING_NOT_CANCELLABLE' });
     }
     const resolvedBookingId = booking.id;
+    // Anti-fraud / points rules of the company that owns the booking.
+    const bookingCompanyId = booking.company_id || null;
+    const settings = await getPlatformSetting(
+      'anti_fraud',
+      { cancel_cooldown_minutes: 15, cancel_block_threshold: 3, block_hours: 24 },
+      bookingCompanyId,
+      dbClient,
+    );
     const now = new Date();
     const cooldownUntil = new Date(now.getTime() + Number(settings.cancel_cooldown_minutes || 15) * 60000);
     const cancelCount = Number(lockedClient.cancel_count_today || 0) + 1;
@@ -753,20 +795,16 @@ async function cancelBooking(req, res) {
       new Date(booking.scheduled_start_at).getTime() - now.getTime() <= 30 * 60000;
     let lateCancelPenalty = 0;
     {
-      const pointsConfig = await dbClient.query(
-        `select value from platform_settings where key = 'status_points'`
-      );
+      const pointsConfig = await getPlatformSetting('status_points', {}, bookingCompanyId, dbClient);
       const oldLevelResult = await dbClient.query(
-        `select marketplace_loyalty_level(status_points) as level, status_points
+        `select marketplace_loyalty_level(status_points, $2::uuid) as level, status_points
            from marketplace_clients where id = $1 for update`,
-        [clientId],
+        [clientId, bookingCompanyId],
       );
       const oldLevel = oldLevelResult.rows[0]?.level || null;
-      const levelSettings = await dbClient.query(
-        `select value from platform_settings where key = 'loyalty_levels'`
-      );
-      const rankSettings = levelSettings.rows[0]?.value?.[oldLevel] || {};
-      const penaltyPoints = Math.max(0, Number(rankSettings.cancel_penalty_points ?? Math.abs(Number(pointsConfig.rows[0]?.value?.late_cancel_penalty ?? -10))));
+      const levelSettings = await getPlatformSetting('loyalty_levels', {}, bookingCompanyId, dbClient);
+      const rankSettings = levelSettings?.[oldLevel] || {};
+      const penaltyPoints = Math.max(0, Number(rankSettings.cancel_penalty_points ?? Math.abs(Number(pointsConfig?.late_cancel_penalty ?? -10))));
       const penalty = -penaltyPoints;
       lateCancelPenalty = penalty;
       if (penaltyPoints > 0) {
@@ -781,9 +819,9 @@ async function cancelBooking(req, res) {
             [penalty, clientId]
           );
           const newLevelResult = await dbClient.query(
-            `select marketplace_loyalty_level(status_points) as level
+            `select marketplace_loyalty_level(status_points, $2::uuid) as level
                from marketplace_clients where id = $1`,
-            [clientId],
+            [clientId, bookingCompanyId],
           );
           const newLevel = newLevelResult.rows[0]?.level || null;
           if (oldLevel && newLevel && oldLevel !== newLevel) {

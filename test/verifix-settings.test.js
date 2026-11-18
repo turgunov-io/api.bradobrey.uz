@@ -17,7 +17,7 @@ function setup({ role = 'admin_network', branches = 1, fail = false } = {}) {
     return { rows: [{ penalty_per_minute: rate }] };
   };
   const context = { module: { exports: {} }, process: { env: {} }, require(name) {
-    if (name === 'jsonwebtoken') return { verify: () => ({ role, branchId: id }) };
+    if (name === '../utils/authToken') return { verifyAny: () => ({ role, branchId: id }) };
     if (name.includes('postgres')) return { db: { query }, pool: { connect: async () => ({ query, release() { calls.push({ sql: 'RELEASE' }); } }) } };
     throw new Error(name);
   }};
@@ -29,6 +29,7 @@ function setup({ role = 'admin_network', branches = 1, fail = false } = {}) {
     role,
     branchScope: ['admin_network', 'admin'].includes(role) ? null : [id],
     sessionBranchId: id,
+    companyId: 'company-1',
   };
   const req = { headers: { authorization: 'Bearer test' }, method: 'PATCH', body: {}, dbActor };
   const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };

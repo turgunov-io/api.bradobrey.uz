@@ -3,6 +3,17 @@ const {
     removeUploadedFile,
     uploadBufferImageWithFolder,
 } = require("../../composable/uploadImage");
+const { requireTenantCompany, resolveRequestCompanyId } = require("../../utils/companyScope");
+
+// Company scope (MULTI_TENANCY B2a): banners belong to one company. Staff
+// (dashboard) read/write their tenant company; the public marketplace read
+// resolves the company from ?branch_id or legacy single-company mode and
+// returns nothing when the company is unknown.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const readCompanyId = (req) => {
+    const branchId = typeof req?.query?.branch_id === 'string' ? req.query.branch_id.trim() : '';
+    return resolveRequestCompanyId(req, { branchId: UUID_PATTERN.test(branchId) ? branchId : null });
+};
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
 const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.webm', '.mkv'];
@@ -39,9 +50,17 @@ const formatBanner = (item, index = 0) => ({
 
 class BannerMarketplace {
     async all(req, res) {
+        let companyId;
+        try {
+            companyId = await readCompanyId(req);
+        } catch (companyError) {
+            return res.status(500).json({ error: companyError.message });
+        }
+        if (!companyId) return res.status(200).json({ data: [] });
         const { data, error } = await db
             .from('banners')
-            .select('*');
+            .select('*')
+            .eq('company_id', companyId);
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -54,11 +73,19 @@ class BannerMarketplace {
 
     async getById(req, res) {
         const { id } = req.params;
+        let companyId;
+        try {
+            companyId = await readCompanyId(req);
+        } catch (companyError) {
+            return res.status(500).json({ error: companyError.message });
+        }
+        if (!companyId) return res.status(404).json({ error: 'Banner not found' });
         const { data, error } = await db
             .from('banners')
             .select('*')
             .eq('id', id)
-            .single();
+            .eq('company_id', companyId)
+            .maybeSingle();
 
         if (error) {
             return res.status(500).json({ error: error.message });
@@ -84,6 +111,8 @@ class BannerMarketplace {
         if (!file || !file.buffer) {
             return res.status(400).json({ error: 'Image file (field "file") is required' });
         }
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
 
         const { data: uploadData, error: uploadErr } = await uploadBufferImageWithFolder(
             file.buffer,
@@ -108,6 +137,7 @@ class BannerMarketplace {
             : 0;
 
         const insertPayload = {
+            company_id: companyId,
             image_url: uploadData.publicUrl,
             title_uz: title_uz || null,
             title_ru: title_ru || null,
@@ -160,11 +190,13 @@ class BannerMarketplace {
         } = req.body || {};
 
         const file = req.file;
-
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
         const { data: current, error: fetchError } = await db
             .from('banners')
             .select('*')
             .eq('id', id)
+            .eq('company_id', companyId)
             .maybeSingle();
 
         if (fetchError) return res.status(500).json({ error: fetchError.message });
@@ -247,6 +279,7 @@ class BannerMarketplace {
             .from('banners')
             .update(nextEntry)
             .eq('id', id)
+            .eq('company_id', companyId)
             .select('*')
             .single();
 
@@ -285,11 +318,13 @@ class BannerMarketplace {
     async deactivate(req, res) {
         const { id } = req.params;
         const isActive = req.body?.is_active === undefined ? false : Boolean(req.body.is_active);
-
+        const companyId = requireTenantCompany(req, res);
+        if (!companyId) return undefined;
         const { data, error } = await db
             .from('banners')
             .update({ is_active: isActive })
             .eq('id', id)
+            .eq('company_id', companyId)
             .select('*')
             .maybeSingle();
 

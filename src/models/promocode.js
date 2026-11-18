@@ -1,4 +1,17 @@
 const { db } = require('../config/postgres');
+const { requireTenantCompany, sameId } = require('../utils/companyScope');
+
+// Company scope (MULTI_TENANCY Phase 1 B2a): promo codes are unique per
+// (company_id, code). Every lookup, list and write is limited to the tenant
+// company (req.tenant from the staff token, never the body).
+const COMPANY_FORBIDDEN = { error: 'Barbershop belongs to another company', code: 'BARBERSHOP_COMPANY_MISMATCH' };
+
+const barbershopInCompany = async (barbershopId, companyId) => {
+  if (!barbershopId) return true;
+  const { data, error } = await db.from('marketplace_barbershops').select('id, company_id').eq('id', barbershopId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return sameId(data?.company_id, companyId);
+};
 
 const normalizeCode = (code = '') => String(code).trim().toUpperCase();
 
@@ -54,8 +67,10 @@ class PromoCodes {
   async validate(req, res) {
     const { code, user_id, order_total } = req.body || {};
     if (!code) return res.status(400).json({ success: false, message: 'code is required' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
-    const promo = await this.fetchPromo(code);
+    const promo = await this.fetchPromo(code, companyId);
     if (promo.error) return res.status(500).json({ success: false, message: promo.error });
     if (!promo.data) return res.status(404).json({ success: false, message: 'Promo code not found' });
 
@@ -77,8 +92,10 @@ class PromoCodes {
   async use(req, res) {
     const { promo_code, user_id, user_name, phone, order_id } = req.body || {};
     if (!promo_code) return res.status(400).json({ success: false, message: 'promo_code is required' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
-    const promo = await this.fetchPromo(promo_code);
+    const promo = await this.fetchPromo(promo_code, companyId);
     if (promo.error) return res.status(500).json({ success: false, message: promo.error });
     if (!promo.data) return res.status(404).json({ success: false, message: 'Promo code not found' });
 
@@ -109,6 +126,7 @@ class PromoCodes {
         .from('promo_codes')
         .update({ used_count: nextCount })
         .eq('id', promo.data.id)
+        .eq('company_id', companyId)
         .select()
         .maybeSingle();
 
@@ -132,8 +150,10 @@ class PromoCodes {
   async stats(req, res) {
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: 'id is required' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
-    const promo = await this.fetchPromoById(id);
+    const promo = await this.fetchPromoById(id, companyId);
     if (promo.error) return res.status(500).json({ error: promo.error });
     if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
 
@@ -164,9 +184,12 @@ class PromoCodes {
   }
 
   async list(req, res) {
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
     const { data, error } = await db
       .from('promo_codes')
       .select('*')
+      .eq('company_id', companyId)
       .order('created_at', { ascending: false });
 
     if (error) return res.status(500).json({ error: error.message });
@@ -186,8 +209,19 @@ class PromoCodes {
       return res.status(400).json({ error: parsed.error });
     }
 
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
+    try {
+      if (!(await barbershopInCompany(parsed.data.marketplace_barbershop_id, companyId))) {
+        return res.status(403).json(COMPANY_FORBIDDEN);
+      }
+    } catch (checkError) {
+      return res.status(500).json({ error: checkError.message });
+    }
+
     const payload = {
       ...parsed.data,
+      company_id: companyId,
       used_count: 0,
     };
 
@@ -206,7 +240,10 @@ class PromoCodes {
         .maybeSingle());
     }
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      if (String(error.code) === '23505') return res.status(409).json({ error: 'Promo code already exists' });
+      return res.status(500).json({ error: error.message });
+    }
 
     // Marketplace-scoped promotions are delivered only to clients who have
     // previously interacted with that barbershop.  The notification is
@@ -245,8 +282,10 @@ class PromoCodes {
   async update(req, res) {
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: 'id is required' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
-    const promo = await this.fetchPromoById(id);
+    const promo = await this.fetchPromoById(id, companyId);
     if (promo.error) return res.status(500).json({ error: promo.error });
     if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
 
@@ -254,12 +293,20 @@ class PromoCodes {
     if (parsed.error) {
       return res.status(400).json({ error: parsed.error });
     }
+    try {
+      if (!(await barbershopInCompany(parsed.data.marketplace_barbershop_id, companyId))) {
+        return res.status(403).json(COMPANY_FORBIDDEN);
+      }
+    } catch (checkError) {
+      return res.status(500).json({ error: checkError.message });
+    }
 
     let updatePayload = parsed.data;
     let { data, error } = await db
       .from('promo_codes')
       .update(updatePayload)
       .eq('id', promo.data.id)
+      .eq('company_id', companyId)
       .select()
       .maybeSingle();
 
@@ -270,6 +317,7 @@ class PromoCodes {
         .from('promo_codes')
         .update(updatePayload)
         .eq('id', promo.data.id)
+        .eq('company_id', companyId)
         .select()
         .maybeSingle());
     }
@@ -285,8 +333,10 @@ class PromoCodes {
   async remove(req, res) {
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: 'id is required' });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
-    const promo = await this.fetchPromoById(id);
+    const promo = await this.fetchPromoById(id, companyId);
     if (promo.error) return res.status(500).json({ error: promo.error });
     if (!promo.data) return res.status(404).json({ error: 'Promo code not found' });
 
@@ -300,7 +350,8 @@ class PromoCodes {
     const { error: deleteError } = await db
       .from('promo_codes')
       .delete()
-      .eq('id', promo.data.id);
+      .eq('id', promo.data.id)
+      .eq('company_id', companyId);
 
     if (deleteError) return res.status(500).json({ error: deleteError.message });
 
@@ -310,22 +361,26 @@ class PromoCodes {
     });
   }
 
-  async fetchPromo(rawCode) {
+  async fetchPromo(rawCode, companyId) {
+    if (!companyId) return { data: null, error: 'company is required' };
     const code = normalizeCode(rawCode);
     const { data, error } = await db
       .from('promo_codes')
       .select('*')
+      .eq('company_id', companyId)
       .eq('code', code)
       .maybeSingle();
 
     return { data, error: error ? error.message : null };
   }
 
-  async fetchPromoById(id) {
+  async fetchPromoById(id, companyId) {
+    if (!companyId) return { data: null, error: 'company is required' };
     const { data, error } = await db
       .from('promo_codes')
       .select('*')
       .eq('id', id)
+      .eq('company_id', companyId)
       .maybeSingle();
 
     return { data, error: error ? error.message : null };

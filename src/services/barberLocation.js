@@ -1,4 +1,5 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
+const { checkTenantAccess } = require('../utils/tenant');
 const { db } = require('../config/postgres');
 
 const LOCATION_ROLES = new Set(['barber', 'super-barber']);
@@ -100,45 +101,82 @@ async function verifyAndRecordLoginLocation({ barberId, branchId, location }) {
   return { ok: true, outsideRadius: !inside, distanceMeters, event, config };
 }
 
-function authenticateLocationUser(req, res) {
+const LOCATION_ACTOR_SQL = `select u.id, u.role, u.branch_id, u.company_id, c.status as company_status
+     from users u
+     left join companies c on c.id = u.company_id
+    where u.id = $1
+    limit 1`;
+
+// MULTI_TENANCY B2: role and company come from the database (never the
+// token). Returns { role, branchId (session branch), companyId } or null after
+// an error response. Branch-scoped roles stay pinned to their session branch.
+async function authenticateLocationUser(req, res) {
   const header = String(req.headers.authorization || '');
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
+  let payload;
+  try { payload = verifyAny(token); } catch (_error) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
+  const userId = payload?.sub || payload?.id;
+  if (!userId) { res.status(401).json({ error: 'Invalid token payload' }); return null; }
+
+  let user;
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    if (!ADMIN_ROLES.has(payload?.role)) { res.status(403).json({ error: 'Location administration is not allowed' }); return null; }
-    return payload;
-  } catch (_error) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
+    const result = await db.query(LOCATION_ACTOR_SQL, [userId]);
+    user = result.rows?.[0] || null;
+  } catch (_error) {
+    res.status(500).json({ error: 'Failed to authorize request' });
+    return null;
+  }
+  if (!user) { res.status(401).json({ error: 'Session is no longer valid' }); return null; }
+  const tenantCheck = checkTenantAccess({ payload, user });
+  if (!tenantCheck.ok) { res.status(tenantCheck.status).json(tenantCheck.body); return null; }
+  const role = String(user.role || '').trim().toLowerCase();
+  if (!ADMIN_ROLES.has(role)) { res.status(403).json({ error: 'Location administration is not allowed' }); return null; }
+  return {
+    role,
+    branchId: String(payload.branchId || payload.branch_id || user.branch_id || '').trim() || null,
+    companyId: tenantCheck.tenant.companyId,
+  };
 }
 
+const branchInCompany = async (branchId, companyId) => {
+  if (!branchId || !companyId) return false;
+  const result = await db.query('select 1 from branches where id = $1 and company_id = $2 limit 1', [branchId, companyId]);
+  return Boolean(result.rows?.[0]);
+};
+
+const outsideScope = (res) => res.status(403).json({ error: 'Branch scope does not allow this operation' });
+
 async function saveBranchLocation(req, res) {
-  const payload = authenticateLocationUser(req, res); if (!payload) return;
+  const payload = await authenticateLocationUser(req, res); if (!payload) return;
   const branchId = String(req.params.id || '').trim();
   const body = req.body || {};
   const latitude = numberInRange(body.latitude, -90, 90);
   const longitude = numberInRange(body.longitude, -180, 180);
   const radiusMeters = numberInRange(body.radius_meters ?? body.radius, 1, 50000);
   if (latitude === null || longitude === null || radiusMeters === null) return res.status(400).json({ error: 'Coordinates and radius are invalid' });
-  if (BRANCH_SCOPED_ADMIN_ROLES.has(payload.role) && String(payload.branchId || '') !== branchId) return res.status(403).json({ error: 'Branch scope does not allow this operation' });
+  if (BRANCH_SCOPED_ADMIN_ROLES.has(payload.role) && String(payload.branchId || '') !== branchId) return outsideScope(res);
+  if (!(await branchInCompany(branchId, payload.companyId))) return outsideScope(res);
   const result = await db.query(`
-    insert into branch_locations (branch_id, latitude, longitude, radius_meters, is_enabled, updated_at)
-    values ($1,$2,$3,$4,$5,now())
+    insert into branch_locations (branch_id, latitude, longitude, radius_meters, is_enabled, updated_at, company_id)
+    values ($1,$2,$3,$4,$5,now(),$6)
     on conflict (branch_id) do update set latitude=excluded.latitude, longitude=excluded.longitude,
       radius_meters=excluded.radius_meters, is_enabled=excluded.is_enabled, updated_at=now()
     returning id, branch_id, latitude, longitude, radius_meters, is_enabled, updated_at
-  `, [branchId, latitude, longitude, radiusMeters, body.is_enabled !== false]);
+  `, [branchId, latitude, longitude, radiusMeters, body.is_enabled !== false, payload.companyId]);
   return res.json({ location: result.rows[0] });
 }
 
 async function getBranchLocation(req, res) {
-  const payload = authenticateLocationUser(req, res); if (!payload) return;
-  if (BRANCH_SCOPED_ADMIN_ROLES.has(payload.role) && String(payload.branchId || '') !== String(req.params.id || '')) return res.status(403).json({ error: 'Branch scope does not allow this operation' });
+  const payload = await authenticateLocationUser(req, res); if (!payload) return;
+  if (BRANCH_SCOPED_ADMIN_ROLES.has(payload.role) && String(payload.branchId || '') !== String(req.params.id || '')) return outsideScope(res);
+  if (!(await branchInCompany(String(req.params.id || '').trim(), payload.companyId))) return outsideScope(res);
   const location = await loadLocation(req.params.id);
   return res.json({ location });
 }
 
 async function listLocationEvents(req, res) {
-  const payload = authenticateLocationUser(req, res); if (!payload) return;
+  const payload = await authenticateLocationUser(req, res); if (!payload) return;
   let branchId = String(req.query.branch_id || '').trim();
   const eventId = String(req.query.event_id || '').trim();
   if (BRANCH_SCOPED_ADMIN_ROLES.has(payload.role)) {
@@ -147,8 +185,9 @@ async function listLocationEvents(req, res) {
     branchId = allowedBranchId;
   }
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
-  const params = [];
-  const conditions = [];
+  // Company first: network roles see their whole company, never another's.
+  const params = [payload.companyId];
+  const conditions = ['e.company_id = $1'];
   if (branchId) { params.push(branchId); conditions.push(`e.branch_id = $${params.length}`); }
   if (eventId) { params.push(eventId); conditions.push(`e.id = $${params.length}`); }
   params.push(limit);
@@ -159,7 +198,7 @@ async function listLocationEvents(req, res) {
     from barber_login_location_events e
     left join barbers b on b.id = e.barber_id
     left join branches br on br.id = e.branch_id
-    ${conditions.length ? `where ${conditions.join(' and ')}` : ''} order by e.created_at desc limit $${params.length}
+    where ${conditions.join(' and ')} order by e.created_at desc limit $${params.length}
   `, params);
   return res.json({ items: result.rows || [] });
 }

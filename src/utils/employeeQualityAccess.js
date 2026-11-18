@@ -1,7 +1,12 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('./authToken');
+const { checkTenantAccess } = require('./tenant');
 const { pool } = require('../config/postgres');
 
 const SCOPE_TYPES = new Set(['global', 'branch', 'self']);
+// Platform-level roles (MULTI_TENANCY Phase 1): manage companies, never a
+// company's data. Deliberately NOT part of NETWORK/BRANCH/SELF roles; only
+// routers/platform.js admits it (middleware/employeeAccess blocks the rest).
+const PLATFORM_ROLES = new Set(['platform_owner']);
 const NETWORK_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
 const BRANCH_ROLES = new Set(['admin_branch', 'manager']);
 const SELF_ROLES = new Set(['barber', 'super-barber']);
@@ -72,6 +77,18 @@ function parseDateRange(query = {}) {
   };
 }
 
+const USER_WITH_COMPANY_SQL = `select u.id, u.role, u.branch_id, u.company_id, c.status as company_status
+     from users u
+     left join companies c on c.id = u.company_id
+    where u.id = $1
+    limit 1`;
+
+async function loadCompanyBranchIds(companyId) {
+  if (!companyId) return [];
+  const result = await pool.query('select id from branches where company_id = $1', [companyId]);
+  return (result.rows || []).map((row) => String(row.id));
+}
+
 function getBearerToken(req) {
   const header = String(req.headers?.authorization || '');
   return header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -90,7 +107,15 @@ function effectivePermissions(role, rows = []) {
   return new Set(rows.map((row) => String(row.permission || '')).filter(Boolean));
 }
 
-function resolveAuthorizedScope({ permissions, query = {}, role, user }) {
+// companyBranchIds (MULTI_TENANCY Phase 1): every branch of the caller's
+// company. When given, a branch scope must be one of them and the global
+// scope carries { companyId, branchIds } for company-limited queries.
+// authenticateStatistics always passes it.
+function resolveAuthorizedScope({ permissions, query = {}, role, user, companyBranchIds }) {
+  const companyBranches = Array.isArray(companyBranchIds) ? companyBranchIds.map(String) : null;
+  const companyScope = companyBranches
+    ? { companyId: user.company_id ? String(user.company_id) : null, branchIds: companyBranches }
+    : {};
   const requestedScope = String(query.scope || '').trim().toLowerCase();
   if (!SCOPE_TYPES.has(requestedScope)) return { error: 'scope must be global, branch, or self', status: 400 };
 
@@ -103,7 +128,7 @@ function resolveAuthorizedScope({ permissions, query = {}, role, user }) {
       return { error: 'employee_id must be a UUID', status: 400 };
     }
     if (!permissions.has('statistics.read.global')) return { error: 'Missing permission: statistics.read.global', status: 403 };
-    return { type: 'global', branchId: null, employeeId: requestedEmployeeId, userBranchId, userId };
+    return { type: 'global', branchId: null, employeeId: requestedEmployeeId, userBranchId, userId, ...companyScope };
   }
 
   if (requestedScope === 'branch') {
@@ -118,6 +143,9 @@ function resolveAuthorizedScope({ permissions, query = {}, role, user }) {
       return { error: 'Missing permission: statistics.read.branch', status: 403 };
     }
     if (!global && (!userBranchId || branchId !== userBranchId)) {
+      return { error: 'Branch scope is outside the authenticated user scope', status: 403 };
+    }
+    if (companyBranches && !companyBranches.includes(branchId)) {
       return { error: 'Branch scope is outside the authenticated user scope', status: 403 };
     }
     return { type: 'branch', branchId, employeeId: requestedEmployeeId, userBranchId, userId };
@@ -144,7 +172,7 @@ async function authenticateStatistics(req, res, {
   let payload;
   try {
     if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured');
-    payload = jwt.verify(token, process.env.JWT_SECRET);
+    payload = verifyAny(token);
   } catch (_error) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
@@ -156,13 +184,15 @@ async function authenticateStatistics(req, res, {
     return null;
   }
 
-  const userResult = await pool.query(
-    'select id, role, branch_id from users where id = $1 limit 1',
-    [userId],
-  );
+  const userResult = await pool.query(USER_WITH_COMPANY_SQL, [userId]);
   const user = userResult.rows[0];
   if (!user) {
     res.status(401).json({ error: 'Session is no longer valid' });
+    return null;
+  }
+  const tenantCheck = checkTenantAccess({ payload, user });
+  if (!tenantCheck.ok) {
+    res.status(tenantCheck.status).json(tenantCheck.body);
     return null;
   }
 
@@ -180,7 +210,8 @@ async function authenticateStatistics(req, res, {
   const authorizationQuery = typeof authorizeQuery === 'function'
     ? authorizeQuery({ permissions, query: req.query || {}, role, user })
     : (req.query || {});
-  const scope = resolveAuthorizedScope({ permissions, query: authorizationQuery, role, user });
+  const companyBranchIds = await loadCompanyBranchIds(user.company_id);
+  const scope = resolveAuthorizedScope({ permissions, query: authorizationQuery, role, user, companyBranchIds });
   if (scope.error) {
     res.status(scope.status).json({ error: scope.error });
     return null;
@@ -217,7 +248,7 @@ async function authenticateHistory(req, res) {
   let payload;
   try {
     if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured');
-    payload = jwt.verify(token, process.env.JWT_SECRET);
+    payload = verifyAny(token);
   } catch (_error) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
@@ -228,12 +259,17 @@ async function authenticateHistory(req, res) {
     return null;
   }
   const [userResult, permissionResult] = await Promise.all([
-    pool.query('select id, role, branch_id from users where id = $1 limit 1', [userId]),
+    pool.query(USER_WITH_COMPANY_SQL, [userId]),
     pool.query('select permission from user_permissions where user_id = $1', [userId]),
   ]);
   const user = userResult.rows[0];
   if (!user) {
     res.status(401).json({ error: 'Session is no longer valid' });
+    return null;
+  }
+  const tenantCheck = checkTenantAccess({ payload, user });
+  if (!tenantCheck.ok) {
+    res.status(tenantCheck.status).json(tenantCheck.body);
     return null;
   }
   const role = String(user.role || '').trim().toLowerCase();
@@ -244,13 +280,19 @@ async function authenticateHistory(req, res) {
     return null;
   }
   if (NETWORK_ROLES.has(role) && permissions.has('history.read.branch')) {
+    // Network roles: any branch of their company (Phase 1), never another's.
+    const companyBranchIds = await loadCompanyBranchIds(user.company_id);
+    if (requestedBranch && !companyBranchIds.includes(String(requestedBranch))) {
+      res.status(403).json({ error: 'Branch history is outside the authenticated user scope' });
+      return null;
+    }
     return {
       payload,
       permissions,
       role,
       scope: requestedBranch
         ? { type: 'branch', branchId: String(requestedBranch), employeeId: null }
-        : { type: 'global', branchId: null, employeeId: null },
+        : { type: 'global', branchId: null, employeeId: null, companyId: String(user.company_id), branchIds: companyBranchIds },
       user,
     };
   }
@@ -284,6 +326,23 @@ async function authenticateHistory(req, res) {
   return null;
 }
 
+/**
+ * Company every statistics/history/quality query is bound to (MULTI_TENANCY
+ * B2: "global" means the whole company, never the whole database). Taken from
+ * the authorized scope or the DB-loaded user; fails closed when missing.
+ * @param {{ scope?: { companyId?: string|null }, user?: { company_id?: string|null } }} access
+ * @returns {string}
+ */
+function requireAccessCompanyId(access) {
+  const companyId = access?.scope?.companyId || access?.user?.company_id;
+  if (!companyId) {
+    const error = new Error('Company scope is missing');
+    error.code = 'COMPANY_SCOPE_MISSING';
+    throw error;
+  }
+  return String(companyId);
+}
+
 function canReviewQuality(access) {
   return Boolean(
     access
@@ -296,6 +355,7 @@ function canReviewQuality(access) {
 module.exports = {
   BRANCH_ROLES,
   NETWORK_ROLES,
+  PLATFORM_ROLES,
   QUALITY_REVIEW_PERMISSION,
   SELF_ROLES,
   authenticateStatistics,
@@ -304,5 +364,6 @@ module.exports = {
   effectivePermissions,
   parseCalendarDate,
   parseDateRange,
+  requireAccessCompanyId,
   resolveAuthorizedScope,
 };

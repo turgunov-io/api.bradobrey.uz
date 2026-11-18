@@ -2,7 +2,9 @@
 //   (callers: routers/kiosk.js, routers/monitor.js)
 //
 // Kiosks send the device token they got from POST /api/kiosk/register in the
-// `X-Kiosk-Token` header. A valid token sets req.kiosk = { id, branchId } and
+// `X-Kiosk-Token` header. A valid token sets req.kiosk = { id, branchId,
+// companyId } (company resolved via the kiosk's branch; a suspended company is
+// 403 COMPANY_SUSPENDED) plus req.tenant, and
 // pins the request to that branch: any branch_id in params/body/query that
 // differs answers 403; a POST body without branch_id gets the kiosk branch.
 //
@@ -14,7 +16,8 @@
 //     JWT and a valid one is sent: an active employee (DB-loaded, branch
 //     checked against the allowed branches) or, on routes that opt in, a
 //     marketplace client token. Any other bearer is 403.
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
+const { PLATFORM_OWNER_ROLE, checkTenantAccess } = require('../utils/tenant');
 
 const KIOSK_TOKEN_HEADER = 'x-kiosk-token';
 const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
@@ -30,7 +33,7 @@ function defaultVerifyBearer(token) {
   const secret = process.env.JWT_SECRET;
   if (!secret) return null;
   try {
-    return jwt.verify(token, secret);
+    return verifyAny(token, { secret: secret });
   } catch (_error) {
     return null;
   }
@@ -82,12 +85,16 @@ function createKioskAuth({
       return res.status(500).json({ error: 'Failed to authenticate kiosk' });
     }
     if (!kiosk) return res.status(401).json({ error: 'Kiosk device token is invalid', code: 'KIOSK_TOKEN_INVALID' });
+    if (!kiosk.companyId || kiosk.companyStatus !== 'active') {
+      return res.status(403).json({ error: 'Company access is suspended', code: 'COMPANY_SUSPENDED' });
+    }
 
     if (requestedBranchIds(req).some((branchId) => !sameId(branchId, kiosk.branchId))) {
       return res.status(403).json({ error: 'Branch does not match the authenticated kiosk', code: 'KIOSK_BRANCH_MISMATCH' });
     }
 
-    req.kiosk = { id: kiosk.id, branchId: kiosk.branchId };
+    req.kiosk = { id: kiosk.id, branchId: kiosk.branchId, companyId: kiosk.companyId };
+    req.tenant = { companyId: kiosk.companyId, isPlatformOwner: false };
     if (req.body && typeof req.body === 'object' && !Array.isArray(req.body) && !isPresent(req.body.branch_id)) {
       req.body.branch_id = kiosk.branchId;
     }
@@ -112,14 +119,20 @@ function createKioskAuth({
     if (!UUID_PATTERN.test(userId)) return forbidden(res, 'Only employees can use kiosk routes with a bearer token');
 
     let staff;
+    let tenant;
     try {
       const state = await loadStaff(userId);
       if (!state?.user || isArchived(state.barber)) {
         return forbidden(res, 'Only active employees can use kiosk routes with a bearer token');
       }
+      const tenantCheck = checkTenantAccess({ payload, user: state.user });
+      if (!tenantCheck.ok) return res.status(tenantCheck.status).json(tenantCheck.body);
       const role = String(state.user.role || '').trim().toLowerCase();
+      if (role === PLATFORM_OWNER_ROLE) return forbidden(res, 'Only employees can use kiosk routes with a bearer token');
+      tenant = tenantCheck.tenant;
+      // Company-scoped: network roles get every branch of their company only.
       const branchScope = await resolveScope({ ...state.user, role });
-      staff = { id: state.user.id, role, branchScope };
+      staff = { id: state.user.id, role, branchScope, companyId: tenant.companyId };
     } catch (error) {
       logError('[kiosk-auth] staff lookup failed:', error?.code || error?.message);
       return res.status(500).json({ error: 'Failed to authenticate kiosk request' });
@@ -132,6 +145,7 @@ function createKioskAuth({
       }
     }
     req.kioskStaff = staff;
+    req.tenant = tenant;
     return next();
   }
 

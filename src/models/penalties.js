@@ -1,6 +1,7 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { db } = require('../config/postgres');
-const { isBranchAllowed, resolveStaffBranchScope } = require('../utils/adminAuth');
+const { isBranchAllowed, isCompanyWideScope, resolveStaffBranchScope } = require('../utils/adminAuth');
+const { zonedDateString } = require('../utils/timezone');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
 const PENALTY_TYPE = 'penalty';
@@ -38,7 +39,7 @@ async function auth(req, res) {
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
 
   let payload;
-  try { payload = jwt.verify(token, process.env.JWT_SECRET); } catch (_error) {
+  try { payload = verifyAny(token); } catch (_error) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
   }
@@ -47,7 +48,7 @@ async function auth(req, res) {
   if (!userId) { res.status(401).json({ error: 'Invalid token payload' }); return null; }
   let user = req.employeeAccess?.user;
   if (!user) {
-    const result = await db.from('users').select('id, role, branch_id').eq('id', userId).maybeSingle();
+    const result = await db.from('users').select('id, role, branch_id, company_id').eq('id', userId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     user = result.data;
   }
@@ -69,8 +70,15 @@ async function auth(req, res) {
     permissions = (result.data || []).map((row) => row.permission);
   }
 
+  // MULTI_TENANCY B2: every penalty query is bound to the caller's company
+  // (from the DB). Network roles (company-wide scope) are not narrowed by
+  // branch, so company-level rows (branch_id NULL) stay visible to them —
+  // same rule as models/expenses.js.
+  const companyId = user.company_id ? String(user.company_id) : null;
+  if (!companyId) { res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' }); return null; }
+
   const branchId = payload.branchId || payload.branch_id || user.branch_id || null;
-  // null = network role (whole network); otherwise the allowed branch ids.
+  // Allowed branch ids; network roles get every branch of their company.
   const branchScope = await resolveStaffBranchScope({ ...user, role }, branchId);
 
   return {
@@ -78,9 +86,16 @@ async function auth(req, res) {
     role,
     branchId,
     branchScope,
+    companyWide: isCompanyWideScope(branchScope),
     permissions,
+    companyId,
   };
 }
+
+// Row visibility inside the company: company-wide scopes see every row of the
+// company (including branch_id NULL), others only their allowed branches.
+const canSeeRowBranch = (access, branchId) => access.companyWide || isBranchAllowed(access.branchScope, branchId);
+const isBranchRestricted = (access) => !access.companyWide && access.branchScope !== null;
 
 const can = (access, permission) => PRIVILEGED_ROLES.has(access.role)
   || access.permissions.includes(permission)
@@ -130,14 +145,14 @@ const toItem = (row) => {
   };
 };
 
-const queryById = (id) => db.query(
+const queryById = (id, companyId) => db.query(
   `select ${selectFields}
    from warehouse_purchases p
    left join branches b on b.id = p.branch_id
    left join barbers recipient on recipient.id::text = p.metadata->>'recipient_id'
    left join users u on u.id::text = p.metadata->>'created_by'
    left join barbers creator_barber on creator_barber.id::text = p.metadata->>'created_by'
-   where p.id = $1 and p.metadata->>'type' = $2`, [id, PENALTY_TYPE]
+   where p.id = $1 and p.metadata->>'type' = $2 and p.company_id = $3`, [id, PENALTY_TYPE, companyId]
 );
 
 module.exports = {
@@ -146,15 +161,15 @@ module.exports = {
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.read, res)) return;
 
-    const values = [PENALTY_TYPE];
-    const where = ["p.metadata->>'type' = $1"];
+    const values = [PENALTY_TYPE, access.companyId];
+    const where = ["p.metadata->>'type' = $1", 'p.company_id = $2'];
     const add = (value) => { values.push(value); return `$${values.length}`; };
     const requestedBranchId = text(req.query.branch_id);
     if (requestedBranchId && !isBranchAllowed(access.branchScope, requestedBranchId)) {
       return res.status(403).json({ error: 'Branch is outside your access scope' });
     }
     if (requestedBranchId) where.push(`p.branch_id = ${add(requestedBranchId)}`);
-    else if (access.branchScope !== null) where.push(`p.branch_id::text = any(${add(access.branchScope)}::text[])`);
+    else if (isBranchRestricted(access)) where.push(`p.branch_id::text = any(${add(access.branchScope)}::text[])`);
     if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
       const [year, month] = req.query.period.split('-').map(Number);
       where.push(`p.purchased_at >= ${add(`${req.query.period}-01`)}`);
@@ -181,20 +196,23 @@ module.exports = {
       let lateItems = [];
       let penaltyPerMinute = 0;
       try {
-        const settings = await db.query('select penalty_per_minute from verifix_settings where id = 1');
+        // Per-company rate (verifix_settings unique company_id, B2a).
+        const settings = access.companyId
+          ? await db.query('select penalty_per_minute from verifix_settings where company_id = $1', [access.companyId])
+          : { rows: [] };
         penaltyPerMinute = Number(settings.rows[0]?.penalty_per_minute || 0);
       } catch (error) {
         if (!String(error?.code || '').includes('42P01')) throw error;
       }
-      const lateValues = [];
-      const lateWhere = ['(e.is_late = true OR e.penalty_amount > 0)'];
+      const lateValues = [access.companyId];
+      const lateWhere = ['e.company_id = $1', '(e.is_late = true OR e.penalty_amount > 0)'];
       const lateAdd = (value) => { lateValues.push(value); return `$${lateValues.length}`; };
       if (source === 'manual') lateWhere.push('false');
       if (status === 'cancelled') lateWhere.push(`e.metadata->>'canceled' = 'true'`);
       if (status === 'active') lateWhere.push(`coalesce(e.metadata->>'canceled', 'false') <> 'true'`);
       if (recipientId) lateWhere.push(`e.barber_id = ${lateAdd(recipientId)}`);
       if (requestedBranchId) lateWhere.push(`e.branch_id = ${lateAdd(requestedBranchId)}`);
-      else if (access.branchScope !== null) lateWhere.push(`e.branch_id::text = any(${lateAdd(access.branchScope)}::text[])`);
+      else if (isBranchRestricted(access)) lateWhere.push(`e.branch_id::text = any(${lateAdd(access.branchScope)}::text[])`);
       if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
         const [year, month] = req.query.period.split('-').map(Number);
         lateWhere.push(`e.occurred_at >= ${lateAdd(`${req.query.period}-01T00:00:00.000Z`)}`);
@@ -250,7 +268,7 @@ module.exports = {
     const recipientId = text(req.body?.recipient_id || req.body?.recipientId);
     const comment = text(req.body?.comment);
     // Manual penalties are dated by creation day, not by a client-selected date.
-    const penaltyAt = parseDate(tashkentDate(new Date()));
+    const penaltyAt = parseDate(zonedDateString(new Date()));
     const amount = Number(req.body?.amount);
     if (!recipientId) return res.status(422).json({ error: 'recipient_id is required' });
     if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99) {
@@ -260,8 +278,8 @@ module.exports = {
 
     try {
       const recipient = await db.query(
-        'select id, name, branch_id from barbers where id = $1 and branch_id = $2 and coalesce(is_archived, false) = false',
-        [recipientId, branchId]
+        'select id, name, branch_id from barbers where id = $1 and branch_id = $2 and company_id = $3 and coalesce(is_archived, false) = false',
+        [recipientId, branchId, access.companyId]
       );
       if (!recipient.rows.length) return res.status(422).json({ error: 'Recipient is not an active employee of the selected branch' });
 
@@ -274,11 +292,11 @@ module.exports = {
       };
       const created = await db.query(
         `insert into warehouse_purchases
-         (branch_id, supplier_name, purchased_at, status, total_amount, metadata)
-         values ($1, 'Штраф', $2, 'received', $3, $4::jsonb) returning id`,
-        [branchId, penaltyAt, Math.round(amount * 100) / 100, JSON.stringify(metadata)]
+         (branch_id, supplier_name, purchased_at, status, total_amount, metadata, company_id)
+         values ($1, 'Штраф', $2, 'received', $3, $4::jsonb, $5) returning id`,
+        [branchId, penaltyAt, Math.round(amount * 100) / 100, JSON.stringify(metadata), access.companyId]
       );
-      const result = await queryById(created.rows[0].id);
+      const result = await queryById(created.rows[0].id, access.companyId);
       return res.status(201).json({ penalty: toItem(result.rows[0]) });
     } catch (error) { return sendDbError(res, error); }
   },
@@ -291,7 +309,7 @@ module.exports = {
       const existing = await db.query(
         `select id, branch_id, status, metadata
          from warehouse_purchases
-         where id = $1 and metadata->>'type' = $2`, [req.params.id, PENALTY_TYPE]
+         where id = $1 and metadata->>'type' = $2 and company_id = $3`, [req.params.id, PENALTY_TYPE, access.companyId]
       );
       if (!existing.rows.length) {
         let lateResult;
@@ -301,7 +319,7 @@ module.exports = {
              from barber_activity_events e
              left join branches b on b.id = e.branch_id
              left join barbers barber on barber.id = e.barber_id
-             where e.id = $1 and (e.is_late = true or e.penalty_amount > 0)`, [req.params.id]
+             where e.id = $1 and e.company_id = $2 and (e.is_late = true or e.penalty_amount > 0)`, [req.params.id, access.companyId]
           );
         } catch (error) {
           if (isMissingVerifixTable(error)) return res.status(404).json({ error: 'Penalty not found' });
@@ -309,7 +327,7 @@ module.exports = {
         }
         if (!lateResult.rows.length) return res.status(404).json({ error: 'Penalty not found' });
         const lateRow = lateResult.rows[0];
-        if (!isBranchAllowed(access.branchScope, lateRow.branch_id)) {
+        if (!canSeeRowBranch(access, lateRow.branch_id)) {
           return res.status(404).json({ error: 'Penalty not found' });
         }
         if (lateRow.metadata?.canceled === true) {
@@ -318,14 +336,14 @@ module.exports = {
         await db.query(
           `update barber_activity_events
            set metadata = coalesce(metadata, '{}'::jsonb) || $1::jsonb
-           where id = $2`,
-          [JSON.stringify({ canceled: true, canceled_at: new Date().toISOString(), canceled_by: access.userId }), req.params.id]
+           where id = $2 and company_id = $3`,
+          [JSON.stringify({ canceled: true, canceled_at: new Date().toISOString(), canceled_by: access.userId }), req.params.id, access.companyId]
         );
         const canceled = { ...lateRow, metadata: { ...(lateRow.metadata || {}), canceled: true }, penalty_source: 'late_minutes', total_amount: lateRow.penalty_amount, purchased_at: lateRow.occurred_at, status: 'cancelled' };
         return res.json({ penalty: toItem(canceled) });
       }
       const row = existing.rows[0];
-      if (!isBranchAllowed(access.branchScope, row.branch_id)) {
+      if (!canSeeRowBranch(access, row.branch_id)) {
         return res.status(404).json({ error: 'Penalty not found' });
       }
       if (row.status === 'cancelled' || row.metadata?.canceled === true) {
@@ -334,10 +352,10 @@ module.exports = {
       await db.query(
         `update warehouse_purchases
          set status = 'cancelled', metadata = metadata || $1::jsonb, updated_at = now()
-         where id = $2 and metadata->>'type' = $3`,
-        [JSON.stringify({ canceled: true, canceled_at: new Date().toISOString(), canceled_by: access.userId }), req.params.id, PENALTY_TYPE]
+         where id = $2 and metadata->>'type' = $3 and company_id = $4`,
+        [JSON.stringify({ canceled: true, canceled_at: new Date().toISOString(), canceled_by: access.userId }), req.params.id, PENALTY_TYPE, access.companyId]
       );
-      const result = await queryById(req.params.id);
+      const result = await queryById(req.params.id, access.companyId);
       return res.json({ penalty: toItem(result.rows[0]) });
     } catch (error) { return sendDbError(res, error); }
   },

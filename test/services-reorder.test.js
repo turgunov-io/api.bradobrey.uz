@@ -18,6 +18,7 @@ function setup(rowCount = 1, fail = false) {
   };
   const context = { module: { exports: {} }, require(name) {
     if (name.includes('postgres')) return { db: {}, pool: { connect: async () => client } };
+    if (name.includes('companyScope')) return require('../src/utils/companyScope');
     return {};
   }};
   vm.runInNewContext(fs.readFileSync('src/models/services.js', 'utf8'), context);
@@ -26,7 +27,7 @@ function setup(rowCount = 1, fail = false) {
 }
 test('saves order and category in one transaction', async () => {
   const { service, res, calls } = setup();
-  await service.reorder({ body: { items: [item] } }, res);
+  await service.reorder({ body: { items: [item] }, tenant: { companyId: 'company-1' } }, res);
   assert.equal(res.code, 200);
   assert.equal(calls[0].sql, 'BEGIN');
   assert.deepEqual(JSON.parse(calls[1].params[0]), [item]);
@@ -36,21 +37,21 @@ test('saves order and category in one transaction', async () => {
 test('rejects invalid and duplicate positions before accessing database', async () => {
   for (const items of [[], [item, item], [{ ...item, sort_order: -1 }], [{ ...item, sort_order: 0.5 }], [{ ...item, id: 'bad' }]]) {
     const { service, res, calls } = setup();
-    await service.reorder({ body: { items } }, res);
+    await service.reorder({ body: { items }, tenant: { companyId: 'company-1' } }, res);
     assert.equal(res.code, 400);
     assert.equal(calls.length, 0);
   }
 });
 test('rolls back the entire save when a service was deleted', async () => {
   const { service, res, calls } = setup(0);
-  await service.reorder({ body: { items: [item] } }, res);
+  await service.reorder({ body: { items: [item] }, tenant: { companyId: 'company-1' } }, res);
   assert.equal(res.code, 409);
   assert.equal(calls[2].sql, 'ROLLBACK');
   assert.equal(calls[3].sql, 'RELEASE');
 });
 test('rolls back and releases connection on a database error', async () => {
   const { service, res, calls } = setup(0, true);
-  await service.reorder({ body: { items: [item] } }, res);
+  await service.reorder({ body: { items: [item] }, tenant: { companyId: 'company-1' } }, res);
   assert.equal(res.code, 500);
   assert.equal(calls[2].sql, 'ROLLBACK');
   assert.equal(calls[3].sql, 'RELEASE');

@@ -13,6 +13,7 @@ const {
   isNetworkRole,
   resolveAllowedBranchIds,
   resolveStaffBranchScope,
+  isCompanyWideScope,
 } = require('../src/utils/adminAuth');
 const { NETWORK_ROLES } = require('../src/utils/employeeQualityAccess');
 
@@ -20,6 +21,8 @@ const SECRET = 'phase0-admin-secret';
 const USER_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const BRANCH_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const COMPANY_ID = 'cccccccc-0000-4000-8000-00000000000c';
+const ACTIVE_COMPANY = { company_id: COMPANY_ID, company_status: 'active' };
 
 function recorder() {
   return {
@@ -35,7 +38,7 @@ const bearer = (payload) => ({ headers: { authorization: `Bearer ${jwt.sign(payl
 test('authorizeAdmin takes the role from the database, not from the token', async () => {
   const authorize = createAdminAuth({
     secret: SECRET,
-    loadState: async () => ({ user: { id: USER_ID, role: 'barber', branch_id: BRANCH_A }, barber: null }),
+    loadState: async () => ({ user: { id: USER_ID, role: 'barber', branch_id: BRANCH_A, ...ACTIVE_COMPANY }, barber: null }),
   });
   const res = recorder();
   const result = await authorize(bearer({ sub: USER_ID, role: 'admin_network' }), res);
@@ -46,7 +49,7 @@ test('authorizeAdmin takes the role from the database, not from the token', asyn
 test('authorizeAdmin accepts a DB admin and returns the DB role', async () => {
   const authorize = createAdminAuth({
     secret: SECRET,
-    loadState: async () => ({ user: { id: USER_ID, role: 'admin', branch_id: null }, barber: null }),
+    loadState: async () => ({ user: { id: USER_ID, role: 'admin', branch_id: null, ...ACTIVE_COMPANY }, barber: null }),
   });
   const res = recorder();
   const result = await authorize(bearer({ sub: USER_ID, role: 'barber' }), res);
@@ -94,12 +97,21 @@ test('authorizeAdmin answers 500 when the database lookup fails', async () => {
   assert.equal(res.statusCode, 500);
 });
 
-test('network roles reuse the canonical list and are unrestricted', async () => {
+test('network roles reuse the canonical list and see every branch of their company only', async () => {
   for (const role of NETWORK_ROLES) {
     assert.equal(isNetworkRole(role), true);
-    assert.equal(await resolveAllowedBranchIds({ id: USER_ID, role }), null);
-    assert.equal(await resolveStaffBranchScope({ id: USER_ID, role }, BRANCH_A), null);
+    const calls = [];
+    const query = async (sql, params) => { calls.push({ sql, params }); return { rows: [{ id: BRANCH_A }, { id: BRANCH_B }] }; };
+    const scope = await resolveAllowedBranchIds({ id: USER_ID, role, company_id: COMPANY_ID }, { query });
+    assert.deepEqual([...scope], [BRANCH_A, BRANCH_B]);
+    assert.equal(isCompanyWideScope(scope), true);
+    assert.match(calls[0].sql, /from branches where company_id = \$1/);
+    assert.deepEqual(calls[0].params, [COMPANY_ID]);
+    assert.deepEqual([...await resolveStaffBranchScope({ id: USER_ID, role, company_id: COMPANY_ID }, BRANCH_A, { query })], [BRANCH_A, BRANCH_B]);
+    // No company (or no DB row for it): fail closed, never unrestricted.
+    assert.deepEqual(await resolveAllowedBranchIds({ id: USER_ID, role, company_id: null }, { query }), []);
   }
+  assert.deepEqual(await resolveAllowedBranchIds({ id: USER_ID, role: 'platform_owner', company_id: null }), []);
   for (const role of ['admin_branch', 'merchant', 'manager', 'barber']) assert.equal(isNetworkRole(role), false);
 });
 
@@ -158,7 +170,7 @@ test('branch scope middleware uses the DB actor from staffAccess', async () => {
 test('db actor middleware replaces the token role with the database role', async () => {
   const middleware = createDbActorMiddleware({
     secret: SECRET,
-    loadState: async () => ({ user: { id: USER_ID, role: 'admin_branch', branch_id: BRANCH_A }, barber: null }),
+    loadState: async () => ({ user: { id: USER_ID, role: 'admin_branch', branch_id: BRANCH_A, ...ACTIVE_COMPANY }, barber: null }),
     resolveScope: async () => [BRANCH_A],
   });
   const req = bearer({ sub: USER_ID, role: 'admin_network' });

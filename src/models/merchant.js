@@ -1,7 +1,8 @@
 const bcrypto = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { db, pool } = require('../config/postgres');
 const { toAbsolutePublicUrl } = require('../config/uploads');
+const { checkTenantAccess } = require('../utils/tenant');
 
 const ACTIVE_ORDER_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
@@ -100,15 +101,20 @@ const resolveBarbershopIdFromBranch = async (branchId) => {
   }
 };
 
-const resolveSingleBarbershopId = async () => {
+// MULTI_TENANCY B2 (owner decision D1: company = exactly one marketplace
+// barbershop, marketplace_barbershops.company_id unique). The fallback
+// barbershop is the one of the user's company, never "the only barbershop in
+// the database". Name kept for callers/tests.
+const resolveSingleBarbershopId = async (companyId) => {
+  const normalizedCompanyId = normalizeId(companyId);
+  if (!normalizedCompanyId) return null;
   try {
     const result = await db.query(
       `select id
        from marketplace_barbershops
-       where not (coalesce(metadata, '{}'::jsonb) ? 'legacy_branch_id')
-         and coalesce(metadata ->> 'fallback', 'false') <> 'true'
-       order by sort_order asc, name asc, id asc
-       limit 2`
+       where company_id = $1
+       limit 2`,
+      [normalizedCompanyId]
     );
 
     return result.rows.length === 1 ? normalizeId(result.rows[0]?.id) : null;
@@ -116,6 +122,16 @@ const resolveSingleBarbershopId = async () => {
     if (isMissingRelationError(error, 'marketplace_barbershops')) return null;
     throw error;
   }
+};
+
+// True when the barbershop belongs to the company (1:1, D1).
+const barbershopBelongsToCompany = async (barbershopId, companyId) => {
+  if (!barbershopId || !companyId) return false;
+  const result = await db.query(
+    'select 1 from marketplace_barbershops where id = $1 and company_id = $2 limit 1',
+    [barbershopId, companyId]
+  );
+  return Boolean(result.rows[0]);
 };
 
 const persistUserBarbershopId = async (userId, barbershopId) => {
@@ -136,13 +152,21 @@ const persistUserBarbershopId = async (userId, barbershopId) => {
   }
 };
 
+// Every candidate (assigned, home branch, company fallback) must belong to
+// the user's company; a mismatch is denied instead of silently falling back.
 const resolveMerchantBarbershopId = async (user) => {
+  const companyId = normalizeId(user?.company_id);
+  if (!companyId) return null;
+
   const assignedBarbershopId = normalizeId(user?.marketplace_barbershop_id);
-  if (assignedBarbershopId) return assignedBarbershopId;
+  if (assignedBarbershopId) {
+    return (await barbershopBelongsToCompany(assignedBarbershopId, companyId)) ? assignedBarbershopId : null;
+  }
 
   const branchBarbershopId = await resolveBarbershopIdFromBranch(user?.branch_id);
-  const resolvedBarbershopId = branchBarbershopId || await resolveSingleBarbershopId();
+  const resolvedBarbershopId = branchBarbershopId || await resolveSingleBarbershopId(companyId);
   if (!resolvedBarbershopId) return null;
+  if (!(await barbershopBelongsToCompany(resolvedBarbershopId, companyId))) return null;
 
   await persistUserBarbershopId(user.id, resolvedBarbershopId);
   user.marketplace_barbershop_id = resolvedBarbershopId;
@@ -158,7 +182,7 @@ const requireMerchantAccess = async (req, res) => {
 
   let payload;
   try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
+    payload = verifyAny(token);
   } catch (_err) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
@@ -173,9 +197,11 @@ const requireMerchantAccess = async (req, res) => {
   let user;
   try {
     const result = await db.query(
-      `select id, login, role, branch_id, marketplace_barbershop_id
-       from users
-       where id = $1
+      `select u.id, u.login, u.role, u.branch_id, u.marketplace_barbershop_id, u.company_id,
+              c.status as company_status
+       from users u
+       left join companies c on c.id = u.company_id
+       where u.id = $1
        limit 1`,
       [userId]
     );
@@ -187,9 +213,10 @@ const requireMerchantAccess = async (req, res) => {
     }
 
     const result = await db.query(
-      `select id, login, role, branch_id
-       from users
-       where id = $1
+      `select u.id, u.login, u.role, u.branch_id, u.company_id, c.status as company_status
+       from users u
+       left join companies c on c.id = u.company_id
+       where u.id = $1
        limit 1`,
       [userId]
     );
@@ -203,6 +230,11 @@ const requireMerchantAccess = async (req, res) => {
 
   if (!MERCHANT_ALLOWED_ROLES.has(user.role)) {
     res.status(403).json({ error: 'Merchant access is required' });
+    return null;
+  }
+  const tenantCheck = checkTenantAccess({ payload, user });
+  if (!tenantCheck.ok) {
+    res.status(tenantCheck.status).json(tenantCheck.body);
     return null;
   }
 
@@ -515,6 +547,8 @@ async function listOrders({ barbershopId, statuses, limit = 50, from = null, to 
        )
      ) as sid(service_id) on true
      left join services s on s.id = sid.service_id
+                         and s.company_id = q.company_id
+                         and (s.branch_id is null or s.branch_id = q.branch_id)
      where q.status = any($2)
        ${dateFilter}
      group by q.id, c.id, br.name
@@ -568,6 +602,8 @@ class Merchant {
                )
              ) as sid(service_id)
              left join services s on s.id = sid.service_id
+                                 and s.company_id = q.company_id
+                                 and (s.branch_id is null or s.branch_id = q.branch_id)
            ) service_totals on true
            where q.status = 'completed'
              and q.finished_at >= date_trunc('day', now())
@@ -663,8 +699,8 @@ class Merchant {
 
     try {
       const result = await db.query(
-        `insert into branches (name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `insert into branches (name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, company_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          returning id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes`,
         [
           payload.name,
@@ -676,6 +712,7 @@ class Merchant {
           access.barbershopId,
           payload.latitude ?? null,
           payload.longitude ?? null,
+          access.user.company_id,
         ]
       );
       return res.status(201).json({ item: branchItem(result.rows[0]) });
@@ -850,8 +887,8 @@ class Merchant {
     const payload = normalized.payload;
     try {
       const result = await db.query(
-        `insert into barbers (name, branch_id, phone, specialization, photo_url, is_active, is_authorized, is_on_shift)
-         values ($1, $2, $3, $4, $5, $6, true, false)
+        `insert into barbers (name, branch_id, phone, specialization, photo_url, is_active, is_authorized, is_on_shift, company_id)
+         values ($1, $2, $3, $4, $5, $6, true, false, $7)
          returning id, name, branch_id, phone, specialization, photo_url, is_active, created_at, updated_at`,
         [
           payload.name,
@@ -860,6 +897,7 @@ class Merchant {
           payload.specialization || null,
           payload.photo_url || null,
           payload.is_active,
+          access.user.company_id,
         ]
       );
       return res.status(201).json({ item: barberItem(result.rows[0]) });
@@ -1025,10 +1063,10 @@ class Merchant {
 
     try {
       const result = await db.query(
-        `insert into service_categories (name, sort_order, is_active, marketplace_barbershop_id)
-         values ($1, $2, $3, $4)
+        `insert into service_categories (name, sort_order, is_active, marketplace_barbershop_id, company_id)
+         values ($1, $2, $3, $4, $5)
          returning id, name, sort_order, is_active, created_at, updated_at`,
-        [payload.name, payload.sort_order, payload.is_active, access.barbershopId]
+        [payload.name, payload.sort_order, payload.is_active, access.barbershopId, access.user.company_id]
       );
       return res.status(201).json({ item: categoryItem(result.rows[0]) });
     } catch (error) {
@@ -1123,8 +1161,8 @@ class Merchant {
 
     try {
       const result = await db.query(
-        `insert into services (name, duration_minutes, base_price, category, image, is_active, marketplace_barbershop_id)
-         values ($1, $2, $3, $4, $5, $6, $7)
+        `insert into services (name, duration_minutes, base_price, category, image, is_active, marketplace_barbershop_id, company_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
          returning id, name, duration_minutes, base_price, category, image, is_active, created_at, updated_at`,
         [
           payload.name,
@@ -1134,6 +1172,7 @@ class Merchant {
           normalizeImageUrl(req, payload.image) || null,
           payload.is_active,
           access.barbershopId,
+          access.user.company_id,
         ]
       );
       return res.status(201).json({ item: serviceItem(result.rows[0], req) });
@@ -1187,9 +1226,9 @@ class Merchant {
     try {
       const result = await db.query(
         `delete from services
-         where id = $1
+         where id = $1 and marketplace_barbershop_id = $2
          returning id`,
-        [id]
+        [id, access.barbershopId]
       );
       if (!result.rows[0]) return res.status(404).json({ error: 'Service not found' });
       return res.json({ deleted: true, id: result.rows[0].id });
@@ -1198,9 +1237,9 @@ class Merchant {
         const result = await db.query(
           `update services
            set is_active = false, updated_at = now()
-           where id = $1
+           where id = $1 and marketplace_barbershop_id = $2
            returning id`,
-          [id]
+          [id, access.barbershopId]
         );
         if (!result.rows[0]) return res.status(404).json({ error: 'Service not found' });
         return res.json({ deleted: true, id: result.rows[0].id, soft_deleted: true });
@@ -1211,3 +1250,4 @@ class Merchant {
 }
 
 module.exports = new Merchant();
+module.exports._private = { resolveMerchantBarbershopId, resolveSingleBarbershopId };

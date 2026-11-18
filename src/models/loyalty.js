@@ -1,6 +1,15 @@
 const { db } = require('../config/postgres');
 const { DEFAULT_LOYALTY_LEVELS, validateLoyaltyLevels } = require('../utils/loyaltyLevels');
 const { createAdminAuth, createNetworkWriteAuth } = require('../utils/adminAuth');
+const { resolveRequestCompanyId } = require('../utils/companyScope');
+
+// Company scope (MULTI_TENANCY B2a): loyalty levels (platform_settings
+// 'loyalty_levels') and client_rank_settings are one row per company. Staff
+// read/write their own company (auth.companyId from the DB); the public
+// endpoint resolves the company from the token, ?branch_id or legacy
+// single-company mode.
+const companyOf = (auth) => auth?.companyId || auth?.company_id || null;
+const COMPANY_REQUIRED = { code: 'COMPANY_REQUIRED', error: 'Company context is required' };
 
 // Role and archived status come from the database (MULTI_TENANCY 0.10).
 // Any admin may read; loyalty levels are network-wide, so only network roles
@@ -24,8 +33,10 @@ const listLevels = (value) => Object.entries(value || {})
   .sort((a, b) => a.min_points - b.min_points);
 
 class Loyalty {
-  async readLevels() {
-    const { data, error } = await db.from('platform_settings').select('value, updated_at').eq('key', 'loyalty_levels').maybeSingle();
+  async readLevels(companyId) {
+    if (!companyId) throw new Error('company is required');
+    const { data, error } = await db.from('platform_settings').select('value, updated_at')
+      .eq('company_id', companyId).eq('key', 'loyalty_levels').maybeSingle();
     if (error) throw new Error(error.message);
     return {
       value: data?.value && Object.keys(data.value).length ? data.value : DEFAULT_LOYALTY_LEVELS,
@@ -33,9 +44,13 @@ class Loyalty {
     };
   }
 
-  async getPublicRankSettings(_req, res) {
+  async getPublicRankSettings(req, res) {
     try {
-      const levels = await this.readLevels();
+      const branchId = typeof req?.query?.branch_id === 'string' ? req.query.branch_id.trim() : '';
+      if (branchId && !/^[0-9a-f-]{36}$/i.test(branchId)) return res.status(400).json({ error: 'branch_id is invalid' });
+      const companyId = await resolveRequestCompanyId(req, { branchId });
+      if (!companyId) return res.status(400).json({ code: 'BRANCH_REQUIRED', error: 'branch_id is required' });
+      const levels = await this.readLevels(companyId);
       return res.json({ levels: listLevels(levels.value), updated_at: levels.updated_at });
     } catch (error) {
       return res.status(500).json({ error: error.message || 'Failed to read loyalty settings' });
@@ -43,13 +58,16 @@ class Loyalty {
   }
 
   async getRankSettings(req, res) {
-    if (!(await authorizeLoyaltyReader(req, res))) return;
+    const auth = await authorizeLoyaltyReader(req, res);
+    if (!auth) return;
+    const companyId = companyOf(auth);
+    if (!companyId) return res.status(403).json(COMPANY_REQUIRED);
     try {
       const [levels, legacy] = await Promise.all([
-        this.readLevels(),
+        this.readLevels(companyId),
         db.from('client_rank_settings')
           .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
-          .eq('id', 1).maybeSingle(),
+          .eq('company_id', companyId).maybeSingle(),
       ]);
       if (legacy.error) throw new Error(legacy.error.message);
       return res.json({
@@ -69,11 +87,13 @@ class Loyalty {
   async updateRankSettings(req, res) {
     const auth = await authorizeLoyaltyWriter(req, res);
     if (!auth) return;
+    const companyId = companyOf(auth);
+    if (!companyId) return res.status(403).json(COMPANY_REQUIRED);
     const body = req.body || {};
 
     // Keep accepting the original visit-based payload for older dashboard builds.
     if (body.levels === undefined && body.loyalty_levels === undefined) {
-      return this.updateLegacyRankSettings(body, res);
+      return this.updateLegacyRankSettings(body, res, companyId);
     }
 
     const candidate = body.levels ?? body.loyalty_levels;
@@ -89,15 +109,16 @@ class Loyalty {
     if (validation.error) return res.status(400).json({ error: validation.error });
 
     try {
-      const before = await this.readLevels();
+      const before = await this.readLevels(companyId);
       const { data, error } = await db.from('platform_settings')
         .upsert({
+          company_id: companyId,
           key: 'loyalty_levels',
           value: validation.value,
           description: 'Marketplace status point levels',
           updated_at: new Date().toISOString(),
-        }, { onConflict: 'key' })
-        .select('value, updated_at').eq('key', 'loyalty_levels').maybeSingle();
+        }, { onConflict: 'company_id,key' })
+        .select('value, updated_at').eq('company_id', companyId).eq('key', 'loyalty_levels').maybeSingle();
       if (error) throw new Error(error.message);
       const settings = data?.value || validation.value;
 
@@ -106,7 +127,7 @@ class Loyalty {
         await db.query(
           `insert into marketplace_audit_logs (action, entity_type, metadata)
            values ('LOYALTY_LEVELS_UPDATED', 'platform_setting', $1::jsonb)`,
-          [JSON.stringify({ admin_id: auth.sub || auth.id || null, admin_role: auth.role, before: before.value, after: settings })],
+          [JSON.stringify({ admin_id: auth.sub || auth.id || null, admin_role: auth.role, company_id: companyId, before: before.value, after: settings })],
         );
       } catch (auditError) {
         console.error('Failed to record loyalty settings audit event:', auditError.message);
@@ -117,7 +138,8 @@ class Loyalty {
     }
   }
 
-  async updateLegacyRankSettings(body, res) {
+  async updateLegacyRankSettings(body, res, companyId) {
+    if (!companyId) return res.status(403).json(COMPANY_REQUIRED);
     const { bronze_min_visits, silver_min_visits, gold_min_visits } = body;
     const supplied = { bronze_min_visits, silver_min_visits, gold_min_visits };
     const next = {};
@@ -131,7 +153,7 @@ class Loyalty {
     }
     if (!Object.keys(next).length) return res.status(400).json({ error: 'No fields to update' });
     const { data: current, error: readError } = await db.from('client_rank_settings')
-      .select('bronze_min_visits, silver_min_visits, gold_min_visits').eq('id', 1).maybeSingle();
+      .select('bronze_min_visits, silver_min_visits, gold_min_visits').eq('company_id', companyId).maybeSingle();
     if (readError) return res.status(500).json({ error: readError.message });
     const effective = { ...LEGACY_RANK_DEFAULTS, ...(current || {}), ...next };
     if (!(effective.silver_min_visits > effective.bronze_min_visits)) {
@@ -140,8 +162,11 @@ class Loyalty {
     if (!(effective.gold_min_visits > effective.silver_min_visits)) {
       return res.status(400).json({ error: 'gold_min_visits must be > silver_min_visits' });
     }
-    const { data, error } = await db.from('client_rank_settings').upsert({ id: 1, ...next }, { onConflict: 'id' })
-      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at').eq('id', 1).maybeSingle();
+    // One row per company (unique company_id, migration 003); id comes from
+    // the sequence for new companies, Bradobrey keeps id = 1.
+    const { data, error } = await db.from('client_rank_settings')
+      .upsert({ company_id: companyId, ...next }, { onConflict: 'company_id' })
+      .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at').eq('company_id', companyId).maybeSingle();
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ settings: data });
   }

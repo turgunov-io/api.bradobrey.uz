@@ -21,9 +21,10 @@ alter table warehouse_positions
   add column if not exists created_at timestamptz not null default now(),
   add column if not exists updated_at timestamptz not null default now();
 
-create unique index if not exists idx_warehouse_positions_sku
-  on warehouse_positions (sku)
-  where sku is not null;
+-- SKU is unique per company (MULTI_TENANCY): warehouse_positions_company_sku_uidx
+-- (company_id, sku) is created by db/migrations/003_tenant_composite_uniques.sql.
+-- The former global idx_warehouse_positions_sku is no longer (re)created here;
+-- db/migrations/007_drop_global_uniques.sql drops it.
 
 create index if not exists idx_warehouse_positions_active
   on warehouse_positions (is_active, name);
@@ -167,8 +168,10 @@ alter table warehouse_categories
   add column if not exists created_at timestamptz not null default now(),
   add column if not exists updated_at timestamptz not null default now();
 
-create unique index if not exists idx_warehouse_categories_name
-  on warehouse_categories (lower(name));
+-- Category names are unique per company: warehouse_categories_company_name_uidx
+-- (company_id, lower(name)) comes from db/migrations/003_tenant_composite_uniques.sql
+-- (006 guarantees it if the table appeared after 003). The global
+-- idx_warehouse_categories_name is dropped by 007_drop_global_uniques.
 
 create index if not exists idx_warehouse_categories_active
   on warehouse_categories (is_active, sort_order, name);

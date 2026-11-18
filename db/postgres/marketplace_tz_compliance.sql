@@ -408,7 +408,13 @@ alter table otp_codes add column if not exists device_id text;
 alter table otp_codes alter column email drop not null;
 create index if not exists otp_codes_phone_idx on otp_codes (phone);
 
-insert into platform_settings (key, value, description)
+-- Default settings of the DEFAULT company, company_id set explicitly
+-- (MULTI_TENANCY, see client_ranks.sql); existing rows are never overwritten.
+-- Other companies have no rows until their admin saves settings: callers then
+-- use built-in defaults (tenant_setting returns NULL), never these rows.
+drop table if exists pg_temp.mt_seed_platform_settings;
+create temporary table mt_seed_platform_settings (key text, value jsonb, description text);
+insert into mt_seed_platform_settings (key, value, description)
 values
   ('booking_limits', '{"max_persons":4,"max_services_per_person":3,"max_duration_minutes":180,"max_daily_bookings":5}'::jsonb, 'Marketplace booking limits'),
   ('anti_fraud', '{"cancel_cooldown_minutes":15,"cancel_block_threshold":3,"no_show_block_threshold":5,"block_hours":24}'::jsonb, 'Marketplace anti-fraud settings'),
@@ -417,8 +423,26 @@ values
   ('cashback_policy', '{"max_redeem_share":1}'::jsonb, 'Maximum share of payable service total redeemable from cashback'),
   ('cashback', '{"default_percent":1,"promotion_percent":null,"promotion_start_date":null,"promotion_end_date":null,"timezone":"Asia/Tashkent"}'::jsonb, 'Marketplace cashback percentage and temporary promotion'),
   ('referral', '{"expiry_days":365,"bonus_percent":1,"daily_limit":10}'::jsonb, 'Marketplace referral settings')
-  ,('no_show_restrictions', '{"enabled":true,"automatic":true,"first_violation_minutes":1440,"second_violation_minutes":4320,"third_plus_violation_minutes":10080,"lookback_days":365}'::jsonb, 'Temporary marketplace booking restrictions after confirmed no-shows')
-on conflict (key) do nothing;
+  ,('no_show_restrictions', '{"enabled":true,"automatic":true,"first_violation_minutes":1440,"second_violation_minutes":4320,"third_plus_violation_minutes":10080,"lookback_days":365}'::jsonb, 'Temporary marketplace booking restrictions after confirmed no-shows');
+
+do $$
+begin
+  if to_regclass('public.companies') is not null
+     and exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'platform_settings' and column_name = 'company_id') then
+    insert into platform_settings (company_id, key, value, description)
+    select c.id, seed.key, seed.value, seed.description
+      from mt_seed_platform_settings seed
+      cross join companies c
+     where c.is_default
+       and not exists (select 1 from platform_settings s where s.company_id = c.id and s.key = seed.key);
+  else
+    insert into platform_settings (key, value, description)
+    select seed.key, seed.value, seed.description from mt_seed_platform_settings seed
+    on conflict do nothing;
+  end if;
+end $$;
+drop table if exists pg_temp.mt_seed_platform_settings;
 
 create table if not exists marketplace_no_show_violations (
   id uuid default gen_random_uuid() primary key,
@@ -457,18 +481,64 @@ create table if not exists marketplace_review_alerts (
   resolved_at timestamptz
 );
 
-create or replace function marketplace_loyalty_level(points integer)
-returns text
-language sql
+-- Company-aware (MULTI_TENANCY B2a); keep identical to
+-- db/migrations/005_company_scoped_functions.sql (test/companySqlFunctions.test.js).
+create or replace function tenant_setting(p_key text, p_company_id uuid)
+returns jsonb
+language plpgsql
 stable
 as $$
-  select coalesce((
+declare
+  setting_value jsonb;
+begin
+  if p_company_id is not null then
+    select ps.value into setting_value
+      from platform_settings ps
+     where ps.company_id = p_company_id
+       and ps.key = p_key;
+    return setting_value;
+  end if;
+  -- No company (legacy callers, fresh schema before the tenant migrations):
+  -- the default company's row.
+  if to_regclass('public.companies') is null then
+    select ps.value into setting_value from platform_settings ps where ps.key = p_key limit 1;
+    return setting_value;
+  end if;
+  select ps.value into setting_value
+    from platform_settings ps
+    join companies c on c.id = ps.company_id and c.is_default
+   where ps.key = p_key
+   limit 1;
+  return setting_value;
+end;
+$$;
+
+create or replace function marketplace_loyalty_level(points integer, p_company_id uuid)
+returns text
+language plpgsql
+stable
+as $$
+begin
+  return coalesce((
     select level_name
-      from jsonb_each(coalesce((select value from platform_settings where key = 'loyalty_levels'), '{}'::jsonb)) as levels(level_name, config)
+      from jsonb_each(coalesce(tenant_setting('loyalty_levels', p_company_id), '{}'::jsonb)) as levels(level_name, config)
      where coalesce((config ->> 'min_points')::integer, 0) <= coalesce(points, 0)
      order by coalesce((config ->> 'min_points')::integer, 0) desc
      limit 1
   ), 'NONE');
+end;
+$$;
+
+create or replace function marketplace_loyalty_level(points integer)
+returns text
+language plpgsql
+stable
+as $$
+begin
+  -- Marketplace clients are global until Phase 5: without a company the
+  -- default company's levels apply.
+  return marketplace_loyalty_level(points, null::uuid);
+end;
 $$;
 
 -- The cashback ledger is shared with kiosk and must be available before
@@ -644,37 +714,47 @@ as $$
 declare
   marketplace_id uuid;
   points_config jsonb;
+  anti_fraud_config jsonb;
+  level_config jsonb;
   points_amount integer;
   positive_today integer;
   no_show_count integer;
   block_threshold integer;
+  block_hours integer;
   old_level text;
   new_level text;
+  earned_points integer;
 begin
-  if coalesce(new.source, '') <> 'site' or (tg_op = 'UPDATE' and old.status = new.status) then
-    return new;
-  end if;
+  if coalesce(new.source, '') <> 'site' then return new; end if;
+  if tg_op = 'UPDATE' and old.status = new.status then return new; end if;
 
-  select mc.id into marketplace_id
-    from marketplace_clients mc
-    join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
-                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
-                    and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
-   where c.id = new.client_id limit 1;
+  if tg_op = 'UPDATE' and old.status = 'completed'
+     and new.status in ('cancelled', 'rejected', 'no_show', 'not_in_time') then
+    select marketplace_client_id into marketplace_id
+      from status_point_transactions
+     where queue_entry_id = new.id and kind = 'EARN';
+  end if;
+  if marketplace_id is null then
+    -- new.client_id is a client of new.company_id; map it to the (global)
+    -- marketplace account by phone.
+    select mc.id into marketplace_id
+      from marketplace_clients mc
+      join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
+                        regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
+                      and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
+     where c.id = new.client_id limit 1;
+  end if;
   if marketplace_id is null then return new; end if;
 
-  -- Serialize status-point updates per marketplace client.  Without this
-  -- lock, two concurrent completions could both observe the same daily
-  -- positive-point total and exceed the configured cap.
   perform 1 from marketplace_clients where id = marketplace_id for update;
+  -- Rules of the company that served the order.
+  points_config := coalesce(tenant_setting('status_points', new.company_id), '{}'::jsonb);
+  anti_fraud_config := coalesce(tenant_setting('anti_fraud', new.company_id), '{}'::jsonb);
 
-  points_config := coalesce((select value from platform_settings where key = 'status_points'), '{}'::jsonb);
   if new.status = 'completed' then
-    select marketplace_loyalty_level(status_points) into old_level
+    select marketplace_loyalty_level(status_points, new.company_id) into old_level
       from marketplace_clients where id = marketplace_id;
     points_amount := greatest(0, coalesce((points_config ->> 'completed_service_points')::integer, 10));
-    -- A successfully completed service breaks the no-show streak even when
-    -- the daily positive-points cap has already been reached.
     update marketplace_clients set no_show_streak = 0 where id = marketplace_id;
     positive_today := coalesce((select sum(amount) from status_point_transactions
       where marketplace_client_id = marketplace_id and amount > 0
@@ -685,7 +765,7 @@ begin
       on conflict (queue_entry_id, kind) where queue_entry_id is not null do nothing;
       if found then
         update marketplace_clients set status_points = status_points + points_amount, no_show_streak = 0 where id = marketplace_id;
-        select marketplace_loyalty_level(status_points) into new_level
+        select marketplace_loyalty_level(status_points, new.company_id) into new_level
           from marketplace_clients where id = marketplace_id;
         if old_level is distinct from new_level then
           insert into marketplace_notifications (marketplace_client_id, type, payload)
@@ -693,10 +773,40 @@ begin
         end if;
       end if;
     end if;
-  elsif new.status = 'no_show' then
-    select marketplace_loyalty_level(status_points) into old_level
+  elsif tg_op = 'UPDATE' and old.status = 'completed' and new.status in ('cancelled', 'rejected', 'no_show', 'not_in_time') then
+    select amount into earned_points from status_point_transactions
+     where queue_entry_id = new.id and kind = 'EARN'
+       and marketplace_client_id = marketplace_id;
+    if earned_points > 0 then
+      select marketplace_loyalty_level(status_points, new.company_id) into old_level
+        from marketplace_clients where id = marketplace_id;
+      insert into status_point_transactions (marketplace_client_id, queue_entry_id, kind, amount, reason, metadata)
+      values (marketplace_id, new.id, 'REVERSAL', -earned_points, 'COMPLETED_SERVICE_CANCELLED',
+              jsonb_build_object('reverses', 'EARN', 'previous_status', old.status, 'new_status', new.status))
+      on conflict (queue_entry_id, kind) where queue_entry_id is not null do nothing;
+      if found then
+        update marketplace_clients set status_points = greatest(0, status_points - earned_points)
+         where id = marketplace_id;
+        select marketplace_loyalty_level(status_points, new.company_id) into new_level
+          from marketplace_clients where id = marketplace_id;
+        if old_level is distinct from new_level then
+          insert into marketplace_notifications (marketplace_client_id, type, payload)
+          values (marketplace_id, 'LEVEL_CHANGED', jsonb_build_object(
+            'old_level', old_level, 'new_level', new_level, 'reason', 'COMPLETED_SERVICE_CANCELLED'));
+        end if;
+      end if;
+    end if;
+  end if;
+
+  -- A completed order later corrected to no-show gets both its earned points
+  -- reversed and the rank-specific no-show deduction.
+  if new.status = 'no_show' then
+    select marketplace_loyalty_level(status_points, new.company_id) into old_level
       from marketplace_clients where id = marketplace_id for update;
-    points_amount := least(-1, coalesce((points_config ->> 'no_show_penalty')::integer, -20));
+    level_config := coalesce(tenant_setting('loyalty_levels', new.company_id), '{}'::jsonb) -> old_level;
+    points_amount := -greatest(0, coalesce(
+      (level_config ->> 'no_show_penalty_points')::integer,
+      abs((points_config ->> 'no_show_penalty')::integer), 30));
     insert into status_point_transactions (marketplace_client_id, queue_entry_id, kind, amount, reason)
     values (marketplace_id, new.id, 'PENALTY', points_amount, 'NO_SHOW')
     on conflict (queue_entry_id, kind) where queue_entry_id is not null do nothing;
@@ -705,24 +815,22 @@ begin
         status_points = greatest(0, status_points + points_amount),
         no_show_streak = no_show_streak + 1
       where id = marketplace_id;
-      select marketplace_loyalty_level(status_points) into new_level
+      select marketplace_loyalty_level(status_points, new.company_id) into new_level
         from marketplace_clients where id = marketplace_id;
       if old_level is distinct from new_level then
         insert into marketplace_notifications (marketplace_client_id, type, payload)
-        values (marketplace_id, 'LEVEL_CHANGED', jsonb_build_object(
-          'old_level', old_level,
-          'new_level', new_level,
-          'reason', 'NO_SHOW'));
+        values (marketplace_id, 'LEVEL_CHANGED', jsonb_build_object('old_level', old_level, 'new_level', new_level, 'reason', 'NO_SHOW'));
       end if;
       select no_show_streak into no_show_count from marketplace_clients where id = marketplace_id;
-      block_threshold := coalesce((select (value ->> 'no_show_block_threshold')::integer from platform_settings where key = 'anti_fraud'), 5);
+      block_threshold := coalesce((anti_fraud_config ->> 'no_show_block_threshold')::integer, 5);
+      block_hours := coalesce((anti_fraud_config ->> 'block_hours')::integer, 24);
       if no_show_count >= block_threshold then
         update marketplace_clients
-           set blocked_until = now() + make_interval(hours => coalesce((select (value ->> 'block_hours')::integer from platform_settings where key = 'anti_fraud'), 24))
+           set blocked_until = now() + make_interval(hours => block_hours)
          where id = marketplace_id;
         insert into marketplace_notifications (marketplace_client_id, type, payload)
         values (marketplace_id, 'ACCOUNT_BLOCKED', jsonb_build_object(
-          'blocked_until', now() + make_interval(hours => coalesce((select (value ->> 'block_hours')::integer from platform_settings where key = 'anti_fraud'), 24)),
+          'blocked_until', now() + make_interval(hours => block_hours),
           'reason', 'NO_SHOW_LIMIT'));
       end if;
     end if;
@@ -740,112 +848,10 @@ create or replace function apply_marketplace_referral_bonus_from_queue()
 returns trigger
 language plpgsql
 as $$
-declare
-  referred_marketplace_id uuid;
-  referral_row record;
-  paid_money numeric(12,2);
-  bonus_percent numeric;
-  bonus_amount numeric(12,2);
-  referral_transaction_id uuid;
-  referrer_phone text;
-  referrer_name text;
-  cashback_client_id uuid;
 begin
-  if coalesce(new.source, '') <> 'site' or new.status <> 'completed' or (tg_op = 'UPDATE' and old.status = new.status) then
-    return new;
-  end if;
-
-  select mc.id into referred_marketplace_id
-    from marketplace_clients mc
-    join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
-                      regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g')
-                    and regexp_replace(coalesce(mc.phone, ''), '[^0-9]', '', 'g') <> ''
-   where c.id = new.client_id limit 1;
-  if referred_marketplace_id is null then return new; end if;
-
-  select r.id, r.referrer_client_id, r.expires_at, b.id as booking_id
-    into referral_row
-    from referrals r
-    join marketplace_bookings b on b.marketplace_client_id = r.referred_client_id
-    join marketplace_booking_persons bp on bp.booking_id = b.id and bp.queue_entry_id = new.id
-   where r.referred_client_id = referred_marketplace_id
-     and r.expires_at > now()
-     and b.status = 'COMPLETED'
-   order by b.created_at desc limit 1;
-  if referral_row.id is null then return new; end if;
-
-  select round((
-      coalesce(sum(pay.amount) filter (where pay.method in ('payme', 'click', 'cash', 'card')), 0)
-      + coalesce(sum(case when pay.id is null and q.payment_method in ('payme', 'click', 'cash', 'card') then
-          coalesce(q.price_override,
-            (select sum(s.base_price) from services s where s.id = any(q.service_ids)),
-            (select s.base_price from services s where s.id = q.service_id), 0)
-        else 0 end), 0)
-    )::numeric, 2) into paid_money
-    from marketplace_booking_persons bp
-    join queue_entries q on q.id = bp.queue_entry_id
-    left join payments pay on pay.queue_entry_id = bp.queue_entry_id
-   where bp.booking_id = referral_row.booking_id;
-  if paid_money <= 0 then return new; end if;
-  bonus_percent := coalesce((select (value ->> 'bonus_percent')::numeric from platform_settings where key = 'referral'), 1);
-  bonus_amount := round(paid_money * bonus_percent / 100, 2);
-  if bonus_amount <= 0 then return new; end if;
-
-  insert into referral_transactions (referral_id, booking_id, amount, paid_with_money)
-  values (referral_row.id, referral_row.booking_id, bonus_amount, paid_money)
-  on conflict (referral_id, booking_id) do nothing
-  returning id into referral_transaction_id;
-  if found then
-    select phone, coalesce(nullif(display_name, ''), 'Client')
-      into referrer_phone, referrer_name
-      from marketplace_clients
-     where id = referral_row.referrer_client_id;
-
-    if referrer_phone is not null and referrer_phone <> '' then
-      select id into cashback_client_id
-        from clients
-       where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
-             regexp_replace(referrer_phone, '[^0-9]', '', 'g')
-       order by (phone = referrer_phone) desc, id
-       limit 1;
-      if cashback_client_id is null then
-        insert into clients (name, phone)
-        values (referrer_name, referrer_phone)
-        on conflict (phone) do update
-          set name = coalesce(nullif(clients.name, ''), excluded.name)
-        returning id into cashback_client_id;
-      end if;
-
-      insert into cashback_wallets (client_id, balance)
-      values (cashback_client_id, 0)
-      on conflict (client_id) do nothing;
-
-      insert into cashback_transactions
-        (client_id, kind, amount, meta, request_id)
-      values (
-        cashback_client_id,
-        'adjust',
-        bonus_amount,
-        jsonb_build_object(
-          'source', 'referral_bonus',
-          'booking_id', referral_row.booking_id,
-          'referral_transaction_id', referral_transaction_id,
-          'description', 'Referral bonus'
-        ),
-        'referral_bonus:' || referral_transaction_id::text
-      )
-      on conflict (request_id) where request_id is not null do nothing;
-
-      if found then
-        update cashback_wallets
-           set balance = round((balance + bonus_amount)::numeric, 2), updated_at = now()
-         where client_id = cashback_client_id;
-      end if;
-    end if;
-
-    insert into marketplace_notifications (marketplace_client_id, type, payload)
-    values (referral_row.referrer_client_id, 'REFERRAL_BONUS', jsonb_build_object('amount', bonus_amount, 'booking_id', referral_row.booking_id));
-  end if;
+  -- Superseded by apply_referral_bonus_from_completed_queue() and
+  -- services/referralBonus.js; its trigger is no longer created. Kept as a
+  -- no-op so a stray trigger cannot write cross-company wallet rows.
   return new;
 end;
 $$;
@@ -877,13 +883,14 @@ declare
 begin
   if new.status <> 'completed'
      or (tg_op = 'UPDATE' and old.status = new.status)
-     or new.client_id is null then
+     or new.client_id is null
+     or new.company_id is null then
     return new;
   end if;
 
-  -- Resolve the marketplace account from the shared legacy client identity.
-  -- Do not require marketplace_bookings: queue entries from any branch/source
-  -- are eligible while the referral is active.
+  -- new.client_id is the client of new.company_id that was served. Only a
+  -- referral of the same company is settled (marketplace accounts stay global
+  -- until Phase 5; the company is never guessed from the phone).
   select r.id,
          r.referrer_client_id,
          r.expires_at,
@@ -905,6 +912,7 @@ begin
     ) linked_booking on true
    where r.referred_client_id = referred_mc.id
      and referred_c.id = new.client_id
+     and r.company_id = new.company_id
      and r.expires_at > now()
    order by r.created_at asc
    limit 1;
@@ -926,11 +934,7 @@ begin
     return new;
   end if;
 
-  select coalesce((value ->> 'bonus_percent')::numeric, 1)
-    into bonus_percent
-    from platform_settings
-   where key = 'referral';
-  bonus_percent := coalesce(bonus_percent, 1);
+  bonus_percent := coalesce((tenant_setting('referral', new.company_id) ->> 'bonus_percent')::numeric, 1);
   bonus_amount := floor(paid_money * bonus_percent / 100);
   if bonus_amount <= 0 then
     return new;
@@ -960,17 +964,20 @@ begin
     return new;
   end if;
 
+  -- The referrer's wallet client in the SAME company (same phone in another
+  -- company is another client, D3).
   select id into cashback_client_id
     from clients
-   where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
+   where company_id = new.company_id
+     and regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') =
          regexp_replace(referrer_phone, '[^0-9]', '', 'g')
    order by (phone = referrer_phone) desc, id
    limit 1;
 
   if cashback_client_id is null then
-    insert into clients (name, phone)
-    values (referrer_name, referrer_phone)
-    on conflict (phone) do update
+    insert into clients (company_id, name, phone)
+    values (new.company_id, referrer_name, referrer_phone)
+    on conflict (company_id, phone) do update
       set name = coalesce(nullif(clients.name, ''), excluded.name)
     returning id into cashback_client_id;
   end if;

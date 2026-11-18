@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { pool } = require('../config/postgres');
 const notificationModel = require('./notifications');
 const { _private: notificationHelpers } = notificationModel;
@@ -16,6 +16,10 @@ function sanitizeReason(value) {
   return reason || null;
 }
 
+// MULTI_TENANCY B2: the target must be an employee of the branch's company
+// (users.company_id), in addition to working in the branch right now.
+const SAME_COMPANY_AS_BRANCH = 'u.company_id = (select br.company_id from branches br where br.id = $2)';
+
 async function targetBarberIsEligible(client, targetId, branchId) {
   const relation = await client.query("select to_regclass('public.employee_active_branches') as relation");
   const hasActiveBranchPresence = Boolean(relation.rows[0]?.relation);
@@ -30,6 +34,7 @@ async function targetBarberIsEligible(client, targetId, branchId) {
         and eab.session_id is not null
         and eab.session_expires_at > now()
         and u.role in ('barber', 'super-barber', 'manager', 'super-manager')
+        and ${SAME_COMPANY_AS_BRANCH}
         and b.is_active is true and b.is_archived is false`, [targetId, branchId]);
     return Boolean(result.rows[0]);
   }
@@ -42,7 +47,8 @@ async function targetBarberIsEligible(client, targetId, branchId) {
     join users u on u.id = b.id
     where b.id=$1 and b.branch_id=$2
       and b.is_active is true and b.is_archived is false and b.is_on_shift is true
-      and u.role in ('barber', 'super-barber', 'manager', 'super-manager')`, [targetId, branchId]);
+      and u.role in ('barber', 'super-barber', 'manager', 'super-manager')
+      and ${SAME_COMPANY_AS_BRANCH}`, [targetId, branchId]);
   return Boolean(result.rows[0]);
 }
 
@@ -50,7 +56,7 @@ function identity(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = verifyAny(token);
     const id = payload.sub || payload.id;
     if (!BARBER_ROLES.has(payload.role) || !id) { res.status(403).json({ error: 'Only barbers and managers can transfer orders' }); return null; }
     const branchId = payload.branchId || payload.branch_id || null;

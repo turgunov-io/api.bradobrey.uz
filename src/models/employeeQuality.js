@@ -9,6 +9,7 @@ const {
 const {
   authenticateStatistics,
   canReviewQuality,
+  requireAccessCompanyId,
 } = require('../utils/employeeQualityAccess');
 
 const TIMEZONE = 'Asia/Tashkent';
@@ -39,10 +40,11 @@ function appendParam(params, value) {
 function scopePredicate(alias, access, params, { branchExpression = null, employeeExpression = null } = {}) {
   const branch = branchExpression || `${alias}.branch_id`;
   const employee = employeeExpression || `${alias}.barber_id`;
-  const filters = [];
+  // MULTI_TENANCY B2: every scope is company-bound ("global" = whole company).
+  const filters = [`${alias}.company_id = ${appendParam(params, requireAccessCompanyId(access))}::uuid`];
   if (access.scope.type === 'branch') filters.push(`${branch} = ${appendParam(params, access.scope.branchId)}::uuid`);
   if (access.scope.employeeId) filters.push(`${employee} = ${appendParam(params, access.scope.employeeId)}::uuid`);
-  return filters.length ? filters.join(' and ') : 'true';
+  return filters.join(' and ');
 }
 
 function parsePagination(query = {}, { defaultLimit = null } = {}) {
@@ -71,7 +73,7 @@ function reviewReplayMatches(replay, { employeeId, reviewState, reviewComment, e
 async function loadEmployeeRows(access) {
   const branchId = access.scope.type === 'branch' ? access.scope.branchId : null;
   const employeeId = access.scope.employeeId || null;
-  const params = [access.range.startInclusive, access.range.endExclusive, branchId, employeeId];
+  const params = [access.range.startInclusive, access.range.endExclusive, branchId, employeeId, requireAccessCompanyId(access)];
 
   const result = await pool.query(
     `select
@@ -124,6 +126,7 @@ async function loadEmployeeRows(access) {
       and a.rule_version = '${FORMULA_VERSION}'
       and a.employee_role in ('barber', 'super-barber')
       and ($3::uuid is null or a.branch_id = $3::uuid)
+      and a.company_id = $5::uuid
      left join queue_entries q on q.id = a.queue_entry_id
      left join lateral (
        select coalesce(sum(p.amount), 0)::numeric as total_amount
@@ -132,6 +135,7 @@ async function loadEmployeeRows(access) {
      ) payment on true
      left join users current_user_record on current_user_record.id = b.id
      where ($4::uuid is null or b.id = $4::uuid)
+       and b.company_id = $5::uuid
        and (
          current_user_record.role in ('barber', 'super-barber')
          or exists (
@@ -227,21 +231,24 @@ async function loadNeutralCounts(access) {
 async function loadDataQuality(access) {
   const branchId = access.scope.type === 'branch' ? access.scope.branchId : null;
   const employeeId = access.scope.employeeId || null;
-  const params = [access.range.startInclusive, access.range.endExclusive, branchId, employeeId];
+  const params = [access.range.startInclusive, access.range.endExclusive, branchId, employeeId, requireAccessCompanyId(access)];
   const result = await pool.query(
     `select
        (select count(*)::int from queue_quality_assessments a
          where a.completed_at >= $1::timestamptz and a.completed_at < $2::timestamptz
+           and a.company_id = $5::uuid
            and ($3::uuid is null or a.branch_id = $3::uuid)
            and ($4::uuid is null or a.employee_id = $4::uuid)
            and a.employee_id is null) as unassigned_orders,
        (select count(*)::int from queue_quality_assessments a
          where a.completed_at >= $1::timestamptz and a.completed_at < $2::timestamptz
+           and a.company_id = $5::uuid
            and ($3::uuid is null or a.branch_id = $3::uuid)
            and ($4::uuid is null or a.employee_id = $4::uuid)
            and not a.classifiable) as unclassifiable_completed,
        (select count(*)::int from queue_status_events e
          where e.occurred_at >= $1::timestamptz and e.occurred_at < $2::timestamptz
+           and e.company_id = $5::uuid
            and ($3::uuid is null or e.branch_id = $3::uuid)
            and ($4::uuid is null or coalesce(e.responsible_employee_id, e.barber_id) = $4::uuid)
             and e.to_status in ('cancelled', 'rejected')
@@ -259,6 +266,7 @@ async function loadDataQuality(access) {
 
 async function assertEmployeeInScope(employeeId, access) {
   const params = [];
+  const company = `b.company_id = ${appendParam(params, requireAccessCompanyId(access))}::uuid`;
   let scope = 'true';
   if (access.scope.employeeId) {
     scope = `b.id = ${appendParam(params, access.scope.employeeId)}::uuid`;
@@ -284,7 +292,7 @@ async function assertEmployeeInScope(employeeId, access) {
   }
   params.push(employeeId);
   const result = await pool.query(
-    `select b.id, b.name, b.branch_id from barbers b where b.id = $${params.length}::uuid and ${scope} limit 1`,
+    `select b.id, b.name, b.branch_id from barbers b where b.id = $${params.length}::uuid and ${company} and ${scope} limit 1`,
     params,
   );
   return result.rows[0] || null;
@@ -341,7 +349,7 @@ class EmployeeQuality {
           type: access.scope.type,
           branch_id: access.scope.type === 'branch' ? access.scope.branchId : null,
           employee_id: access.scope.employeeId || null,
-          ...(access.scope.type === 'global' ? { tenant_model: 'single-network-database' } : {}),
+          ...(access.scope.type === 'global' ? { tenant_model: 'company' } : {}),
         },
         rules: DEFAULT_RULES,
         employees,
@@ -389,6 +397,7 @@ class EmployeeQuality {
       const { limit, offset } = page;
       let result;
       const authorizedBranchId = access.scope.type === 'branch' ? access.scope.branchId : null;
+      const companyId = requireAccessCompanyId(access);
       if (category === 'employee_failure') {
         result = await pool.query(
           `select e.queue_entry_id as order_id, e.branch_id, e.responsible_employee_id as employee_id,
@@ -405,8 +414,9 @@ class EmployeeQuality {
               and e.actor_type = 'employee'
               and e.reason_code = any($4::text[])
               and ($5::uuid is null or e.branch_id = $5::uuid)
+              and e.company_id = $8::uuid
             order by e.occurred_at desc, e.id desc limit $6 offset $7`,
-          [employeeId, access.range.startInclusive, access.range.endExclusive, [...EMPLOYEE_FAILURE_REASONS], authorizedBranchId, limit, offset],
+          [employeeId, access.range.startInclusive, access.range.endExclusive, [...EMPLOYEE_FAILURE_REASONS], authorizedBranchId, limit, offset, companyId],
         );
       } else {
         const categoryClause = category === 'suspicious'
@@ -428,8 +438,9 @@ class EmployeeQuality {
               and ($4::uuid is null or a.branch_id = $4::uuid)
               and ${categoryClause}
               and ($5::text is null or a.review_state = $5::text)
+              and a.company_id = $8::uuid
             order by a.completed_at desc, a.queue_entry_id desc limit $6 offset $7`,
-          [employeeId, access.range.startInclusive, access.range.endExclusive, authorizedBranchId, reviewState, limit, offset],
+          [employeeId, access.range.startInclusive, access.range.endExclusive, authorizedBranchId, reviewState, limit, offset, companyId],
         );
       }
 
@@ -501,9 +512,9 @@ class EmployeeQuality {
       const locked = await client.query(
         `select id, queue_entry_id, employee_id, branch_id, suspicious, review_state, review_version
            from queue_quality_assessments
-          where queue_entry_id = $1::uuid and employee_id = $2::uuid
+          where queue_entry_id = $1::uuid and employee_id = $2::uuid and company_id = $3::uuid
           for update`,
-        [orderId, employeeId],
+        [orderId, employeeId, requireAccessCompanyId(access)],
       );
       const assessment = locked.rows[0];
       // Locking first serializes concurrent retries. A second request now sees

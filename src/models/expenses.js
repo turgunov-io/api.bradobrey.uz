@@ -1,6 +1,6 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { db } = require('../config/postgres');
-const { isBranchAllowed, resolveStaffBranchScope } = require('../utils/adminAuth');
+const { isBranchAllowed, isCompanyWideScope, resolveStaffBranchScope } = require('../utils/adminAuth');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
 const GLOBAL_ADMIN_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
@@ -58,7 +58,7 @@ async function auth(req, res) {
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
 
   let payload;
-  try { payload = jwt.verify(token, process.env.JWT_SECRET); } catch (_error) {
+  try { payload = verifyAny(token); } catch (_error) {
     res.status(401).json({ error: 'Invalid or expired token' });
     return null;
   }
@@ -68,7 +68,7 @@ async function auth(req, res) {
 
   let user = req.employeeAccess?.user;
   if (!user) {
-    const result = await db.from('users').select('id, role, branch_id').eq('id', userId).maybeSingle();
+    const result = await db.from('users').select('id, role, branch_id, company_id').eq('id', userId).maybeSingle();
     if (result.error) throw new Error(result.error.message);
     user = result.data;
   }
@@ -90,8 +90,14 @@ async function auth(req, res) {
     permissions = (result.data || []).map((row) => row.permission);
   }
 
+  // MULTI_TENANCY B2: every expense query is bound to the caller's company
+  // (from the DB). Network roles (company-wide scope) are not narrowed by
+  // branch, so company-level rows (branch_id NULL) stay visible to them.
+  const companyId = user.company_id ? String(user.company_id) : null;
+  if (!companyId) { res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' }); return null; }
+
   const branchId = payload.branchId || payload.branch_id || user.branch_id || null;
-  // null = network role (whole network); otherwise the allowed branch ids.
+  // Allowed branch ids; network roles get every branch of their company.
   const branchScope = await resolveStaffBranchScope({ ...user, role }, branchId);
 
   return {
@@ -99,6 +105,8 @@ async function auth(req, res) {
     role,
     branchId,
     branchScope,
+    companyId,
+    companyWide: isCompanyWideScope(branchScope),
     permissions,
   };
 }
@@ -177,14 +185,22 @@ const toItem = (row, access = null) => {
   };
 };
 
-const byId = (id) => db.query(
+const byId = (id, companyId) => db.query(
   `select ${selectFields}
    from warehouse_purchases p
    left join branches b on b.id = p.branch_id
    left join users u on u.id::text = p.metadata->>'created_by'
    left join barbers creator_barber on creator_barber.id::text = p.metadata->>'created_by'
-   where p.id = $1 and p.metadata->>'type' = $2`, [id, EXPENSE_TYPE]
+   where p.id = $1 and p.metadata->>'type' = $2 and p.company_id = $3`, [id, EXPENSE_TYPE, companyId]
 );
+
+// Branch restriction for update/delete: none for company-wide scopes (the
+// company filter applies), otherwise the allowed branch ids.
+const branchScopeFilter = (access, values) => {
+  if (access.companyWide || access.branchScope === null) return '';
+  values.push(access.branchScope);
+  return ` and branch_id::text = any($${values.length}::text[])`;
+};
 
 module.exports = {
   async list(req, res) {
@@ -192,15 +208,15 @@ module.exports = {
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.read, res)) return;
 
-    const values = [EXPENSE_TYPE];
-    const where = ["p.metadata->>'type' = $1"];
+    const values = [EXPENSE_TYPE, access.companyId];
+    const where = ["p.metadata->>'type' = $1", 'p.company_id = $2'];
     const add = (value) => { values.push(value); return `$${values.length}`; };
     const requestedBranchId = text(req.query.branch_id);
     if (requestedBranchId && !isBranchAllowed(access.branchScope, requestedBranchId)) {
       return res.status(403).json({ error: 'Branch is outside your access scope' });
     }
     if (requestedBranchId) where.push(`p.branch_id = ${add(requestedBranchId)}`);
-    else if (access.branchScope !== null) where.push(`p.branch_id::text = any(${add(access.branchScope)}::text[])`);
+    else if (!access.companyWide && access.branchScope !== null) where.push(`p.branch_id::text = any(${add(access.branchScope)}::text[])`);
     if (req.query.category) where.push(`p.metadata->>'category' = ${add(String(req.query.category).trim())}`);
     if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
       const [year, month] = req.query.period.split('-').map(Number);
@@ -243,10 +259,10 @@ module.exports = {
     try {
       const created = await db.query(
         `insert into warehouse_purchases
-         (branch_id, supplier_name, purchased_at, status, total_amount, metadata)
-         values ($1, $2, $3, 'received', $4, $5::jsonb) returning id`,
-        [branchId, draft.payload.name, draft.payload.spent_at, draft.payload.amount, JSON.stringify(metadata)]);
-      const result = await byId(created.rows[0].id);
+         (branch_id, supplier_name, purchased_at, status, total_amount, metadata, company_id)
+         values ($1, $2, $3, 'received', $4, $5::jsonb, $6) returning id`,
+        [branchId, draft.payload.name, draft.payload.spent_at, draft.payload.amount, JSON.stringify(metadata), access.companyId]);
+      const result = await byId(created.rows[0].id, access.companyId);
       return res.status(201).json({ expense: toItem(result.rows[0], access) });
     } catch (error) { return sendDbError(res, error); }
   },
@@ -257,7 +273,7 @@ module.exports = {
     if (!access || !requirePermission(access, PERMISSIONS.update, res)) return;
     let existing;
     try {
-      existing = await byId(req.params.id);
+      existing = await byId(req.params.id, access.companyId);
     } catch (error) {
       return sendDbError(res, error);
     }
@@ -271,9 +287,8 @@ module.exports = {
     const draft = validate(req.body || {}, true);
     if (draft.error) return res.status(422).json({ error: draft.error });
     const metadata = Object.fromEntries(Object.entries(draft.payload).filter(([key]) => key !== 'amount' && key !== 'spent_at'));
-    const values = [JSON.stringify(metadata), draft.payload.amount ?? null, draft.payload.spent_at ?? null, req.params.id, EXPENSE_TYPE];
-    const scope = access.branchScope === null ? '' : ' and branch_id::text = any($6::text[])';
-    if (scope) values.push(access.branchScope);
+    const values = [JSON.stringify(metadata), draft.payload.amount ?? null, draft.payload.spent_at ?? null, req.params.id, EXPENSE_TYPE, access.companyId];
+    const scope = branchScopeFilter(access, values);
     try {
       const result = await db.query(
         `update warehouse_purchases
@@ -282,9 +297,9 @@ module.exports = {
              purchased_at = coalesce($3::timestamptz, purchased_at),
              supplier_name = coalesce(($1::jsonb)->>'name', supplier_name),
              updated_at = now()
-         where id = $4 and metadata->>'type' = $5${scope} returning id`, values);
+         where id = $4 and metadata->>'type' = $5 and company_id = $6${scope} returning id`, values);
       if (!result.rows.length) return res.status(404).json({ error: 'Expense not found' });
-      const updated = await byId(result.rows[0].id);
+      const updated = await byId(result.rows[0].id, access.companyId);
       return res.json({ expense: toItem(updated.rows[0], access) });
     } catch (error) { return sendDbError(res, error); }
   },
@@ -293,12 +308,11 @@ module.exports = {
     let access;
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.delete, res)) return;
-    const values = [req.params.id, EXPENSE_TYPE];
-    const scope = access.branchScope === null ? '' : ' and branch_id::text = any($3::text[])';
-    if (scope) values.push(access.branchScope);
+    const values = [req.params.id, EXPENSE_TYPE, access.companyId];
+    const scope = branchScopeFilter(access, values);
     try {
       const result = await db.query(
-        `delete from warehouse_purchases where id = $1 and metadata->>'type' = $2${scope} returning id`, values);
+        `delete from warehouse_purchases where id = $1 and metadata->>'type' = $2 and company_id = $3${scope} returning id`, values);
       if (!result.rows.length) return res.status(404).json({ error: 'Expense not found' });
       return res.status(204).send();
     } catch (error) { return sendDbError(res, error); }

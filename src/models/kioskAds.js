@@ -2,8 +2,10 @@ const { db } = require('../config/postgres');
 const { ADMIN_ROLES, createAdminAuth, createNetworkWriteAuth } = require('../utils/adminAuth');
 
 // Role and archived status come from the database (MULTI_TENANCY 0.10).
-// Any admin role may read the settings; the singleton is network-wide, so
-// only network roles may change it (MULTI_TENANCY 0.6).
+// Any admin role may read the settings; the row is company-wide, so only
+// network roles may change it (MULTI_TENANCY 0.6). One row per company
+// (kiosk_ad_settings unique company_id, migration 003; B2a): the company is
+// the caller's (auth.companyId from the DB), never from the request.
 const KIOSK_ADS_FORBIDDEN = 'Only admins can manage kiosk ads settings';
 const requireAdmin = createAdminAuth({ forbiddenMessage: KIOSK_ADS_FORBIDDEN, roles: ADMIN_ROLES });
 const requireNetworkAdmin = createNetworkWriteAuth({
@@ -56,15 +58,19 @@ const parseYoutubeUrlArray = (value, fieldName) => {
   return { provided: true, urls };
 };
 
+const COMPANY_REQUIRED = { code: 'COMPANY_REQUIRED', error: 'Company context is required' };
+
 class KioskAds {
   async getSettings(req, res) {
     const auth = await requireAdmin(req, res);
     if (!auth) return;
+    const companyId = auth.companyId || auth.company_id;
+    if (!companyId) return res.status(403).json(COMPANY_REQUIRED);
 
     const { data, error } = await db
       .from('kiosk_ad_settings')
       .select('id, regular_urls, kids_urls, updated_at')
-      .eq('id', 1)
+      .eq('company_id', companyId)
       .maybeSingle();
 
     if (error) {
@@ -75,8 +81,9 @@ class KioskAds {
 
     const { data: created, error: createError } = await db
       .from('kiosk_ad_settings')
-      .insert({ id: 1 })
+      .upsert({ company_id: companyId }, { onConflict: 'company_id' })
       .select('id, regular_urls, kids_urls, updated_at')
+      .eq('company_id', companyId)
       .maybeSingle();
 
     if (createError) {
@@ -89,6 +96,8 @@ class KioskAds {
   async updateSettings(req, res) {
     const auth = await requireNetworkAdmin(req, res);
     if (!auth) return;
+    const companyId = auth.companyId || auth.company_id;
+    if (!companyId) return res.status(403).json(COMPANY_REQUIRED);
 
     const body = req.body || {};
     const regularInput = body.regular_urls ?? body.regular;
@@ -104,15 +113,15 @@ class KioskAds {
       return res.status(400).json({ error: 'No fields to update' });
     }
 
-    const payload = { id: 1 };
+    const payload = { company_id: companyId };
     if (regularParsed.provided) payload.regular_urls = regularParsed.urls;
     if (kidsParsed.provided) payload.kids_urls = kidsParsed.urls;
 
     const { data: updated, error: updateError } = await db
       .from('kiosk_ad_settings')
-      .upsert(payload, { onConflict: 'id' })
+      .upsert(payload, { onConflict: 'company_id' })
       .select('id, regular_urls, kids_urls, updated_at')
-      .eq('id', 1)
+      .eq('company_id', companyId)
       .maybeSingle();
 
     if (updateError) {

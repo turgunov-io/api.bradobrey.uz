@@ -1,6 +1,7 @@
 const { db } = require('../config/postgres');
 const { classifyCompletedOrder } = require('../services/employeeQuality');
 const { normalizeStatisticsDateRange, toTashkentDateKey } = require('../utils/statisticsDate');
+const { requireAccessCompanyId } = require('../utils/employeeQualityAccess');
 
 const percent = (count, total) => (total ? Number(((count / total) * 100).toFixed(1)) : 0);
 
@@ -102,7 +103,16 @@ class Statistics {
           )
           : { rows: [] },
         serviceIds.length
-          ? db.query('select id, base_price, duration_minutes from services where id = any($1::uuid[])', [serviceIds])
+          // All orders are in branch $2: that branch's company services only
+          // (own branch or shared) — MULTI_TENANCY D1.
+          ? db.query(
+            `select s.id, s.base_price, s.duration_minutes
+               from services s
+               join branches br on br.id = $2 and s.company_id = br.company_id
+              where s.id = any($1::uuid[])
+                and (s.branch_id is null or s.branch_id = br.id)`,
+            [serviceIds, branchId]
+          )
           : { rows: [] },
         orderIds.length
           ? db.from('queue_quality_assessments')
@@ -313,10 +323,18 @@ class Statistics {
     const dateRange = normalizeStatisticsDateRange(start_date, end_date);
     if (dateRange.error) return res.status(400).json({ error: dateRange.error });
 
+    let companyId;
+    try {
+      companyId = requireAccessCompanyId(req.statisticsAccess);
+    } catch (_error) {
+      return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+    }
+
     const { data, error } = await this.fetchEntries({
       end_date: dateRange.endExclusive,
       start_date: dateRange.startInclusive,
       ...scope,
+      companyId,
     });
     if (error) {
       console.error('Statistics query failed:', error.message);
@@ -327,11 +345,14 @@ class Statistics {
     return res.json(response);
   }
 
-  async fetchEntries({ start_date, end_date, branchId, barberId }) {
+  async fetchEntries({ start_date, end_date, branchId, barberId, companyId }) {
+    if (!companyId) throw new Error('fetchEntries requires companyId');
     const query = db
       .from('queue_entries')
       .select('id, client_id, branch_id, barber_id, source, status, payment_method, created_at, finished_at');
 
+    // MULTI_TENANCY B2: "global" statistics = the caller's company only.
+    query.eq('company_id', companyId);
     query.gte('created_at', start_date).lt('created_at', end_date);
 
     if (branchId) query.eq('branch_id', branchId);

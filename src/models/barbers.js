@@ -1,6 +1,7 @@
 ﻿const { db } = require("../config/postgres");
 const bcrypto = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { verifyAny } = require('../utils/authToken');
 const { randomUUID } = require('node:crypto');
 const { uploadBase64Image, uploadBufferImage } = require("../composable/uploadImage");
 const { enrichQueueEntriesWithBenefits } = require("../composable/enrichQueueBenefits");
@@ -13,7 +14,9 @@ const { registerConfirmedNoShow, registerConfirmedNoShows } = require('../servic
 const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/barberLocation');
 const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
 const { getEmployeeSessionExpiry, getEmployeeTokenTtlSeconds, validatePersistedEmployeeSession } = require('../utils/employeeSession');
+const { resolveLoginCompany } = require('../utils/tenant');
 const queueTransfers = require('./queueTransfers');
+const { loadBranchServices, loadServicesForEntries } = require('../utils/serviceScope');
 const {
     certificateLifecycleResponse,
     isCertificateLifecycleError,
@@ -140,12 +143,15 @@ const cleanupShiftTimers = () => {
     shiftAutoOffTimers.clear();
 };
 
-const signUserToken = ({ id, login, role, branch_id = null, sessionId = null, expiresIn = process.env.JWT_EXPIRES_IN || '12h' }) => jwt.sign(
+// companyId (MULTI_TENANCY Phase 1) comes from users.company_id at login and
+// is cross-checked against the DB on every request (middleware/employeeAccess).
+const signUserToken = ({ id, login, role, branch_id = null, companyId = null, sessionId = null, expiresIn = process.env.JWT_EXPIRES_IN || '12h' }) => jwt.sign(
     {
         sub: id,
         login,
         role,
         branchId: branch_id,
+        companyId,
         ...(sessionId ? { jti: sessionId } : {}),
     },
     process.env.JWT_SECRET,
@@ -286,7 +292,7 @@ const authenticateBarberWorkspace = async (req, res, forbiddenMessage, { allowRe
 
     let payload;
     try {
-        payload = jwt.verify(token, process.env.JWT_SECRET);
+        payload = verifyAny(token);
     } catch (err) {
         res.status(401).json({ error: "Invalid or expired token" });
         return null;
@@ -466,11 +472,13 @@ const employeeItem = ({ user, barber, permissions = [] }) => ({
     specialization: barber?.specialization || null,
 });
 
-const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {}) => {
+const loadEmployeeDirectory = async ({ archived = 'active', branchId, role, companyId } = {}) => {
     let query = db
         .from('users')
         .select('id, login, role, branch_id', { count: 'exact' })
         .in('role', Array.from(EMPLOYEE_ROLES));
+    // The employee-management guard pins the directory to the caller company.
+    if (companyId) query = query.eq('company_id', companyId);
 
     // branch_id is the permanent assignment. A branch-filtered directory must
     // also include employees whose persisted active work branch is selected.
@@ -529,17 +537,25 @@ const loadEmployeeDirectory = async ({ archived = 'active', branchId, role } = {
     return { items, total: items.length ?? count ?? 0 };
 };
 
-const loadEmployeeRecord = async (id) => {
+// Company of the employee-management actor (DB-loaded by the route guard),
+// or null. Writes by employee id are always filtered by it (security review L5).
+const actorCompanyId = (req) => normalizeText(req.employeeManagement?.companyId || req.tenant?.companyId) || null;
+const COMPANY_SCOPE_REQUIRED = Object.freeze({ error: 'Company scope is required', code: 'COMPANY_REQUIRED' });
+
+// Only rows of companyId: another company's employee does not exist here.
+const loadEmployeeRecord = async (id, companyId) => {
     const [{ data: user, error: userError }, { data: barber, error: barberError }] = await Promise.all([
         db
             .from('users')
             .select('id, login, role, branch_id')
             .eq('id', id)
+            .eq('company_id', companyId)
             .maybeSingle(),
         db
             .from('barbers')
             .select('id, name, branch_id, phone, specialization, is_on_shift, is_authorized, is_active, is_archived, photo_url')
             .eq('id', id)
+            .eq('company_id', companyId)
             .maybeSingle(),
     ]);
 
@@ -657,42 +673,34 @@ const normalizeServiceIds = (values) => Array.from(new Set(
         .filter(Boolean)
 ));
 
-// A service may be attached to a queue entry only when it belongs to the
-// entry's branch or is network-wide (branch_id IS NULL). Mutating callers pass
-// `branchScoped: true` so a barber cannot attach another branch's service (and
-// its price) to an entry by id.
-const isServiceAllowedForBranch = (service, branchId) => {
-    if (service?.branch_id === null || service?.branch_id === undefined) return true;
-    return branchId !== null && branchId !== undefined && String(service.branch_id) === String(branchId);
-};
-
-const loadQueueServices = async (serviceIds, { strict = true, branchScoped = false, branchId = null } = {}) => {
+// A service may be attached to / priced on a queue entry only when it belongs
+// to the entry's company AND to the entry's branch or is shared within the
+// company (branch_id IS NULL) — MULTI_TENANCY D1, src/utils/serviceScope.js.
+// `strict` callers (barber attaching services) get 400 for any unusable id.
+const loadQueueServices = async (serviceIds, { strict = true, branchId = null, companyId = null } = {}) => {
     const ids = normalizeServiceIds(serviceIds);
     if (!ids.length) return [];
 
-    const { data, error } = await db
-        .from('services')
-        .select('id, name, base_price, duration_minutes, is_active, branch_id')
-        .in('id', ids);
-
-    if (error) throw new Error(error.message);
-
-    const usable = (data || []).filter((service) => (
-        !branchScoped || isServiceAllowedForBranch(service, branchId)
-    ));
-    const byId = new Map(usable.map((service) => [String(service.id), service]));
-    if (strict && byId.size !== ids.length) {
+    const usable = await loadBranchServices(ids, {
+        branchId,
+        companyId,
+        columns: 'name, base_price, duration_minutes, is_active',
+    });
+    if (strict && usable.length !== ids.length) {
         const error = new Error('One or more service_ids are invalid');
         error.statusCode = 400;
         throw error;
     }
-
-    return ids.map((id) => byId.get(id)).filter(Boolean);
+    return usable;
 };
 
 const enrichQueueEntryServices = async (entry) => {
     if (!entry) return entry;
-    const services = await loadQueueServices(serviceIdsForEntry(entry), { strict: false });
+    const services = await loadQueueServices(serviceIdsForEntry(entry), {
+        strict: false,
+        branchId: entry.branch_id,
+        companyId: entry.company_id || null,
+    });
     const servicesTotal = roundMoneyAmount(services.reduce((sum, service) => (
         sum + roundMoneyAmount(service?.base_price)
     ), 0));
@@ -788,16 +796,8 @@ const getQueueEntryAmount = async (entry) => {
         return 0;
     }
 
-    const { data, error } = await db
-        .from('services')
-        .select('id, base_price')
-        .in('id', serviceIds);
-
-    if (error) {
-        throw new Error(error.message);
-    }
-
-    return roundMoneyAmount((data || []).reduce((sum, service) => {
+    const servicesFor = await loadServicesForEntries([entry], 'base_price');
+    return roundMoneyAmount(servicesFor(entry).reduce((sum, service) => {
         return sum + roundMoneyAmount(service?.base_price);
     }, 0));
 };
@@ -930,7 +930,7 @@ const getCompletedQueueRevenue = async ({ barberId, branchId, from, to }) => {
         barberId,
         branchId,
         from,
-        select: 'id, service_id, service_ids, price_override',
+        select: 'id, branch_id, company_id, service_id, service_ids, price_override',
         to,
     });
 
@@ -939,7 +939,7 @@ const getCompletedQueueRevenue = async ({ barberId, branchId, from, to }) => {
             barberId,
             branchId,
             from,
-            select: 'id, service_id, service_ids',
+            select: 'id, branch_id, company_id, service_id, service_ids',
             to,
         }));
     }
@@ -947,26 +947,7 @@ const getCompletedQueueRevenue = async ({ barberId, branchId, from, to }) => {
     if (error) throw new Error(error.message);
     if (!Array.isArray(entries) || !entries.length) return 0;
 
-    const serviceIds = Array.from(
-        new Set(entries.flatMap(serviceIdsForEntry).filter(Boolean))
-    );
-    let pricesByServiceId = new Map();
-
-    if (serviceIds.length) {
-        const { data: services, error: servicesError } = await db
-            .from('services')
-            .select('id, base_price')
-            .in('id', serviceIds);
-
-        if (servicesError) throw new Error(servicesError.message);
-
-        pricesByServiceId = new Map(
-            (services || []).map((service) => [
-                String(service.id),
-                financeNumber(service.base_price),
-            ])
-        );
-    }
+    const servicesFor = await loadServicesForEntries(entries, 'base_price');
 
     return entries.reduce((sum, entry) => {
         const overrideAmount = financeNumber(entry?.price_override);
@@ -975,8 +956,8 @@ const getCompletedQueueRevenue = async ({ barberId, branchId, from, to }) => {
             return sum + overrideAmount;
         }
 
-        const servicesTotal = serviceIdsForEntry(entry).reduce((entrySum, serviceId) => {
-            return entrySum + (pricesByServiceId.get(String(serviceId)) || 0);
+        const servicesTotal = servicesFor(entry).reduce((entrySum, service) => {
+            return entrySum + financeNumber(service.base_price);
         }, 0);
 
         return sum + servicesTotal;
@@ -1019,7 +1000,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
     const range = periodRange(period);
     let { data: entries, error: entriesError } = await db
         .from('queue_entries')
-        .select('id, branch_id, service_id, service_ids, price_override, finished_at')
+        .select('id, branch_id, company_id, service_id, service_ids, price_override, finished_at')
         .eq('barber_id', barberId)
         .eq('status', 'completed')
         .gte('finished_at', range.from)
@@ -1028,7 +1009,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
     if (entriesError && isMissingPriceOverrideColumn(entriesError)) {
         ({ data: entries, error: entriesError } = await db
             .from('queue_entries')
-            .select('id, branch_id, service_id, service_ids, finished_at')
+            .select('id, branch_id, company_id, service_id, service_ids, finished_at')
             .eq('barber_id', barberId)
             .eq('status', 'completed')
             .gte('finished_at', range.from)
@@ -1038,14 +1019,11 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
 
     const completedEntries = Array.isArray(entries) ? entries : [];
     const entryIds = completedEntries.map(entry => entry.id).filter(Boolean);
-    const serviceIds = Array.from(new Set(completedEntries.flatMap(serviceIdsForEntry).filter(Boolean)));
-    const [paymentsResult, servicesResult, branchesResult, eventsResult, financeResult] = await Promise.all([
+    const [paymentsResult, servicesFor, branchesResult, eventsResult, financeResult] = await Promise.all([
         entryIds.length
             ? db.from('payments').select('queue_entry_id, amount').in('queue_entry_id', entryIds)
             : { data: [], error: null },
-        serviceIds.length
-            ? db.from('services').select('id, base_price').in('id', serviceIds)
-            : { data: [], error: null },
+        loadServicesForEntries(completedEntries, 'base_price'),
         db.from('branches').select('id, name'),
         db.from('barber_activity_events')
             .select('branch_id, event_type, occurred_at')
@@ -1060,10 +1038,8 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
     ]);
 
     if (paymentsResult.error && !isMissingPaymentsTable(paymentsResult.error)) throw new Error(paymentsResult.error.message);
-    if (servicesResult.error) throw new Error(servicesResult.error.message);
     if (branchesResult.error) throw new Error(branchesResult.error.message);
     const events = eventsResult.error ? [] : (eventsResult.data || []);
-    const prices = new Map((servicesResult.data || []).map(service => [String(service.id), financeNumber(service.base_price)]));
     const paymentsByEntry = new Map();
     for (const payment of paymentsResult.data || []) {
         paymentsByEntry.set(payment.queue_entry_id, (paymentsByEntry.get(payment.queue_entry_id) || 0) + financeNumber(payment.amount));
@@ -1079,7 +1055,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
         const row = ensureRow(entry.branch_id);
         const paymentTotal = paymentsByEntry.get(entry.id) || 0;
         const override = financeNumber(entry.price_override);
-        const serviceTotal = serviceIdsForEntry(entry).reduce((sum, id) => sum + (prices.get(String(id)) || 0), 0);
+        const serviceTotal = servicesFor(entry).reduce((sum, service) => sum + financeNumber(service.base_price), 0);
         row.services += 1;
         row.revenue += paymentTotal || override || serviceTotal;
     }
@@ -1239,7 +1215,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
 
     let queueQuery = db
         .from('queue_entries')
-        .select('id, barber_id, status, service_id, service_ids')
+        .select('id, barber_id, branch_id, company_id, status, service_id, service_ids')
         .eq('branch_id', branchId)
         .in('status', ACTIVE_QUEUE_STATUSES);
 
@@ -1250,26 +1226,7 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
     const { data: queues, error: queuesError } = await queueQuery;
     if (queuesError) throw new Error(queuesError.message);
 
-    const allServiceIds = Array.from(
-        new Set((queues || []).flatMap(serviceIdsForEntry).filter(Boolean))
-    );
-
-    let durationByServiceId = new Map();
-    if (allServiceIds.length) {
-        const { data: services, error: servicesError } = await db
-            .from('services')
-            .select('id, duration_minutes')
-            .in('id', allServiceIds);
-
-        if (servicesError) throw new Error(servicesError.message);
-
-        durationByServiceId = new Map(
-            (services || []).map((service) => [
-                String(service.id),
-                Number(service.duration_minutes || 0),
-            ])
-        );
-    }
+    const servicesFor = await loadServicesForEntries(queues || [], 'duration_minutes');
 
     for (const entry of queues || []) {
         const barberId = entry?.barber_id;
@@ -1281,8 +1238,8 @@ const getBranchBarberAvailability = async ({ branchId, excludeBarberId = null, e
         };
 
         currentStats.current_clients += 1;
-        currentStats.estimated_waiting_time += serviceIdsForEntry(entry).reduce((sum, serviceId) => {
-            return sum + (durationByServiceId.get(String(serviceId)) || 0);
+        currentStats.estimated_waiting_time += servicesFor(entry).reduce((sum, service) => {
+            return sum + Number(service.duration_minutes || 0);
         }, 0);
 
         statsByBarber.set(barberId, currentStats);
@@ -1423,7 +1380,9 @@ class Barbers {
             const branchId = req.employeeManagement?.branchId || normalizeText(req.query?.branch_id);
             const role = normalizeText(req.query?.role);
 
-            const result = await loadEmployeeDirectory({ archived, branchId, role });
+            const companyId = req.employeeManagement?.companyId || null;
+            if (req.employeeManagement && !companyId) return res.status(403).json({ error: 'Company scope is required' });
+            const result = await loadEmployeeDirectory({ archived, branchId, role, companyId });
             return res.json(result);
         } catch (error) {
             return res.status(500).json({ error: error.message || 'Failed to load employees' });
@@ -1434,6 +1393,8 @@ class Barbers {
         try {
             const { id } = req.params || {};
             if (!id) return res.status(400).json({ error: 'Employee id is required' });
+            const companyId = actorCompanyId(req);
+            if (!companyId) return res.status(403).json({ ...COMPANY_SCOPE_REQUIRED });
 
             const {
                 branch_id,
@@ -1473,6 +1434,7 @@ class Barbers {
                 .from('users')
                 .update(userUpdate)
                 .eq('id', id)
+                .eq('company_id', companyId)
                 .select('id, login, role, branch_id')
                 .maybeSingle();
 
@@ -1489,8 +1451,11 @@ class Barbers {
                     ? normalizeText(req.body.photo_url)
                     : undefined;
 
+            // company_id explicit: the users row above is already confirmed to be
+            // this company's; the tenant guard trigger rejects any mismatch.
             const barberPayload = {
                 branch_id: normalizedBranchId,
+                company_id: companyId,
                 id,
                 name: normalizedName,
                 phone: normalizeText(phone) ?? null,
@@ -1530,7 +1495,9 @@ class Barbers {
             const { id } = req.params || {};
             if (!id) return res.status(400).json({ error: 'Employee id is required' });
 
-            const { barber: currentBarber, user } = await loadEmployeeRecord(id);
+            const companyId = actorCompanyId(req);
+            if (!companyId) return res.status(403).json({ ...COMPANY_SCOPE_REQUIRED });
+            const { barber: currentBarber, user } = await loadEmployeeRecord(id, companyId);
             if (!user) return res.status(404).json({ error: 'Employee not found' });
 
             const payload = buildArchivedEmployeePayload({
@@ -1588,7 +1555,9 @@ class Barbers {
             const { id } = req.params || {};
             if (!id) return res.status(400).json({ error: 'Employee id is required' });
 
-            const { barber: currentBarber, user } = await loadEmployeeRecord(id);
+            const companyId = actorCompanyId(req);
+            if (!companyId) return res.status(403).json({ ...COMPANY_SCOPE_REQUIRED });
+            const { barber: currentBarber, user } = await loadEmployeeRecord(id, companyId);
             if (!user) return res.status(404).json({ error: 'Employee not found' });
 
             const payload = buildArchivedEmployeePayload({
@@ -1638,7 +1607,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
@@ -1755,7 +1724,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
@@ -1818,16 +1787,29 @@ class Barbers {
 
     async login(req, res) {
         const {
-            login, password, branch_id
+            login, password, branch_id, company_code
         } = req.body || {};
 
         if (!login || !password) {
             return res.status(400).json({ error: 'Login and password are required' });
         }
 
+        // MULTI_TENANCY Phase 1 (D2): the company code comes first; the login is
+        // only unique inside a company. Without it (current barber app, dash)
+        // the default company is used, only while it is the only company (M4).
+        let loginCompany;
+        try {
+            loginCompany = await resolveLoginCompany(company_code);
+        } catch (_error) {
+            return res.status(500).json({ error: 'Failed to verify credentials' });
+        }
+        if (loginCompany.error) return res.status(loginCompany.error.status).json(loginCompany.error.body);
+        const companyId = String(loginCompany.company.id);
+
         const { data: users, error: userError } = await db
             .from('users')
-            .select('id, login, role, branch_id, password_hash')
+            .select('id, login, role, branch_id, company_id, password_hash')
+            .eq('company_id', companyId)
             .eq('login', login)
             .in('role', Array.from(LEGACY_LOGIN_ROLES))
             .limit(1);
@@ -1868,6 +1850,7 @@ class Barbers {
             const effectiveBranchId = userData.branch_id || null;
             const token = signUserToken({
                 branch_id: effectiveBranchId,
+                companyId,
                 id: userData.id,
                 login: userData.login,
                 role: userData.role,
@@ -1880,6 +1863,7 @@ class Barbers {
                     login: userData.login,
                     role: userData.role,
                     branch_id: effectiveBranchId,
+                    company_id: companyId,
                     permissions: loginPermissions,
                 },
             });
@@ -1921,6 +1905,7 @@ class Barbers {
         const sessionId = randomUUID();
         const token = signUserToken({
             branch_id: effectiveBranchId,
+            companyId,
             id: userData.id,
             login: userData.login,
             role: userData.role,
@@ -1941,7 +1926,8 @@ class Barbers {
         await db
             .from('barbers')
             .update({ is_on_shift: true })
-            .eq('id', userData.id);
+            .eq('id', userData.id)
+            .eq('company_id', companyId);
 
         await logVerifixEvent({
             actorId: userData.id,
@@ -1962,21 +1948,33 @@ class Barbers {
                 branch_id: effectiveBranchId,
                 active_branch_id: effectiveBranchId,
                 branches: branchSelection.branches,
+                company_id: companyId,
                 permissions: loginPermissions,
             },
         });
     }
 
     async adminLogin(req, res) {
-        const { login, password } = req.body || {};
+        const { login, password, company_code } = req.body || {};
 
         if (!login || !password) {
             return res.status(400).json({ error: 'Login and password are required' });
         }
 
+        // Same company resolution as login() (default company without a code).
+        let loginCompany;
+        try {
+            loginCompany = await resolveLoginCompany(company_code);
+        } catch (_error) {
+            return res.status(500).json({ error: 'Failed to verify credentials' });
+        }
+        if (loginCompany.error) return res.status(loginCompany.error.status).json(loginCompany.error.body);
+        const companyId = String(loginCompany.company.id);
+
         const { data: users, error: userError } = await db
             .from('users')
-            .select('id, login, role, branch_id, password_hash')
+            .select('id, login, role, branch_id, company_id, password_hash')
+            .eq('company_id', companyId)
             .eq('login', login)
             .in('role', Array.from(ADMIN_ROLES))
             .limit(1);
@@ -2013,6 +2011,7 @@ class Barbers {
 
         const token = signUserToken({
             branch_id: adminUser.branch_id || null,
+            companyId,
             id: adminUser.id,
             login: adminUser.login,
             role: adminUser.role,
@@ -2025,6 +2024,7 @@ class Barbers {
                 login: adminUser.login,
                 role: adminUser.role,
                 branch_id: adminUser.branch_id || null,
+                company_id: companyId,
                 permissions: adminPermissions,
             },
         });
@@ -2055,9 +2055,19 @@ class Barbers {
             return res.status(400).json({ error: 'password must be at least 6 characters' });
         }
 
+        // MULTI_TENANCY B2: the employee belongs to the creator's company
+        // (pinned by the employee-management guard, which also verified that
+        // branch_id is one of its branches); logins are unique per company
+        // (users_company_login_uidx), so another company may reuse a login.
+        const companyId = normalizeText(req.employeeManagement?.companyId || req.tenant?.companyId);
+        if (!companyId) {
+            return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+        }
+
         const { data: existing, error: existingError } = await db
             .from('users')
             .select('id')
+            .eq('company_id', companyId)
             .eq('login', login)
             .maybeSingle();
 
@@ -2072,11 +2082,14 @@ class Barbers {
 
         const { data: userRow, error: userError } = await db
             .from('users')
-            .insert({ login, password_hash, role: normalizedRole, branch_id })
-            .select('id, login, role, branch_id')
+            .insert({ login, password_hash, role: normalizedRole, branch_id, company_id: companyId })
+            .select('id, login, role, branch_id, company_id')
             .maybeSingle();
 
         if (userError || !userRow) {
+            if (String(userError?.code || '') === '23505') {
+                return res.status(409).json({ error: 'login already taken' });
+            }
             return res.status(500).json({ error: userError?.message || 'failed to create user' });
         }
 
@@ -2090,6 +2103,7 @@ class Barbers {
 
         const barberPayload = {
             branch_id,
+            company_id: companyId,
             id: userRow.id,
             is_active: true,
             is_archived: false,
@@ -2144,7 +2158,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
@@ -2272,6 +2286,8 @@ class Barbers {
             const nextSessionId = randomUUID();
             const nextToken = signUserToken({
                 branch_id: resolved.branchId,
+                // Set by enforceEmployeeAccess from the DB (old tokens have no claim).
+                companyId: req.tenant?.companyId || payload.companyId || null,
                 id: employeeId,
                 login: payload.login,
                 role: payload.role,
@@ -2567,7 +2583,7 @@ class Barbers {
                 return res.status(400).json({ error: 'service_id must be included in service_ids' });
             }
             try {
-                selectedServices = await loadQueueServices(normalizedServiceIds, { branchScoped: true, branchId: entry.branch_id });
+                selectedServices = await loadQueueServices(normalizedServiceIds, { branchId: entry.branch_id, companyId: entry.company_id || null });
             } catch (error) {
                 return res.status(error.statusCode || 500).json({ error: error.message });
             }
@@ -2581,7 +2597,7 @@ class Barbers {
                 return res.status(400).json({ error: 'service_id is required' });
             }
             try {
-                selectedServices = await loadQueueServices(normalizedServiceIds, { branchScoped: true, branchId: entry.branch_id });
+                selectedServices = await loadQueueServices(normalizedServiceIds, { branchId: entry.branch_id, companyId: entry.company_id || null });
             } catch (error) {
                 return res.status(error.statusCode || 500).json({ error: error.message });
             }
@@ -2742,7 +2758,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
@@ -2809,7 +2825,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
@@ -2929,7 +2945,7 @@ class Barbers {
                 return res.status(400).json({ error: 'At least one service is required' });
             }
             try {
-                await loadQueueServices(nextServiceIds, { branchScoped: true, branchId: entry.branch_id });
+                await loadQueueServices(nextServiceIds, { branchId: entry.branch_id, companyId: entry.company_id || null });
             } catch (error) {
                 return res.status(error.statusCode || 500).json({ error: error.message });
             }
@@ -3007,7 +3023,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }
@@ -3183,7 +3199,7 @@ class Barbers {
 
         let payload;
         try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
+            payload = verifyAny(token);
         } catch (err) {
             return res.status(401).json({ error: "Invalid or expired token" });
         }

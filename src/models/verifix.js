@@ -1,4 +1,4 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { db, pool } = require('../config/postgres');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
@@ -21,7 +21,7 @@ const getBearerToken = (req) => {
   return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 };
 
-const verifyJwt = (token) => jwt.verify(token, process.env.JWT_SECRET);
+const verifyJwt = (token) => verifyAny(token);
 
 const normalizeText = (value) => {
   if (value === undefined) return undefined;
@@ -224,6 +224,7 @@ const requireAuth = (req, res) => {
       role: actor.role,
       branchId: actor.sessionBranchId || branchId,
       branchScope: actor.branchScope,
+      companyId: actor.companyId || null,
     };
   } catch (_error) {
     res.status(401).json({ error: 'Invalid or expired token' });
@@ -673,9 +674,12 @@ class Verifix {
     }
   }
 
+  // verifix_settings: one row per company (unique company_id, migration 003);
+  // the company is the DB-loaded actor's (attachDbActor), never the request.
   async penaltySettings(req, res) {
     const auth = requireAdmin(req, res);
     if (!auth) return;
+    if (!auth.companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company context is required' });
     try {
       if (req.method === 'PATCH') {
         if (!['admin_network', 'admin'].includes(auth.role)) {
@@ -685,10 +689,10 @@ class Verifix {
         if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0 || rate > 9999999999.99 || Math.abs(rate * 100 - Math.round(rate * 100)) > 0.0001) {
           return res.status(400).json({ error: 'penalty_per_minute must be a non-negative amount with at most two decimal places' });
         }
-        await db.query(`INSERT INTO verifix_settings (id, penalty_per_minute) VALUES (1, $1)
-          ON CONFLICT (id) DO UPDATE SET penalty_per_minute = EXCLUDED.penalty_per_minute, updated_at = now()`, [rate]);
+        await db.query(`INSERT INTO verifix_settings (company_id, penalty_per_minute) VALUES ($2, $1)
+          ON CONFLICT (company_id) DO UPDATE SET penalty_per_minute = EXCLUDED.penalty_per_minute, updated_at = now()`, [rate, auth.companyId]);
       }
-      const result = await db.query('SELECT penalty_per_minute FROM verifix_settings WHERE id = 1');
+      const result = await db.query('SELECT penalty_per_minute FROM verifix_settings WHERE company_id = $1', [auth.companyId]);
       return res.json({ penalty_per_minute: Number(result.rows[0]?.penalty_per_minute || 0) });
     } catch (error) {
       return res.status(500).json({ error: error.message });

@@ -1,7 +1,8 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../../utils/authToken');
 
 const { db, pool } = require('../../config/postgres');
 const { getWalletBalance } = require('../../composable/cashback');
+const { resolveRequestCompanyId } = require('../../utils/companyScope');
 const { enrichQueueEntriesWithBenefits } = require('../../composable/enrichQueueBenefits');
 const {
   uploadBase64Image,
@@ -23,7 +24,7 @@ const getBearerToken = (req) => {
 const verifyJwt = (token) => {
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-  return jwt.verify(token, jwtSecret);
+  return verifyAny(token, { secret: jwtSecret });
 };
 
 const isMarketplacePayload = (payload) => payload?.role === MARKETPLACE_ROLE;
@@ -37,18 +38,31 @@ const normalizePhone = (phoneInput) => {
   return cleaned || null;
 };
 
-async function findLegacyClientByPhone(phoneInput) {
+// Company scope (MULTI_TENANCY B2a): the marketplace client is global (Phase
+// 5) but kiosk clients, wallets and rank/loyalty settings are per company, and
+// the same phone in two companies is two clients (D3). The company comes from
+// ?branch_id (branch -> company) or legacy single-company mode — never "any
+// company where this phone exists". Unknown company: no linked client.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function profileCompanyId(req) {
+  const branchId = typeof req?.query?.branch_id === 'string' ? req.query.branch_id.trim() : '';
+  return resolveRequestCompanyId(req, { branchId: UUID_PATTERN.test(branchId) ? branchId : null });
+}
+
+async function findLegacyClientByPhone(phoneInput, companyId) {
   const phone = normalizePhone(phoneInput);
   const digits = phone?.replace(/\D/g, '') || '';
-  if (!digits) return null;
+  if (!digits || !companyId) return null;
 
   const result = await pool.query(
     `select id, name, phone, rank, completed_visits
        from clients
-      where regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = $1
+      where company_id = $3
+        and regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = $1
       order by (phone = $2) desc, id
       limit 1`,
-    [digits, phone],
+    [digits, phone, companyId],
   );
   return result.rows[0] || null;
 }
@@ -95,12 +109,13 @@ const DEFAULT_RANK_SETTINGS = {
   updated_at: null,
 };
 
-async function fetchRankSettings() {
+async function fetchRankSettings(companyId) {
+  if (!companyId) return DEFAULT_RANK_SETTINGS;
   try {
     const { data, error } = await db
       .from('client_rank_settings')
       .select('id, bronze_min_visits, silver_min_visits, gold_min_visits, updated_at')
-      .eq('id', 1)
+      .eq('company_id', companyId)
       .maybeSingle();
 
     if (error) {
@@ -125,13 +140,16 @@ async function fetchRankSettings() {
   }
 }
 
-async function fetchStatusLoyalty(statusPoints) {
+async function fetchStatusLoyalty(statusPoints, companyId) {
   const points = Math.max(0, Number(statusPoints) || 0);
-  const { data, error } = await db
-    .from('platform_settings')
-    .select('value')
-    .eq('key', 'loyalty_levels')
-    .maybeSingle();
+  const { data, error } = companyId
+    ? await db
+      .from('platform_settings')
+      .select('value')
+      .eq('company_id', companyId)
+      .eq('key', 'loyalty_levels')
+      .maybeSingle()
+    : { data: null, error: null };
   if (error || !data?.value || typeof data.value !== 'object') {
     return {
       name: 'NONE',
@@ -222,13 +240,14 @@ class MarketplaceProfile {
       const auth = await this._auth(req, res);
       if (!auth) return;
 
-      const rankSettings = await fetchRankSettings();
+      const companyId = await profileCompanyId(req);
+      const rankSettings = await fetchRankSettings(companyId);
       const statusPoints = Number(auth.client.status_points || 0);
-      const statusLoyalty = await fetchStatusLoyalty(statusPoints);
+      const statusLoyalty = await fetchStatusLoyalty(statusPoints, companyId);
       let cashback_balance = null;
       let loyalty = null;
       if (auth.client.phone) {
-        const linked = await findLegacyClientByPhone(auth.client.phone);
+        const linked = await findLegacyClientByPhone(auth.client.phone, companyId);
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
         loyalty = {
@@ -447,17 +466,18 @@ class MarketplaceProfile {
         return res.status(500).json({ error: updateError.message });
       }
 
+      const companyId = await profileCompanyId(req);
       if (hasPhoneUpdate && nextPhone) {
-        await this._ensureClientRecordForPhone(nextPhone, updated?.email).catch(() => { });
+        await this._ensureClientRecordForPhone(nextPhone, updated?.email, companyId).catch(() => { });
       }
 
-      const rankSettings = await fetchRankSettings();
+      const rankSettings = await fetchRankSettings(companyId);
       const statusPoints = Number(updated?.status_points || 0);
-      const statusLoyalty = await fetchStatusLoyalty(statusPoints);
+      const statusLoyalty = await fetchStatusLoyalty(statusPoints, companyId);
       let cashback_balance = null;
       let loyalty = null;
       if (updated?.phone) {
-        const linked = await findLegacyClientByPhone(updated.phone);
+        const linked = await findLegacyClientByPhone(updated.phone, companyId);
 
         cashback_balance = linked?.id ? await getWalletBalance(linked.id) : 0;
         if (linked?.id) {
@@ -518,7 +538,8 @@ class MarketplaceProfile {
       const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
       const offset = Math.max(parseInt(req.query?.offset, 10) || 0, 0);
 
-      const clientRow = await findLegacyClientByPhone(phone);
+      const clientCompanyId = await profileCompanyId(req);
+      const clientRow = await findLegacyClientByPhone(phone, clientCompanyId);
 
       if (!clientRow?.id) {
         return res.json({
@@ -579,6 +600,7 @@ class MarketplaceProfile {
         const { data: services, error: servicesError } = await db
           .from('services')
           .select('id,name,duration_minutes,base_price,category')
+          .eq('company_id', clientCompanyId)
           .in('id', Array.from(serviceIds));
 
         if (servicesError) {
@@ -662,7 +684,7 @@ class MarketplaceProfile {
         });
       }
 
-      const clientRow = await findLegacyClientByPhone(phone);
+      const clientRow = await findLegacyClientByPhone(phone, await profileCompanyId(req));
       const clientId = clientRow?.id;
       if (!clientId) {
         return res.json({
@@ -770,16 +792,16 @@ class MarketplaceProfile {
     }
   }
 
-  async _ensureClientRecordForPhone(phone, email) {
-    if (!phone) return;
+  async _ensureClientRecordForPhone(phone, email, companyId) {
+    if (!phone || !companyId) return;
 
-    if (await findLegacyClientByPhone(phone)) return;
+    if (await findLegacyClientByPhone(phone, companyId)) return;
 
     const fallbackName = String(email || 'Marketplace Client').split('@')[0] || 'Marketplace Client';
 
     const { error: insertError } = await db
       .from('clients')
-      .insert({ name: fallbackName, phone });
+      .insert({ company_id: companyId, name: fallbackName, phone });
 
     if (insertError) {
       // If it's a race/unique violation, ignore.

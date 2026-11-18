@@ -20,14 +20,15 @@ const NETWORK_BRANCH_ROLES = Object.freeze([...NETWORK_ROLES]);
 /**
  * Allow-list branch selection (pure mirror of the SQL in listEmployeeBranches).
  * Allowed = home branch(es) ∪ branches with an active access row; network
- * roles get every branch. Closed branches and explicit deny rows
+ * roles get every branch of their company. Closed branches, other companies'
+ * branches (when `companyId` is given) and explicit deny rows
  * (is_active = false) always win.
  *
- * @param {Array<{id: string, is_active?: boolean}>} branches
+ * @param {Array<{id: string, is_active?: boolean, company_id?: string}>} branches
  * @param {Array<{branch_id: string, is_active: boolean}>} accessRows
- * @param {{ homeBranchIds?: Array<string|null>, role?: string|null }} [options]
+ * @param {{ homeBranchIds?: Array<string|null>, role?: string|null, companyId?: string|null }} [options]
  */
-const selectEmployeeBranches = (branches = [], accessRows = [], { homeBranchIds = [], role = null } = {}) => {
+const selectEmployeeBranches = (branches = [], accessRows = [], { homeBranchIds = [], role = null, companyId = null } = {}) => {
   const deniedBranchIds = new Set(
     accessRows
       .filter((row) => row?.is_active === false)
@@ -41,6 +42,7 @@ const selectEmployeeBranches = (branches = [], accessRows = [], { homeBranchIds 
 
   return branches.filter((branch) => (
     branch?.is_active !== false
+    && (!companyId || String(branch?.company_id || '') === String(companyId))
     && !deniedBranchIds.has(String(branch.id))
     && (isNetworkRole || allowedBranchIds.has(String(branch.id)))
   ));
@@ -70,6 +72,9 @@ async function listEmployeeBranches(employeeId, fallbackBranchId = null) {
       left join users u on u.id = $1
       left join barbers bb on bb.id = $1
      where b.is_active = true
+       -- MULTI_TENANCY Phase 1: never outside the employee's company (also
+       -- for network roles); no users row / no company -> no branches.
+       and b.company_id = (select company_id from users where id = $1)
        and not exists (
          select 1
            from employee_branch_access a

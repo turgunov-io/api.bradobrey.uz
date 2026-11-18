@@ -1,5 +1,6 @@
 const { db } = require("../config/postgres");
 const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
+const { requireTenantCompany, sameId } = require("../utils/companyScope");
 
 const SELECT_WITH_MARKETPLACE =
   "id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id";
@@ -134,6 +135,18 @@ const attachUploadedPhoto = async (file, branchId) => {
   return { photoUrl: upload.publicUrl };
 };
 
+// Company scope (MULTI_TENANCY B2a): staff see and manage only the branches
+// of their tenant company (req.tenant); a new branch belongs to it and may
+// only be linked to the company's own marketplace barbershop.
+const BARBERSHOP_FORBIDDEN = { code: "BARBERSHOP_COMPANY_MISMATCH", error: "Barbershop belongs to another company" };
+
+const barbershopInCompany = async (barbershopId, companyId) => {
+  if (!barbershopId) return true;
+  const { data, error } = await db.from("marketplace_barbershops").select("id, company_id").eq("id", barbershopId).maybeSingle();
+  if (error) throw new Error(error.message);
+  return sameId(data?.company_id, companyId);
+};
+
 const conflictResponse = (res, code, message) => res.status(409).json({
   code,
   data: { code },
@@ -148,9 +161,11 @@ class Branches {
     if (active !== undefined && activeFilter === undefined) {
       return res.status(400).json({ error: "active must be a boolean" });
     }
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
     const { data, error, count } = await withMarketplaceFallback((select) => {
-      let query = db.from("branches").select(select, { count: "exact" });
+      let query = db.from("branches").select(select, { count: "exact" }).eq("company_id", companyId);
       if (activeFilter !== undefined) query = query.eq("is_active", activeFilter);
       return query.order("name", { ascending: true });
     });
@@ -170,11 +185,14 @@ class Branches {
   async getById(req, res) {
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Branch id is required" });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
     const { data, error } = await withMarketplaceFallback((select) => db
       .from("branches")
       .select(select)
       .eq("id", id)
+      .eq("company_id", companyId)
       .maybeSingle());
 
     if (error) return res.status(500).json({ error: error.message });
@@ -186,8 +204,17 @@ class Branches {
   async create(req, res) {
     const { payload, error: payloadError } = normalizeBranchPayload(req.body || {});
     if (payloadError) return res.status(400).json({ error: payloadError });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
+    try {
+      if (!(await barbershopInCompany(payload.marketplace_barbershop_id, companyId))) {
+        return res.status(403).json(BARBERSHOP_FORBIDDEN);
+      }
+    } catch (checkError) {
+      return res.status(500).json({ error: checkError.message });
+    }
 
-    let writePayload = { ...payload };
+    let writePayload = { ...payload, company_id: companyId };
     let { data, error } = await db
       .from("branches")
       .insert(writePayload)
@@ -220,6 +247,15 @@ class Branches {
     const { payload, error: payloadError } = normalizeBranchPayload(req.body || {}, { partial: true });
     if (payloadError) return res.status(400).json({ error: payloadError });
     if (!Object.keys(payload).length && !req.file) return res.status(400).json({ error: "No fields to update" });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
+    try {
+      if (!(await barbershopInCompany(payload.marketplace_barbershop_id, companyId))) {
+        return res.status(403).json(BARBERSHOP_FORBIDDEN);
+      }
+    } catch (checkError) {
+      return res.status(500).json({ error: checkError.message });
+    }
 
     let writePayload = { ...payload };
     // A photo-only PATCH has nothing else to write; read the branch instead.
@@ -228,12 +264,14 @@ class Branches {
         .from("branches")
         .update(writePayload)
         .eq("id", id)
+        .eq("company_id", companyId)
         .select(SELECT_WITH_MARKETPLACE)
         .maybeSingle()
       : await db
         .from("branches")
         .select(SELECT_WITH_MARKETPLACE)
         .eq("id", id)
+        .eq("company_id", companyId)
         .maybeSingle();
 
     if (isMissingColumnError(error, "marketplace_barbershop_id")) {
@@ -243,6 +281,7 @@ class Branches {
           .from("branches")
           .update(writePayload)
           .eq("id", id)
+          .eq("company_id", companyId)
           .select(SELECT_BASE)
           .maybeSingle());
       } else {
@@ -250,6 +289,7 @@ class Branches {
           .from("branches")
           .select(SELECT_BASE)
           .eq("id", id)
+          .eq("company_id", companyId)
           .maybeSingle());
       }
       if (data) data.marketplace_barbershop_id = null;
@@ -268,11 +308,14 @@ class Branches {
   async setActive(req, res, isActive) {
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Branch id is required" });
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
     const { data, error } = await withMarketplaceFallback((select) => db
       .from("branches")
       .update({ is_active: isActive })
       .eq("id", id)
+      .eq("company_id", companyId)
       .select(select)
       .maybeSingle());
 
@@ -287,11 +330,14 @@ class Branches {
     if (!id) return res.status(400).json({ error: "Branch id is required" });
 
     const force = parseBoolean(req.query?.force, false) === true;
+    const companyId = requireTenantCompany(req, res);
+    if (!companyId) return undefined;
 
     const { data: existing, error: existingError } = await db
       .from("branches")
       .select("id")
       .eq("id", id)
+      .eq("company_id", companyId)
       .maybeSingle();
 
     if (existingError) return res.status(500).json({ error: existingError.message });
@@ -334,6 +380,7 @@ class Branches {
       .from("branches")
       .delete()
       .eq("id", id)
+      .eq("company_id", companyId)
       .select("id")
       .maybeSingle();
 

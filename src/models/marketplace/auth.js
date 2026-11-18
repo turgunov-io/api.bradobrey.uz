@@ -3,6 +3,8 @@ const bcrypto = require('bcryptjs');
 const crypto = require('crypto');
 
 const { db, pool } = require('../../config/postgres');
+const { readTenantSetting } = require('../../utils/tenantSettings');
+const { findReferralAccountByCode } = require('../../utils/referralAccounts');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const OTP_TTL_MS = 10 * 60 * 1000;
@@ -215,24 +217,23 @@ class MarketplaceAuth {
         return res.status(403).json({ error: 'Account is disabled' });
       }
       if (otpResult.rows[0].referral_code && account.created_new === true) {
-        const referral = await client.query(
-          `select marketplace_client_id, referral_code from referral_accounts where referral_code = $1 for update`,
-          [String(otpResult.rows[0].referral_code).trim().toUpperCase()]
-        );
-        if (!referral.rows[0] || referral.rows[0].marketplace_client_id === account.id) {
+        // The code resolves to exactly one account; the referral belongs to
+        // that account's company (its settings, FK) — MULTI_TENANCY B2.
+        const referralAccount = await findReferralAccountByCode(client, otpResult.rows[0].referral_code, account.id);
+        if (!referralAccount) {
           await client.query('ROLLBACK');
           return res.status(400).json({ error: 'Invalid referral code' });
         }
-        const referralSettings = await client.query(
-          `select value from platform_settings where key = 'referral'`
-        );
-        const dailyLimit = Number(referralSettings.rows[0]?.value?.daily_limit || 10);
-        const expiryDays = Math.max(1, Number(referralSettings.rows[0]?.value?.expiry_days || 365));
+        const referral = { rows: [referralAccount] };
+        const referralSettingsValue = (await readTenantSetting(client, 'referral', referralAccount.company_id)) || {};
+        const dailyLimit = Number(referralSettingsValue.daily_limit || 10);
+        const expiryDays = Math.max(1, Number(referralSettingsValue.expiry_days || 365));
         const dailyCount = await client.query(
           `select count(*)::int as count from referrals
             where referrer_client_id = $1
+              and company_id = $2
               and (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date`,
-          [referral.rows[0].marketplace_client_id]
+          [referral.rows[0].marketplace_client_id, referralAccount.company_id]
         );
         if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
           await client.query('ROLLBACK');
@@ -255,10 +256,10 @@ class MarketplaceAuth {
           );
         }
         await client.query(
-          `insert into referrals (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
-           values ($1, $2, $3, now() + ($4::text || ' days')::interval, $5::inet, $6)
+          `insert into referrals (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id, company_id)
+           values ($1, $2, $3, now() + ($4::text || ' days')::interval, $5::inet, $6, $7)
            on conflict (referred_client_id) do nothing`,
-          [referral.rows[0].marketplace_client_id, account.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId]
+          [referral.rows[0].marketplace_client_id, account.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId, referralAccount.company_id]
         );
       }
       await client.query('update otp_codes set used = true where id = $1', [otpResult.rows[0].id]);
@@ -442,30 +443,23 @@ class MarketplaceAuth {
       // never acquire a referrer by logging in with a code later.
       if (otp.referral_code && !existingClient?.id) {
         try {
-          const referral = await pool.query(
-            `select marketplace_client_id, referral_code from referral_accounts
-              where referral_code = $1 and marketplace_client_id <> $2
-              limit 1
-              for update`,
-            [String(otp.referral_code).trim().toUpperCase(), client.id],
-          );
-          if (!referral.rows[0]) {
+          const referralAccount = await findReferralAccountByCode(pool, otp.referral_code, client.id);
+          if (!referralAccount) {
             throw new Error('Invalid referral code');
           }
+          const referral = { rows: [referralAccount] };
 
-          const settings = await pool.query(
-            `select value from platform_settings where key = 'referral'`,
-          );
-          const referralSettings = settings.rows[0]?.value || {};
+          const referralSettings = (await readTenantSetting(pool, 'referral', referralAccount.company_id)) || {};
           const dailyLimit = Math.max(1, Number(referralSettings.daily_limit || 10));
           const expiryDays = Math.max(1, Number(referralSettings.expiry_days || 365));
           const referrerId = referral.rows[0].marketplace_client_id;
           const dailyCount = await pool.query(
             `select count(*)::int as count from referrals
               where referrer_client_id = $1
+                and company_id = $2
                 and (created_at at time zone 'Asia/Tashkent')::date =
                     (now() at time zone 'Asia/Tashkent')::date`,
-            [referrerId],
+            [referrerId, referralAccount.company_id],
           );
           if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
             throw new Error('REFERRAL_DAILY_LIMIT_REACHED');
@@ -492,10 +486,10 @@ class MarketplaceAuth {
 
           await pool.query(
             `insert into referrals
-              (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
-             values ($1, $2, $3, now() + ($4::text || ' days')::interval, $5::inet, $6)
+              (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id, company_id)
+             values ($1, $2, $3, now() + ($4::text || ' days')::interval, $5::inet, $6, $7)
              on conflict (referred_client_id) do nothing`,
-            [referrerId, client.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId],
+            [referrerId, client.id, referral.rows[0].referral_code, expiryDays, sourceIp, deviceId, referralAccount.company_id],
           );
         } catch (referralError) {
           const referralErrorCode = String(referralError?.code || '');

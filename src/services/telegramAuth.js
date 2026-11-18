@@ -5,6 +5,8 @@ const { pool: defaultPool } = require('../config/postgres');
 const TelegramBotService = require('./telegram-bot.service');
 const { TelegramBotError } = require('./telegram-bot.service');
 const { logTelegramEvent, maskIdentifier } = require('../utils/telegramAuditLogger');
+const { readTenantSetting } = require('../utils/tenantSettings');
+const { findReferralAccountByCode } = require('../utils/referralAccounts');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const LINK_TTL_SECONDS = 5 * 60;
@@ -424,22 +426,20 @@ class TelegramAuthService {
         : await client.query(`insert into marketplace_clients (phone, display_name, first_name, last_name, patronymic, language, is_active, telegram_user_id, telegram_chat_id, last_login_at) values ($1, $2, nullif($3, ''), nullif($4, ''), nullif($5, ''), coalesce($6, 'ru'), true, $7, $8, now()) returning id, email, phone, display_name, first_name, last_name, patronymic, language, is_active`, [phone, requestedName, cleanName(firstName), cleanName(lastName), cleanName(patronymic), safeLanguage, String(telegramUserId), String(telegramChatId)]);
       const account = accountResult.rows[0];
       if (!existing && referralCode) {
-        const referral = await client.query(
-          `select marketplace_client_id, referral_code from referral_accounts
-             where referral_code = $1 and marketplace_client_id <> $2 limit 1 for update`,
-          [String(referralCode).trim().toUpperCase(), account.id],
-        );
-        if (!referral.rows[0]) {
+        // Exactly one account per code; the referral belongs to its company
+        // (settings + FK (company_id, referral_code)) — MULTI_TENANCY B2.
+        const referralAccount = await findReferralAccountByCode(client, referralCode, account.id);
+        if (!referralAccount) {
           await client.query('ROLLBACK');
           throw new TelegramAuthError(400, 'INVALID_REFERRAL_CODE', 'Invalid referral code');
         }
-        const settings = await client.query(`select value from platform_settings where key = 'referral'`);
-        const expiryDays = Math.max(1, Number(settings.rows[0]?.value?.expiry_days || 365));
+        const referralSettings = (await readTenantSetting(client, 'referral', referralAccount.company_id)) || {};
+        const expiryDays = Math.max(1, Number(referralSettings.expiry_days || 365));
         await client.query(
-          `insert into referrals (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id)
-             values ($1, $2, $3, now() + ($4::text || ' days')::interval, null, null)
+          `insert into referrals (referrer_client_id, referred_client_id, referral_code, expires_at, source_ip, device_id, company_id)
+             values ($1, $2, $3, now() + ($4::text || ' days')::interval, null, null, $5)
              on conflict (referred_client_id) do nothing`,
-          [referral.rows[0].marketplace_client_id, account.id, referral.rows[0].referral_code, expiryDays],
+          [referralAccount.marketplace_client_id, account.id, referralAccount.referral_code, expiryDays, referralAccount.company_id],
         );
       }
       const used = await client.query(`update telegram_auth_challenges set status = 'verified', used_at = now(), locked_until = null, updated_at = now() where challenge_hash = $1 and status = 'pending' and used_at is null returning challenge_hash`, [challengeHash]);

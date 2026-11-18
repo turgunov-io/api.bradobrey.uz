@@ -13,6 +13,8 @@ const BRANCH_ADMIN_ID = '55555555-5555-4555-8555-555555555555';
 const ARCHIVED_ID = '66666666-6666-4666-8666-666666666666';
 const GONE_ID = '77777777-7777-4777-8777-777777777777';
 const CLIENT_ID = '88888888-8888-4888-8888-888888888888';
+const COMPANY_ID = 'cccccccc-0000-4000-8000-00000000000c';
+const IN_COMPANY = { company_id: COMPANY_ID, company_status: 'active' };
 
 // Bearer tokens by name -> JWT payload. For staff the token role is never
 // trusted; STAFF_ROWS (the DB) decides.
@@ -25,14 +27,14 @@ const BEARER_PAYLOADS = {
   marketplace: { sub: CLIENT_ID, role: 'marketplace' },
 };
 const STAFF_ROWS = {
-  [ADMIN_ID]: { user: { id: ADMIN_ID, role: 'admin', branch_id: null }, barber: null },
-  [BRANCH_ADMIN_ID]: { user: { id: BRANCH_ADMIN_ID, role: 'admin_branch', branch_id: BRANCH_A }, barber: null },
+  [ADMIN_ID]: { user: { id: ADMIN_ID, role: 'admin', branch_id: null, ...IN_COMPANY }, barber: null },
+  [BRANCH_ADMIN_ID]: { user: { id: BRANCH_ADMIN_ID, role: 'admin_branch', branch_id: BRANCH_A, ...IN_COMPANY }, barber: null },
   [ARCHIVED_ID]: { user: { id: ARCHIVED_ID, role: 'admin', branch_id: null }, barber: { id: ARCHIVED_ID, is_archived: true } },
 };
 
 function makeAuth({ enforce = false, warnings = [], bearerOk = true, staffLoads = [] } = {}) {
   return createKioskAuth({
-    authenticate: async (token) => (token === GOOD_TOKEN ? { id: KIOSK_ID, branchId: BRANCH_A } : null),
+    authenticate: async (token) => (token === GOOD_TOKEN ? { id: KIOSK_ID, branchId: BRANCH_A, companyId: COMPANY_ID, companyStatus: 'active' } : null),
     verifyBearer: (token) => (bearerOk ? BEARER_PAYLOADS[token] || null : null),
     loadStaff: async (userId) => { staffLoads.push(userId); return STAFF_ROWS[userId] || { user: null, barber: null }; },
     isArchived: (barber) => barber?.is_archived === true,
@@ -77,7 +79,7 @@ test('a valid token sets req.kiosk with the kiosk branch', async () => {
   const { res, nextCalled } = await run(makeAuth()(), req);
   assert.equal(nextCalled, true);
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(req.kiosk, { id: KIOSK_ID, branchId: BRANCH_A });
+  assert.deepEqual(req.kiosk, { id: KIOSK_ID, branchId: BRANCH_A, companyId: COMPANY_ID });
 });
 
 test('an invalid token is rejected with 401 even in legacy mode', async () => {
@@ -207,7 +209,7 @@ test('enforce mode pins a branch-scoped employee to its allowed branches (DB rol
 
   const allowed = makeReq({ bearer: 'branchAdmin', params: { branch_id: BRANCH_A } });
   assert.equal((await run(auth, allowed)).nextCalled, true);
-  assert.deepEqual(allowed.kioskStaff, { id: BRANCH_ADMIN_ID, role: 'admin_branch', branchScope: [BRANCH_A] });
+  assert.deepEqual(allowed.kioskStaff, { id: BRANCH_ADMIN_ID, role: 'admin_branch', branchScope: [BRANCH_A], companyId: COMPANY_ID });
 
   const unscoped = makeReq({ bearer: 'branchAdmin' });
   assert.equal((await run(auth, unscoped)).nextCalled, true);

@@ -28,6 +28,8 @@ const notifications = require('./routers/notifications');
 const cashbackSettlements = require('./routers/cashbackSettlements');
 const auth = require('./routers/auth');
 const telegramAuth = require('./routers/telegramAuth');
+const companies = require('./routers/companies');
+const platform = require('./routers/platform');
 const { ensureNotificationsTable } = require('./models/notifications');
 const { enforceEmployeeAccess } = require('./middleware/employeeAccess');
 const { securityHeaders } = require('./middleware/securityHeaders');
@@ -84,6 +86,10 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Multi-tenancy (Phase 1): public company-code lookup and platform-owner
+// company management. enforceEmployeeAccess keeps platform_owner on /api/platform only.
+app.use('/api/companies', companies);
+app.use('/api/platform', platform);
 app.use('/api/barbers', barbers);
 app.use('/api/auth', auth);
 app.post('/api/integrations/telegram/webhook', telegramAuth.webhook);

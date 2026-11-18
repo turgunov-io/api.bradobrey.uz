@@ -18,6 +18,7 @@ const {
   verifySocketToken,
 } = require('./socketAuth');
 const { verifyKioskSocketTicket } = require('./kioskSocketTicket');
+const { checkTenantAccess } = require('./utils/tenant');
 const { validatePersistedEmployeeSession } = require('./utils/employeeSession');
 const server = http.createServer(app);
 
@@ -37,7 +38,7 @@ const stopEmployeeSessionCleanup = startEmployeeSessionCleanup({ io });
 
 async function loadSocketAccessState(userId) {
   const [{ data: user, error: userError }, { data: barber, error: barberError }, activeResult] = await Promise.all([
-    db.from('users').select('id, role, branch_id').eq('id', userId).maybeSingle(),
+    db.from('users').select('id, role, branch_id, company_id').eq('id', userId).maybeSingle(),
     db.from('barbers').select('id, branch_id, is_archived').eq('id', userId).maybeSingle(),
     db.from('employee_active_branches').select('branch_id').eq('employee_id', userId),
   ]);
@@ -48,8 +49,17 @@ async function loadSocketAccessState(userId) {
     throw activeResult.error;
   }
 
+  // Company status for the tenant check (MULTI_TENANCY Phase 1).
+  let companyStatus = null;
+  if (user?.company_id) {
+    const { data: company, error: companyError } = await db.from('companies')
+      .select('id, status').eq('id', user.company_id).maybeSingle();
+    if (companyError) throw companyError;
+    companyStatus = company?.status || null;
+  }
+
   return {
-    user: user || null,
+    user: user ? { ...user, company_status: companyStatus } : null,
     barber: barber || null,
     activeBranches: (activeResult.data || []).map((row) => row.branch_id).filter(Boolean),
   };
@@ -60,6 +70,14 @@ io.use(async (socket, next) => {
     const kioskTicket = socket.handshake?.auth?.kioskTicket;
     if (kioskTicket) {
       const payload = verifyKioskSocketTicket(kioskTicket);
+      // Tickets live 15 minutes: re-check the kiosk and its company status
+      // (suspended company -> refused) on every connect.
+      const { kioskRegistry } = require('./services/kioskRegistration');
+      if (!(await kioskRegistry.verifySocketKiosk({ kioskId: payload.kioskId, branchId: payload.branchId }))) {
+        const error = new Error('Kiosk socket session is no longer valid');
+        error.data = { code: 'KIOSK_SOCKET_REVOKED' };
+        return next(error);
+      }
       socket.data.auth = { kind: 'kiosk', payload, state: {} };
       return next();
     }
@@ -80,6 +98,12 @@ io.use(async (socket, next) => {
     if (!state.user || state.barber?.is_archived === true) {
       const error = new Error('Socket session is no longer valid');
       error.data = { code: 'SOCKET_SESSION_REVOKED' };
+      return next(error);
+    }
+    const tenantCheck = checkTenantAccess({ payload, user: state.user });
+    if (!tenantCheck.ok || tenantCheck.tenant.isPlatformOwner) {
+      const error = new Error('Socket session is no longer valid');
+      error.data = { code: tenantCheck.body?.code || 'SOCKET_ROLE_FORBIDDEN' };
       return next(error);
     }
 
@@ -143,17 +167,28 @@ io.on('connection', (socket) => {
       reply(ack, { ok: true, branchId });
       return;
     }
+    let branchCompanyId = null;
     try {
       const userId = socket.data.auth?.payload?.sub || socket.data.auth?.payload?.id;
       const state = await loadSocketAccessState(userId);
       socket.data.auth.state = state;
+      // The branch must belong to the caller's company (and that company must
+      // still be active): MULTI_TENANCY Phase 1.
+      if (!checkTenantAccess({ payload: socket.data.auth.payload, user: state.user }).ok) {
+        throw new Error('tenant rejected');
+      }
+      if (isSafeBranchId(branchId)) {
+        const { data: branch, error } = await db.from('branches').select('id, company_id').eq('id', branchId).maybeSingle();
+        if (error) throw error;
+        branchCompanyId = branch?.company_id || null;
+      }
     } catch (_error) {
       reply(ack, { ok: false, code: 'BRANCH_ACCESS_UNAVAILABLE' });
       socket.emit('branch_access_denied', { branchId });
       return;
     }
 
-    if (!canAccessSocketBranch({ ...socket.data.auth, branchId })) {
+    if (!canAccessSocketBranch({ ...socket.data.auth, branchId, branchCompanyId })) {
       reply(ack, { ok: false, code: 'BRANCH_ACCESS_DENIED' });
       socket.emit('branch_access_denied', { branchId });
       return;

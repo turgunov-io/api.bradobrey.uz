@@ -2,12 +2,16 @@ const { pool } = require('../../config/postgres');
 const { sendTestNotificationToClient } = require('../../services/marketplacePush');
 const { createAdminAuth } = require('../../utils/adminAuth');
 const { NETWORK_ROLES } = require('../../utils/employeeQualityAccess');
+const { companyMarketplaceClientIdsSql, requireAdminCompany } = require('../../utils/marketplaceCompanyScope');
 
 // Network-wide marketplace data (every client's phone, all reviews, push to
 // any client): network roles only (admin_network, admin, super-manager). The
 // role is loaded from the database by authorizeAdmin, never trusted from the
 // JWT. admin_branch / merchant have no scoped use for these endpoints (dash
 // merchant pages do not call them), so they are denied rather than scoped.
+// MULTI_TENANCY B2: "network" = the admin's company. Clients are limited to
+// those with a footprint in the company (utils/marketplaceCompanyScope.js),
+// reviews to marketplace_reviews.company_id.
 const authorizeNetworkAdmin = createAdminAuth({ roles: NETWORK_ROLES });
 
 function pagination(req) {
@@ -18,11 +22,14 @@ function pagination(req) {
 }
 
 async function listMobileUsers(req, res) {
-  if (!(await authorizeNetworkAdmin(req, res))) return;
+  const administrator = await authorizeNetworkAdmin(req, res);
+  if (!administrator) return;
+  const companyId = requireAdminCompany(administrator, res);
+  if (!companyId) return;
   const { limit, offset } = pagination(req);
   const search = String(req.query?.q || '').trim();
   const active = String(req.query?.active || '').trim().toLowerCase();
-  const params = [search ? `%${search}%` : null, active === 'true' ? true : active === 'false' ? false : null, limit, offset];
+  const params = [search ? `%${search}%` : null, active === 'true' ? true : active === 'false' ? false : null, limit, offset, companyId];
 
   try {
     const result = await pool.query(
@@ -31,6 +38,7 @@ async function listMobileUsers(req, res) {
          from marketplace_clients
         where ($1::text is null or coalesce(display_name, '') ilike $1 or coalesce(phone, '') ilike $1)
           and ($2::boolean is null or is_active = $2)
+          and id in (${companyMarketplaceClientIdsSql('$5')})
         order by created_at desc nulls last
         limit $3 offset $4`,
       params,
@@ -44,13 +52,16 @@ async function listMobileUsers(req, res) {
 }
 
 async function listReviews(req, res) {
-  if (!(await authorizeNetworkAdmin(req, res))) return;
+  const administrator = await authorizeNetworkAdmin(req, res);
+  if (!administrator) return;
+  const companyId = requireAdminCompany(administrator, res);
+  if (!companyId) return;
   const { limit, offset } = pagination(req);
   const search = String(req.query?.q || '').trim();
   const barberId = String(req.query?.barber_id || '').trim();
   const ratingValue = Number.parseInt(req.query?.rating, 10);
   const rating = Number.isInteger(ratingValue) && ratingValue >= 1 && ratingValue <= 5 ? ratingValue : null;
-  const params = [search ? `%${search}%` : null, barberId || null, rating, limit, offset];
+  const params = [search ? `%${search}%` : null, barberId || null, rating, limit, offset, companyId];
 
   try {
     const result = await pool.query(
@@ -70,6 +81,7 @@ async function listReviews(req, res) {
                or coalesce(br.name, '') ilike $1)
           and ($2::uuid is null or r.barber_id = $2::uuid)
           and ($3::int is null or r.rating = $3::int)
+          and r.company_id = $6::uuid
         order by r.created_at desc
         limit $4 offset $5`,
       params,
@@ -85,6 +97,8 @@ async function listReviews(req, res) {
 async function sendTestNotification(req, res) {
   const administrator = await authorizeNetworkAdmin(req, res);
   if (!administrator) return;
+  const companyId = requireAdminCompany(administrator, res);
+  if (!companyId) return;
 
   const clientId = String(req.params?.id || '').trim();
   const title = String(req.body?.title || 'Тестовое уведомление').trim();
@@ -94,8 +108,10 @@ async function sendTestNotification(req, res) {
   }
 
   const clientResult = await pool.query(
-    'select id from marketplace_clients where id = $1 limit 1',
-    [clientId],
+    `select id from marketplace_clients
+      where id = $1 and id in (${companyMarketplaceClientIdsSql('$2')})
+      limit 1`,
+    [clientId, companyId],
   );
   if (!clientResult.rows[0]) return res.status(404).json({ error: 'Marketplace client not found' });
 

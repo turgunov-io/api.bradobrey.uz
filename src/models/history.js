@@ -1,7 +1,9 @@
-const jwt = require('jsonwebtoken');
+const { verifyAny } = require('../utils/authToken');
 const { db } = require('../config/postgres');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 const { normalizeOptionalDateRange } = require('../utils/statisticsDate');
+const { requireAccessCompanyId } = require('../utils/employeeQualityAccess');
+const { loadServicesForEntries } = require('../utils/serviceScope');
 
 // Managers can also accept orders, so their barber workspace history is valid.
 const BARBER_HISTORY_ROLES = new Set([
@@ -19,15 +21,6 @@ const HISTORY_STATUSES = ['waiting', 'called', 'swapped', 'transfer_pending', 'i
 const toAmount = (value) => {
     const amount = Number(value);
     return Number.isFinite(amount) ? amount : 0;
-};
-
-const serviceIdsForEntry = (entry) => {
-    const serviceIds = Array.isArray(entry?.service_ids)
-        ? entry.service_ids.filter(Boolean)
-        : [];
-
-    if (serviceIds.length) return serviceIds;
-    return entry?.service_id ? [entry.service_id] : [];
 };
 
 const hasExplicitTimezone = (value) => /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
@@ -63,31 +56,12 @@ const enrichQueueEntriesWithAmounts = async (entries) => {
     const items = Array.isArray(entries) ? entries : [];
     if (!items.length) return items;
 
-    const serviceIds = Array.from(
-        new Set(items.flatMap(serviceIdsForEntry).filter(Boolean))
-    );
-
-    let priceByServiceId = new Map();
-
-    if (serviceIds.length) {
-        const { data, error } = await db
-            .from('services')
-            .select('id, base_price')
-            .in('id', serviceIds);
-
-        if (error) throw new Error(error.message);
-
-        priceByServiceId = new Map(
-            (data || []).map((service) => [
-                String(service.id),
-                toAmount(service.base_price),
-            ])
-        );
-    }
+    // Prices of the entry's own company/branch only (MULTI_TENANCY D1).
+    const servicesFor = await loadServicesForEntries(items, 'base_price');
 
     return items.map((entry) => {
-        const originalAmount = serviceIdsForEntry(entry).reduce((sum, serviceId) => {
-            return sum + (priceByServiceId.get(String(serviceId)) || 0);
+        const originalAmount = servicesFor(entry).reduce((sum, service) => {
+            return sum + toAmount(service.base_price);
         }, 0);
         const overrideAmount = toAmount(entry?.price_override);
         const hasOverride = overrideAmount > 0;
@@ -219,7 +193,7 @@ const requireBarberHistoryAccess = (req, res) => {
 
     let payload;
     try {
-        payload = jwt.verify(token, process.env.JWT_SECRET);
+        payload = verifyAny(token);
     } catch (_err) {
         res.status(401).json({ error: "Invalid or expired token" });
         return null;
@@ -268,6 +242,7 @@ class History {
                 price_override,
                 price_override_reason,
                 branch_id,
+                company_id,
                 barber_id,
                 client:clients ( id, name, phone, first_visit_date )
             `;
@@ -284,6 +259,7 @@ class History {
                 price_override,
                 price_override_reason,
                 branch_id,
+                company_id,
                 barber_id,
                 client:clients ( id, name, phone, first_visit_date )
             `;
@@ -390,6 +366,16 @@ class History {
             .order('created_at', { ascending: false });
 
         if (!fetchAll) query = query.range(offset, offset + limit - 1);
+
+        // MULTI_TENANCY B2: every history scope is bound to the caller's company
+        // ("global" = whole company). Fails closed without one.
+        let companyId;
+        try {
+            companyId = requireAccessCompanyId(req.historyAccess);
+        } catch (_error) {
+            return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+        }
+        query = query.eq('company_id', companyId);
 
         if (branchId) {
             query = query.eq('branch_id', branchId);

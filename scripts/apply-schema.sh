@@ -9,6 +9,9 @@
 #   ./scripts/apply-schema.sh
 #
 # Requires DATABASE_URL in the environment or a local .env with it.
+#
+# This is the BASE schema only. Afterwards run the numbered migrations:
+#   npm run migrate        (db/migrations/NNN_*.sql, see .project/DEPLOYMENT.md)
 
 set -euo pipefail
 

@@ -16,7 +16,11 @@
 // middleware, which runs before these routers whenever a token is present. Permissions follow the dashboard model in
 // utils/employeeQualityAccess.js: admins without per-user rows get the full
 // preset, explicit rows narrow it.
-const jwt = require('jsonwebtoken');
+// MULTI_TENANCY Phase 1: the caller's company (users.company_id) is checked
+// against the token and its status (suspended -> 403 COMPANY_SUSPENDED) and
+// exposed as req.tenant; platform_owner passes none of these guards.
+const { getBearerToken, verifyAny } = require('../utils/authToken');
+const { PLATFORM_OWNER_ROLE, checkTenantAccess } = require('../utils/tenant');
 
 const { loadActorFromDb } = require('./employeeManagement');
 const { BRANCH_ROLES, NETWORK_ROLES, effectivePermissions } = require('../utils/employeeQualityAccess');
@@ -27,11 +31,6 @@ const SUPERUSER_ROLES = new Set(['admin_network', 'admin']);
 // users.id is a uuid column; other token subjects (marketplace clients) are
 // rejected before they reach the database and raise 22P02.
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function getBearerToken(req) {
-  const header = String(req.headers?.authorization || '');
-  return header.startsWith('Bearer ') ? header.slice(7) : null;
-}
 
 function createStaffAccessGuard({ loadActor = loadActorFromDb, secret } = {}) {
   const deny = (res, status, error) => {
@@ -48,7 +47,7 @@ function createStaffAccessGuard({ loadActor = loadActorFromDb, secret } = {}) {
     try {
       const jwtSecret = secret || process.env.JWT_SECRET;
       if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-      payload = jwt.verify(token, jwtSecret);
+      payload = verifyAny(token, { secret: jwtSecret });
     } catch (_error) {
       return deny(res, 401, 'Invalid or expired token');
     }
@@ -60,12 +59,18 @@ function createStaffAccessGuard({ loadActor = loadActorFromDb, secret } = {}) {
       const actor = await loadActor(userId);
       if (!actor?.user) return deny(res, 401, 'Session is no longer valid');
 
+      const tenantCheck = checkTenantAccess({ payload, user: actor.user });
+      if (!tenantCheck.ok) {
+        res.status(tenantCheck.status).json(tenantCheck.body);
+        return null;
+      }
+
       const role = String(actor.user.role || '').trim().toLowerCase();
       const permissions = effectivePermissions(
         role,
         (actor.permissions || []).map((permission) => ({ permission })),
       );
-      return { actor: actor.user, permissions, role };
+      return { actor: actor.user, permissions, role, tenant: tenantCheck.tenant };
     } catch (error) {
       console.error('[staff-access] authorization failed:', error?.code || error?.message);
       return deny(res, 500, 'Failed to authorize request');
@@ -84,11 +89,14 @@ function createStaffAccessGuard({ loadActor = loadActorFromDb, secret } = {}) {
       }
 
       req.staffAccess = context;
+      req.tenant = context.tenant;
       next();
     };
   }
 
-  const authenticated = () => guard(() => null);
+  const authenticated = () => guard(({ role }) => (
+    role === PLATFORM_OWNER_ROLE ? 'Platform owner has no access to company data' : null
+  ));
 
   function requireStaff({ anyOf = [] } = {}) {
     return guard(({ role, permissions }) => {

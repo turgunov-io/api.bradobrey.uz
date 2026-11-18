@@ -13,17 +13,35 @@
 // tokens (device_token_hash is null) keep the old branch_id + device_name
 // check, and may register once to obtain a token.
 //
-// Enrollment (MULTI_TENANCY 0.2): when KIOSK_ENROLLMENT_CODE is set, register
-// requires a matching body.enrollment_code (constant-time compare) or a staff
-// actor, loaded from the DB (non-archived; role and allowed branches from the
-// DB, not the JWT), whose scope covers the branch (dashboard registration). Unset keeps the
-// open behaviour and logs a warning once.
+// Enrollment (MULTI_TENANCY 0.2, per company since security review H1):
+// register requires either
+//   - the resolved company's own enrollment code (companies.
+//     kiosk_enrollment_code_hash, SHA-256, constant-time compare; set by the
+//     platform owner or rotated by the company's network admins), or
+//   - a staff actor of the same company, loaded from the DB (non-archived; role
+//     and allowed branches from the DB, not the JWT), whose scope covers the
+//     branch (dashboard registration).
+// Legacy fallback: env KIOSK_ENROLLMENT_CODE applies only to the default
+// company, only while it is the only company and has no code of its own
+// (unset env there keeps the old open behaviour with a warning). With 2+
+// companies a company without its own code enrolls kiosks via staff only.
+//
+// Company code (MULTI_TENANCY Phase 1 step B1): the kiosk app first enters a
+// company code (POST /api/companies/resolve), then registers with
+// { company_code, branch_id, device_name, enrollment_code? }. Unknown or
+// suspended companies are 404 COMPANY_NOT_FOUND; a branch outside that
+// company (or closed) is 403 KIOSK_BRANCH_FORBIDDEN; a staff actor must belong
+// to the same company. Back-compat for deployed kiosks: without company_code
+// the request is accepted only while the platform has exactly one (default,
+// active) company, with a warning; otherwise 400 COMPANY_CODE_REQUIRED.
 //
 // authenticateDevice() resolves the X-Kiosk-Token header for
-// middleware/kioskAuth.js to { id, branchId }.
+// middleware/kioskAuth.js to { id, branchId, companyId, companyStatus }.
 const crypto = require('crypto');
 
 const { BRANCH_ROLES, NETWORK_ROLES } = require('../utils/employeeQualityAccess');
+const { checkTenantAccess, companyRepo, normalizeCompanyCode } = require('../utils/tenant');
+const { enrollmentCodeMatches } = require('../utils/kioskEnrollmentCode');
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_DEVICE_NAME_LENGTH = 200;
@@ -53,8 +71,9 @@ function secretMatches(submitted, configured) {
 const envEnrollmentCode = () => String(process.env.KIOSK_ENROLLMENT_CODE || '').trim();
 
 // Verified JWT claims -> the staff actor as stored in the DB:
-// { id, role, branchScope } (branchScope null = network role), or null when
-// the subject is not an existing, non-archived employee. The token's own
+// { id, role, branchScope, companyId } (branchScope: allowed branch ids,
+// network roles = their whole company), or null when the subject is not an
+// existing, non-archived employee of an active company. The token's own
 // role/branch claims are never used.
 async function loadDbActor(claims) {
   const userId = String(claims?.sub || claims?.id || '');
@@ -62,10 +81,12 @@ async function loadDbActor(claims) {
   const { loadEmployeeAccessState, isArchivedEmployee } = require('../middleware/employeeAccess');
   const state = await loadEmployeeAccessState(userId);
   if (!state?.user || isArchivedEmployee(state.barber)) return null;
+  const tenantCheck = checkTenantAccess({ payload: claims, user: state.user });
+  if (!tenantCheck.ok || tenantCheck.tenant.isPlatformOwner) return null;
   const role = String(state.user.role || '').trim().toLowerCase();
   const { resolveAllowedBranchIds } = require('../utils/adminAuth');
   const branchScope = await resolveAllowedBranchIds({ ...state.user, role });
-  return { id: state.user.id, role, branchScope };
+  return { id: state.user.id, role, branchScope, companyId: tenantCheck.tenant.companyId };
 }
 
 // Resolved lazily so the registry logic can be tested without a database.
@@ -93,19 +114,29 @@ const pgKioskRepo = {
   },
 
   async findKioskById(id) {
-    const result = await pool().query('select id, branch_id from kiosks where id = $1 limit 1', [id]);
+    const result = await pool().query(
+      `select k.id, k.branch_id, b.company_id, c.status as company_status
+         from kiosks k
+         join branches b on b.id = k.branch_id
+         join companies c on c.id = b.company_id
+        where k.id = $1
+        limit 1`,
+      [id],
+    );
     return result.rows[0] || null;
   },
 
-  async listKiosks({ branchId }) {
+  // companyId is required: kiosks are only ever listed inside one company.
+  async listKiosks({ branchId, companyId }) {
     const result = await pool().query(
       `select k.id, k.branch_id, b.name as branch_name, k.device_name,
               k.device_token_hash, k.created_at, k.updated_at
          from kiosks k
-         left join branches b on b.id = k.branch_id
-        where ($1::uuid is null or k.branch_id = $1)
+         join branches b on b.id = k.branch_id
+        where b.company_id = $2
+          and ($1::uuid is null or k.branch_id = $1)
         order by b.name nulls last, k.created_at desc`,
-      [branchId || null],
+      [branchId || null, companyId],
     );
     return result.rows;
   },
@@ -116,7 +147,12 @@ const pgKioskRepo = {
 
   async findKioskByTokenHash(tokenHash) {
     const result = await pool().query(
-      'select id, branch_id from kiosks where device_token_hash = $1 limit 1',
+      `select k.id, k.branch_id, b.company_id, c.status as company_status
+         from kiosks k
+         join branches b on b.id = k.branch_id
+         join companies c on c.id = b.company_id
+        where k.device_token_hash = $1
+        limit 1`,
       [tokenHash],
     );
     return result.rows[0] || null;
@@ -124,9 +160,11 @@ const pgKioskRepo = {
 
   async findKiosk({ branchId, deviceName }) {
     const result = await pool().query(
-      `select id, branch_id, device_name, device_token_hash
-         from kiosks
-        where branch_id = $1 and device_name = $2
+      `select k.id, k.branch_id, k.device_name, k.device_token_hash, c.status as company_status
+         from kiosks k
+         join branches b on b.id = k.branch_id
+         join companies c on c.id = b.company_id
+        where k.branch_id = $1 and k.device_name = $2
         limit 1`,
       [branchId, deviceName],
     );
@@ -136,58 +174,114 @@ const pgKioskRepo = {
 
 function createKioskRegistry({
   repo = pgKioskRepo,
+  companies = companyRepo,
   enrollmentCode = envEnrollmentCode,
   loadActor = loadDbActor,
   warn = console.warn,
 } = {}) {
   const fail = (status, error) => ({ status, body: { error } });
+  const failCode = (status, code, error) => ({ status, body: { code, error } });
   let warnedOpenEnrollment = false;
+  let warnedLegacyCompany = false;
 
-  // Branch roles only see and manage their own branch; network roles see all.
+  // Branch roles only see and manage their own branch; network roles see
+  // every kiosk of their company (never other companies').
   function scopedBranchId(actor, requestedBranchId) {
     const role = String(actor?.role || '').toLowerCase();
-    if (NETWORK_ROLES.has(role)) return { branchId: requestedBranchId || null };
+    const companyId = actor?.company_id ? String(actor.company_id) : null;
+    if (!companyId) return { denied: true };
+    if (NETWORK_ROLES.has(role)) return { branchId: requestedBranchId || null, companyId };
     const ownBranchId = BRANCH_ROLES.has(role) ? String(actor?.branch_id || '') : '';
     if (!ownBranchId) return { denied: true };
     if (requestedBranchId && String(requestedBranchId) !== ownBranchId) return { denied: true };
-    return { branchId: ownBranchId };
+    return { branchId: ownBranchId, companyId };
   }
 
-  // Staff in scope (dashboard) or the shared enrollment code may register.
-  // The staff actor is loaded from the DB (role + allowed branches); the
-  // JWT only identifies the subject.
-  async function enrollmentAllowed({ branchId, enrollmentCode: submitted, actorClaims }) {
-    const configured = enrollmentCode();
-    if (!configured) {
-      if (!warnedOpenEnrollment) {
-        warnedOpenEnrollment = true;
-        warn('[kiosk] KIOSK_ENROLLMENT_CODE is not set: POST /api/kiosk/register is open to any device');
-      }
-      return true;
+  // company_code -> active company; absent -> the single default company
+  // (legacy kiosk apps) or 400. Returns { company, byCode } or { error }.
+  async function resolveRegistrationCompany(companyCode) {
+    if (companyCode !== undefined && companyCode !== null && companyCode !== '') {
+      const code = normalizeCompanyCode(companyCode);
+      const company = code ? await companies.findActiveByCode(code) : null;
+      if (!company) return { error: failCode(404, 'COMPANY_NOT_FOUND', 'Company not found') };
+      return { company, byCode: true };
     }
-    if (secretMatches(submitted, configured)) return true;
+    const [count, fallback] = await Promise.all([companies.countCompanies(), companies.findDefault()]);
+    if (count !== 1 || !fallback || fallback.status !== 'active') {
+      return { error: failCode(400, 'COMPANY_CODE_REQUIRED', 'company_code is required') };
+    }
+    if (!warnedLegacyCompany) {
+      warnedLegacyCompany = true;
+      warn('[kiosk] POST /api/kiosk/register without company_code: using the default company (legacy kiosk app)');
+    }
+    return { company: fallback, byCode: false };
+  }
+
+  // The env code covers only the default company while it is the only one.
+  async function isLegacySingleCompany(company) {
+    if (company?.is_default !== true) return false;
+    return (await companies.countCompanies()) === 1;
+  }
+
+  async function enrollmentAllowed({ branchId, company, enrollmentCode: submitted, actorClaims }) {
+    const companyId = String(company.id);
+    const companyHash = await companies.findKioskEnrollmentHash(companyId);
+    if (companyHash) {
+      if (enrollmentCodeMatches(submitted, companyHash)) return true;
+    } else if (await isLegacySingleCompany(company)) {
+      const configured = enrollmentCode();
+      if (!configured) {
+        if (!warnedOpenEnrollment) {
+          warnedOpenEnrollment = true;
+          warn('[kiosk] KIOSK_ENROLLMENT_CODE is not set and the company has no enrollment code: POST /api/kiosk/register is open to any device');
+        }
+        return true;
+      }
+      if (secretMatches(submitted, configured)) return true;
+    }
+    return staffAllowed({ branchId, companyId, actorClaims });
+  }
+
+  // Staff of the same company in scope (dashboard) may always register. The
+  // actor is loaded from the DB (role + allowed branches); the JWT only
+  // identifies the subject.
+  async function staffAllowed({ branchId, companyId, actorClaims }) {
     if (!actorClaims) return false;
     const actor = await loadActor(actorClaims);
     const role = String(actor?.role || '').toLowerCase();
     if (!NETWORK_ROLES.has(role) && !BRANCH_ROLES.has(role)) return false;
+    if (!actor.companyId || String(actor.companyId) !== String(companyId)) return false;
     if (actor.branchScope === null) return true;
     return (actor.branchScope || []).some((id) => String(id).toLowerCase() === String(branchId).toLowerCase());
   }
 
-  async function register({ branchId, deviceName, enrollmentCode: submitted, actorClaims = null }) {
+  async function register({ companyCode, branchId, deviceName, enrollmentCode: submitted, actorClaims = null }) {
     const name = normalizeDeviceName(deviceName);
     if (!UUID_PATTERN.test(String(branchId || '')) || !name) {
       return fail(400, 'branch_id and device_name are required');
     }
     if (name.length > MAX_DEVICE_NAME_LENGTH) return fail(400, 'device_name is too long');
-    if (!(await enrollmentAllowed({ branchId, enrollmentCode: submitted, actorClaims }))) {
+
+    const resolved = await resolveRegistrationCompany(companyCode);
+    if (resolved.error) return resolved.error;
+    const companyId = String(resolved.company.id);
+
+    if (!(await enrollmentAllowed({ branchId, company: resolved.company, enrollmentCode: submitted, actorClaims }))) {
       return {
         status: 403,
         body: { error: 'Kiosk enrollment code is invalid', code: 'KIOSK_ENROLLMENT_CODE_INVALID' },
       };
     }
 
-    if (!(await repo.branchExists(branchId))) return fail(404, 'Branch not found');
+    if (resolved.byCode) {
+      // Same answer for "no such branch", "closed" and "another company's branch".
+      const branch = await companies.findBranch(branchId);
+      if (!branch || String(branch.company_id) !== companyId || branch.is_active === false) {
+        return failCode(403, 'KIOSK_BRANCH_FORBIDDEN', 'Branch does not belong to this company');
+      }
+    } else if (!(await repo.branchExists(branchId))) {
+      return fail(404, 'Branch not found');
+    }
 
     const deviceToken = crypto.randomBytes(DEVICE_TOKEN_BYTES).toString('base64url');
     const kiosk = await repo.saveKiosk({ branchId, deviceName: name, tokenHash: hashDeviceToken(deviceToken) });
@@ -209,7 +303,7 @@ function createKioskRegistry({
     const scope = scopedBranchId(actor, branchId);
     if (scope.denied) return fail(403, 'Branch is outside the authenticated user scope');
 
-    const rows = await repo.listKiosks({ branchId: scope.branchId });
+    const rows = await repo.listKiosks({ branchId: scope.branchId, companyId: scope.companyId });
     const entry = rows.map(({ device_token_hash: tokenHash, ...row }) => ({ ...row, has_device_token: Boolean(tokenHash) }));
     return { status: 200, body: { entry } };
   }
@@ -217,7 +311,10 @@ function createKioskRegistry({
   async function removeKiosk({ id, actor }) {
     if (!UUID_PATTERN.test(String(id || ''))) return fail(400, 'Kiosk id is invalid');
     const kiosk = await repo.findKioskById(id);
-    if (!kiosk) return fail(404, 'Kiosk not found');
+    // Another company's kiosk does not exist for this caller.
+    if (!kiosk || !actor?.company_id || String(kiosk.company_id) !== String(actor.company_id)) {
+      return fail(404, 'Kiosk not found');
+    }
     if (scopedBranchId(actor, kiosk.branch_id).denied) {
       return fail(403, 'Branch is outside the authenticated user scope');
     }
@@ -236,8 +333,22 @@ function createKioskRegistry({
     if (kiosk.device_token_hash && !tokenMatches(deviceToken, kiosk.device_token_hash)) {
       return fail(403, 'Kiosk device token is invalid');
     }
+    if (kiosk.company_status !== 'active') {
+      return failCode(403, 'COMPANY_SUSPENDED', 'Company access is suspended');
+    }
 
     return { status: 200, kiosk };
+  }
+
+  // Socket handshake with a kiosk ticket (security review L3): tickets live
+  // 15 minutes, so the kiosk, its branch and its company status are
+  // re-checked on every connect. Returns true only for an existing kiosk of
+  // the ticket's branch whose company is active.
+  async function verifySocketKiosk({ kioskId, branchId }) {
+    if (!UUID_PATTERN.test(String(kioskId || '')) || !UUID_PATTERN.test(String(branchId || ''))) return false;
+    const kiosk = await repo.findKioskById(kioskId);
+    if (!kiosk || String(kiosk.branch_id).toLowerCase() !== String(branchId).toLowerCase()) return false;
+    return kiosk.company_status === 'active';
   }
 
   // Device token -> kiosk identity, or null when unknown/malformed.
@@ -245,10 +356,15 @@ function createKioskRegistry({
     if (typeof token !== 'string' || !token || token.length > MAX_DEVICE_TOKEN_LENGTH) return null;
     const kiosk = await repo.findKioskByTokenHash(hashDeviceToken(token));
     if (!kiosk?.id || !kiosk.branch_id) return null;
-    return { id: kiosk.id, branchId: String(kiosk.branch_id) };
+    return {
+      id: kiosk.id,
+      branchId: String(kiosk.branch_id),
+      companyId: kiosk.company_id ? String(kiosk.company_id) : null,
+      companyStatus: kiosk.company_status || null,
+    };
   }
 
-  return { authenticateDevice, authorizeTicket, listKiosks, register, removeKiosk };
+  return { authenticateDevice, authorizeTicket, listKiosks, register, removeKiosk, verifySocketKiosk };
 }
 
 const kioskRegistry = createKioskRegistry();

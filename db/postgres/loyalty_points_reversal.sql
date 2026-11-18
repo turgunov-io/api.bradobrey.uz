@@ -21,16 +21,33 @@ create unique index if not exists status_point_queue_reversal_uidx
 
 -- Store cancellation and no-show penalties per rank. Existing global values
 -- seed every current rank so deployments keep their configured behavior.
-insert into platform_settings (key, value, description)
-select 'loyalty_levels', coalesce((select value from platform_settings where key = 'loyalty_levels' limit 1), '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb), 'Marketplace status point levels'
-on conflict (key) do nothing;
+-- Seeded for the DEFAULT company with company_id set explicitly (MULTI_TENANCY,
+-- see client_ranks.sql); an existing row is never overwritten.
+do $$
+declare
+  default_levels constant jsonb := '{"NONE":{"min_points":0,"cashback_percent":0},"BRONZE":{"min_points":100,"cashback_percent":1},"SILVER":{"min_points":300,"cashback_percent":2},"GOLD":{"min_points":1500,"cashback_percent":2.5}}'::jsonb;
+begin
+  if to_regclass('public.companies') is not null
+     and exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'platform_settings' and column_name = 'company_id') then
+    insert into platform_settings (company_id, key, value, description)
+    select c.id, 'loyalty_levels', default_levels, 'Marketplace status point levels'
+      from companies c
+     where c.is_default
+       and not exists (select 1 from platform_settings s where s.company_id = c.id and s.key = 'loyalty_levels');
+  else
+    insert into platform_settings (key, value, description)
+    values ('loyalty_levels', default_levels, 'Marketplace status point levels')
+    on conflict do nothing;
+  end if;
+end $$;
 
 update platform_settings setting
    set value = coalesce((select jsonb_object_agg(level.name, level.value || jsonb_build_object(
        'cancel_penalty_points', greatest(0, coalesce((level.value ->> 'cancel_penalty_points')::integer, abs((points.value ->> 'late_cancel_penalty')::integer), 10)),
        'no_show_penalty_points', greatest(0, coalesce((level.value ->> 'no_show_penalty_points')::integer, abs((points.value ->> 'no_show_penalty')::integer), 30))
    )) from jsonb_each(setting.value) as level(name, value)
-      cross join lateral (select coalesce((select value from platform_settings where key = 'status_points'), '{}'::jsonb) as value) points), setting.value)
+      cross join lateral (select coalesce(tenant_setting('status_points', (to_jsonb(setting) ->> 'company_id')::uuid), '{}'::jsonb) as value) points), setting.value)
  where setting.key = 'loyalty_levels'
    and exists (select 1 from jsonb_each(setting.value) level(name, value)
                 where not (level.value ? 'cancel_penalty_points') or not (level.value ? 'no_show_penalty_points'));
@@ -78,6 +95,7 @@ declare
 begin
   for item in
     select q.id as queue_entry_id, mc.id as marketplace_client_id,
+           (to_jsonb(q) ->> 'company_id')::uuid as company_id,
            coalesce(q.finished_at, q.created_at) as event_at,
            (coalesce(q.finished_at, q.created_at) at time zone 'Asia/Tashkent')::date as service_day
       from queue_entries q
@@ -94,7 +112,8 @@ begin
     perform 1 from marketplace_clients where id = item.marketplace_client_id for update;
     select greatest(0, coalesce((value ->> 'completed_service_points')::integer, 10)),
            greatest(0, coalesce((value ->> 'daily_positive_limit')::integer, 20))
-      into award, daily_limit from platform_settings where key = 'status_points';
+      into award, daily_limit
+      from (select tenant_setting('status_points', item.company_id) as value) company_points;
     award := coalesce(award, 10);
     daily_limit := coalesce(daily_limit, 20);
     select coalesce(sum(amount), 0)::integer into awarded_today
@@ -115,6 +134,8 @@ begin
   end loop;
 end $$;
 
+-- Company-aware (MULTI_TENANCY B2a); keep identical to
+-- db/migrations/005_company_scoped_functions.sql (test/companySqlFunctions.test.js).
 create or replace function apply_marketplace_status_points_from_queue()
 returns trigger
 language plpgsql
@@ -122,11 +143,13 @@ as $$
 declare
   marketplace_id uuid;
   points_config jsonb;
+  anti_fraud_config jsonb;
   level_config jsonb;
   points_amount integer;
   positive_today integer;
   no_show_count integer;
   block_threshold integer;
+  block_hours integer;
   old_level text;
   new_level text;
   earned_points integer;
@@ -141,6 +164,8 @@ begin
      where queue_entry_id = new.id and kind = 'EARN';
   end if;
   if marketplace_id is null then
+    -- new.client_id is a client of new.company_id; map it to the (global)
+    -- marketplace account by phone.
     select mc.id into marketplace_id
       from marketplace_clients mc
       join clients c on regexp_replace(coalesce(c.phone, ''), '[^0-9]', '', 'g') =
@@ -151,10 +176,12 @@ begin
   if marketplace_id is null then return new; end if;
 
   perform 1 from marketplace_clients where id = marketplace_id for update;
-  points_config := coalesce((select value from platform_settings where key = 'status_points'), '{}'::jsonb);
+  -- Rules of the company that served the order.
+  points_config := coalesce(tenant_setting('status_points', new.company_id), '{}'::jsonb);
+  anti_fraud_config := coalesce(tenant_setting('anti_fraud', new.company_id), '{}'::jsonb);
 
   if new.status = 'completed' then
-    select marketplace_loyalty_level(status_points) into old_level
+    select marketplace_loyalty_level(status_points, new.company_id) into old_level
       from marketplace_clients where id = marketplace_id;
     points_amount := greatest(0, coalesce((points_config ->> 'completed_service_points')::integer, 10));
     update marketplace_clients set no_show_streak = 0 where id = marketplace_id;
@@ -167,7 +194,7 @@ begin
       on conflict (queue_entry_id, kind) where queue_entry_id is not null do nothing;
       if found then
         update marketplace_clients set status_points = status_points + points_amount, no_show_streak = 0 where id = marketplace_id;
-        select marketplace_loyalty_level(status_points) into new_level
+        select marketplace_loyalty_level(status_points, new.company_id) into new_level
           from marketplace_clients where id = marketplace_id;
         if old_level is distinct from new_level then
           insert into marketplace_notifications (marketplace_client_id, type, payload)
@@ -180,7 +207,7 @@ begin
      where queue_entry_id = new.id and kind = 'EARN'
        and marketplace_client_id = marketplace_id;
     if earned_points > 0 then
-      select marketplace_loyalty_level(status_points) into old_level
+      select marketplace_loyalty_level(status_points, new.company_id) into old_level
         from marketplace_clients where id = marketplace_id;
       insert into status_point_transactions (marketplace_client_id, queue_entry_id, kind, amount, reason, metadata)
       values (marketplace_id, new.id, 'REVERSAL', -earned_points, 'COMPLETED_SERVICE_CANCELLED',
@@ -189,7 +216,7 @@ begin
       if found then
         update marketplace_clients set status_points = greatest(0, status_points - earned_points)
          where id = marketplace_id;
-        select marketplace_loyalty_level(status_points) into new_level
+        select marketplace_loyalty_level(status_points, new.company_id) into new_level
           from marketplace_clients where id = marketplace_id;
         if old_level is distinct from new_level then
           insert into marketplace_notifications (marketplace_client_id, type, payload)
@@ -203,9 +230,9 @@ begin
   -- A completed order later corrected to no-show gets both its earned points
   -- reversed and the rank-specific no-show deduction.
   if new.status = 'no_show' then
-    select marketplace_loyalty_level(status_points) into old_level
+    select marketplace_loyalty_level(status_points, new.company_id) into old_level
       from marketplace_clients where id = marketplace_id for update;
-    select value -> old_level into level_config from platform_settings where key = 'loyalty_levels';
+    level_config := coalesce(tenant_setting('loyalty_levels', new.company_id), '{}'::jsonb) -> old_level;
     points_amount := -greatest(0, coalesce(
       (level_config ->> 'no_show_penalty_points')::integer,
       abs((points_config ->> 'no_show_penalty')::integer), 30));
@@ -217,21 +244,22 @@ begin
         status_points = greatest(0, status_points + points_amount),
         no_show_streak = no_show_streak + 1
       where id = marketplace_id;
-      select marketplace_loyalty_level(status_points) into new_level
+      select marketplace_loyalty_level(status_points, new.company_id) into new_level
         from marketplace_clients where id = marketplace_id;
       if old_level is distinct from new_level then
         insert into marketplace_notifications (marketplace_client_id, type, payload)
         values (marketplace_id, 'LEVEL_CHANGED', jsonb_build_object('old_level', old_level, 'new_level', new_level, 'reason', 'NO_SHOW'));
       end if;
       select no_show_streak into no_show_count from marketplace_clients where id = marketplace_id;
-      block_threshold := coalesce((select (value ->> 'no_show_block_threshold')::integer from platform_settings where key = 'anti_fraud'), 5);
+      block_threshold := coalesce((anti_fraud_config ->> 'no_show_block_threshold')::integer, 5);
+      block_hours := coalesce((anti_fraud_config ->> 'block_hours')::integer, 24);
       if no_show_count >= block_threshold then
         update marketplace_clients
-           set blocked_until = now() + make_interval(hours => coalesce((select (value ->> 'block_hours')::integer from platform_settings where key = 'anti_fraud'), 24))
+           set blocked_until = now() + make_interval(hours => block_hours)
          where id = marketplace_id;
         insert into marketplace_notifications (marketplace_client_id, type, payload)
         values (marketplace_id, 'ACCOUNT_BLOCKED', jsonb_build_object(
-          'blocked_until', now() + make_interval(hours => coalesce((select (value ->> 'block_hours')::integer from platform_settings where key = 'anti_fraud'), 24)),
+          'blocked_until', now() + make_interval(hours => block_hours),
           'reason', 'NO_SHOW_LIMIT'));
       end if;
     end if;

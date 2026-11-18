@@ -57,7 +57,8 @@ test('order point reversals are unique, clamped, and limited to previously earne
   assert.match(migration, /COMPLETED_SERVICE_CANCELLED_BACKFILL/);
   assert.match(migration, /on conflict \(queue_entry_id, kind\).*do nothing/s);
   assert.match(migration, /status_points = greatest\(0, status_points - earned_points\)/);
-  assert.match(migration, /marketplace_loyalty_level\(status_points\)/);
+  // B2a: the level is read for the company that served the order.
+  assert.match(migration, /marketplace_loyalty_level\(status_points, new\.company_id\)/);
   assert.match(migration, /no_show_penalty_points/);
   assert.match(migration, /cancel_penalty_points/);
   assert.match(migration, /where queue_entry_id = new\.id and kind = 'EARN'/);
