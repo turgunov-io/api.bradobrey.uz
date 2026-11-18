@@ -22,7 +22,15 @@ function setup({ role = 'admin_network', branches = 1, fail = false } = {}) {
     throw new Error(name);
   }};
   vm.runInNewContext(fs.readFileSync('src/models/verifix.js', 'utf8'), context);
-  const req = { headers: { authorization: 'Bearer test' }, method: 'PATCH', body: {} };
+  // routers/verifix.js attaches the DB-loaded actor (attachDbActor); the
+  // model no longer falls back to the token role.
+  const dbActor = {
+    id,
+    role,
+    branchScope: ['admin_network', 'admin'].includes(role) ? null : [id],
+    sessionBranchId: id,
+  };
+  const req = { headers: { authorization: 'Bearer test' }, method: 'PATCH', body: {}, dbActor };
   const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
   return { api: context.module.exports, calls, req, res };
 }

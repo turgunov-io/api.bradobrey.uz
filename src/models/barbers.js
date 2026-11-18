@@ -657,18 +657,30 @@ const normalizeServiceIds = (values) => Array.from(new Set(
         .filter(Boolean)
 ));
 
-const loadQueueServices = async (serviceIds, { strict = true } = {}) => {
+// A service may be attached to a queue entry only when it belongs to the
+// entry's branch or is network-wide (branch_id IS NULL). Mutating callers pass
+// `branchScoped: true` so a barber cannot attach another branch's service (and
+// its price) to an entry by id.
+const isServiceAllowedForBranch = (service, branchId) => {
+    if (service?.branch_id === null || service?.branch_id === undefined) return true;
+    return branchId !== null && branchId !== undefined && String(service.branch_id) === String(branchId);
+};
+
+const loadQueueServices = async (serviceIds, { strict = true, branchScoped = false, branchId = null } = {}) => {
     const ids = normalizeServiceIds(serviceIds);
     if (!ids.length) return [];
 
     const { data, error } = await db
         .from('services')
-        .select('id, name, base_price, duration_minutes, is_active')
+        .select('id, name, base_price, duration_minutes, is_active, branch_id')
         .in('id', ids);
 
     if (error) throw new Error(error.message);
 
-    const byId = new Map((data || []).map((service) => [String(service.id), service]));
+    const usable = (data || []).filter((service) => (
+        !branchScoped || isServiceAllowedForBranch(service, branchId)
+    ));
+    const byId = new Map(usable.map((service) => [String(service.id), service]));
     if (strict && byId.size !== ids.length) {
         const error = new Error('One or more service_ids are invalid');
         error.statusCode = 400;
@@ -1407,7 +1419,8 @@ class Barbers {
             }
 
             const archived = normalizeArchiveFilter(req.query?.archived);
-            const branchId = normalizeText(req.query?.branch_id);
+            // Branch-scoped roles are pinned to their branch by the employee-management guard.
+            const branchId = req.employeeManagement?.branchId || normalizeText(req.query?.branch_id);
             const role = normalizeText(req.query?.role);
 
             const result = await loadEmployeeDirectory({ archived, branchId, role });
@@ -2313,25 +2326,13 @@ class Barbers {
     }
 
     async myQueue(req, res) {
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can view their queue' });
-        }
-
-        const barberId = payload.sub || payload.id;
+        // Session-verified (jti + persisted active branch), not just a valid
+        // JWT signature: logout/branch revocation must cut off client phones.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can view their queue');
+        if (!auth) return;
+        const { barberId } = auth;
+        // Scoped to the barber AND the session's active branch (as getQueueById).
+        const sessionBranchId = auth.payload.branchId;
 
         const cutoffIso = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000).toISOString();
         try {
@@ -2357,6 +2358,7 @@ class Barbers {
                 client:clients ( id, name, phone )
             `)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .in('status', ACTIVE_QUEUE_STATUSES)
             .order('created_at', { ascending: true });
 
@@ -2373,10 +2375,11 @@ class Barbers {
                     service_id,
                     service_ids,
                     payment_method,
-                    branch_id: effectiveBranchId,
+                    branch_id,
                     client:clients ( id, name, phone )
                 `)
                 .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
                 .in('status', ACTIVE_QUEUE_STATUSES)
                 .order('created_at', { ascending: true }));
         }
@@ -2410,25 +2413,11 @@ class Barbers {
     async getQueueById(req, res) {
         const { id } = req.params || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can view queue entries' });
-        }
-
-        const barberId = payload.sub || payload.id;
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can view queue entries');
+        if (!auth) return;
+        const { barberId } = auth;
+        // Scoped to the barber AND the session's active branch.
+        const sessionBranchId = auth.payload.branchId;
 
         let { data, error } = await db
             .from('queue_entries')
@@ -2446,6 +2435,7 @@ class Barbers {
             `)
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .maybeSingle();
 
         if (error && String(error.message || '').includes("Could not find the 'certificate_id' column")) {
@@ -2464,6 +2454,7 @@ class Barbers {
                 `)
                 .eq('id', id)
                 .eq('barber_id', barberId)
+                .eq('branch_id', sessionBranchId)
                 .maybeSingle());
         }
 
@@ -2489,35 +2480,22 @@ class Barbers {
         const { id } = req.params || {};
         const { status, payment_method, service_id, service_ids } = req.body || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can edit their queue entries' });
-        }
+        // Session-verified (jti + persisted active branch), like myQueue.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can edit their queue entries');
+        if (!auth) return;
+        const { barberId } = auth;
+        const sessionBranchId = auth.payload.branchId;
 
         if (!id) {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
-
-        const barberId = payload.sub || payload.id;
 
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status, swapped_flag, branch_id, created_at, started_at, service_id, service_ids, price_override, price_override_reason')
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .maybeSingle();
 
         if (entryError) {
@@ -2589,7 +2567,7 @@ class Barbers {
                 return res.status(400).json({ error: 'service_id must be included in service_ids' });
             }
             try {
-                selectedServices = await loadQueueServices(normalizedServiceIds);
+                selectedServices = await loadQueueServices(normalizedServiceIds, { branchScoped: true, branchId: entry.branch_id });
             } catch (error) {
                 return res.status(error.statusCode || 500).json({ error: error.message });
             }
@@ -2603,7 +2581,7 @@ class Barbers {
                 return res.status(400).json({ error: 'service_id is required' });
             }
             try {
-                selectedServices = await loadQueueServices(normalizedServiceIds);
+                selectedServices = await loadQueueServices(normalizedServiceIds, { branchScoped: true, branchId: entry.branch_id });
             } catch (error) {
                 return res.status(error.statusCode || 500).json({ error: error.message });
             }
@@ -2893,23 +2871,12 @@ class Barbers {
         const { id } = req.params || {};
         const { add_service_ids, amount, reason, service_ids } = req.body || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can edit price before completion' });
-        }
+        // Session-verified, like myQueue: a revoked session or branch must
+        // not be able to rewrite prices.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can edit price before completion');
+        if (!auth) return;
+        const { barberId } = auth;
+        const sessionBranchId = auth.payload.branchId;
 
         if (!id) {
             return res.status(400).json({ error: 'Queue entry id is required' });
@@ -2931,13 +2898,12 @@ class Barbers {
             return res.status(400).json({ error: 'reason is required when editing the final price' });
         }
 
-        const barberId = payload.sub || payload.id;
-
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status, branch_id, started_at, service_id, service_ids, price_override, price_override_reason')
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .maybeSingle();
 
         if (entryError) {
@@ -2963,7 +2929,7 @@ class Barbers {
                 return res.status(400).json({ error: 'At least one service is required' });
             }
             try {
-                await loadQueueServices(nextServiceIds);
+                await loadQueueServices(nextServiceIds, { branchScoped: true, branchId: entry.branch_id });
             } catch (error) {
                 return res.status(error.statusCode || 500).json({ error: error.message });
             }

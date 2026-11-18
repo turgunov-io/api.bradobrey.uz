@@ -56,6 +56,36 @@ function installDbMock(responsesByTable) {
   };
 }
 
+const VALID_SESSION = {
+  session_id: 'session-1',
+  session_expires_at: new Date(Date.now() + 60_000).toISOString(),
+  is_expired: false,
+  role: 'barber',
+  is_archived: false,
+  branch_is_active: true,
+  branch_access_revoked: false,
+};
+
+// Barber queue handlers verify the persisted session (jti + active branch)
+// through pool.query; answer it with a valid session row.
+function installSessionDbMock(responsesByTable) {
+  const mock = installDbMock(responsesByTable);
+  const originalQuery = pool.query;
+  pool.query = async () => ({ rows: [VALID_SESSION] });
+  return {
+    calls: mock.calls,
+    restore() {
+      mock.restore();
+      pool.query = originalQuery;
+    },
+  };
+}
+
+const sessionToken = () => jwt.sign(
+  { sub: 'barber-1', role: 'barber', branchId: 'branch-1', jti: 'session-1' },
+  process.env.JWT_SECRET,
+);
+
 function createResponse() {
   return {
     statusCode: 200,
@@ -77,7 +107,7 @@ test('GET /api/barbers/queue uses the canonical active statuses in primary and f
     requested_at: '2026-10-03T10:00:00Z',
     responded_at: '2026-10-03T10:01:00Z',
   };
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [
       { data: [], error: null },
       { data: [], error: { message: "Could not find the 'certificate_id' column" } },
@@ -93,7 +123,7 @@ test('GET /api/barbers/queue uses the canonical active statuses in primary and f
   });
 
   try {
-    const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+    const token = sessionToken();
     const req = { headers: { authorization: `Bearer ${token}` }, query: {} };
     const res = createResponse();
 
@@ -186,7 +216,7 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete enriches services and em
     { id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 20, is_active: true },
     { id: 'service-2', name: 'Beard', base_price: 50, duration_minutes: 10, is_active: true },
   ];
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: new Date().toISOString(), service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: new Date().toISOString(), service_id: 'service-1', service_ids: ['service-1', 'service-2'], price_override: null }, error: null },
@@ -199,7 +229,7 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete enriches services and em
   const emitted = [];
 
   try {
-    const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+    const token = sessionToken();
     const req = {
       app: { get: () => ({ to: () => ({ emit: (event, payload) => emitted.push({ event, payload }) }) }) },
       body: { add_service_ids: ['service-2'] },
@@ -228,7 +258,7 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manua
   const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src/models/barbers.js'), 'utf8');
   assert.doesNotMatch(source, /amount cannot be lower than minimum service price/);
 
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [
       { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'], price_override: 1, price_override_reason: 'Округление' }, error: null },
@@ -237,7 +267,7 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manua
   });
 
   try {
-    const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+    const token = sessionToken();
     const res = createResponse();
     await barbers.editBeforeComplete({
       app: { get: () => null },
@@ -260,7 +290,7 @@ test('PATCH /api/barbers/queue/:id validates in-progress services and returns en
     { id: 'service-2', name: 'Beard', base_price: 50, duration_minutes: 10, is_active: true },
   ];
   const startedAt = new Date().toISOString();
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: startedAt, service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: startedAt, service_id: 'service-1', service_ids: ['service-1', 'service-2'], price_override: null }, error: null },
@@ -273,7 +303,7 @@ test('PATCH /api/barbers/queue/:id validates in-progress services and returns en
   const emitted = [];
 
   try {
-    const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+    const token = sessionToken();
     const req = {
       app: { get: () => ({ to: () => ({ emit: (event, payload) => emitted.push({ event, payload }) }) }) },
       body: { service_ids: ['service-1', 'service-2'] },
@@ -298,7 +328,7 @@ test('PATCH /api/barbers/queue/:id validates in-progress services and returns en
 
 test('generic queue PATCH cannot reopen or change any terminal status', async () => {
   const terminalStatuses = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: terminalStatuses.map((status) => ({
       data: {
         id: `queue-${status}`,
@@ -311,7 +341,7 @@ test('generic queue PATCH cannot reopen or change any terminal status', async ()
       error: null,
     })),
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     for (const status of terminalStatuses) {
@@ -339,7 +369,7 @@ test('generic queue PATCH cannot mutate services or payment on terminal entries'
     { service_ids: ['service-1', 'service-2'] },
     { status: 'completed', payment_method: 'cash' },
   ];
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: mutations.map((_, index) => ({
       data: {
         id: `terminal-${index}`,
@@ -352,7 +382,7 @@ test('generic queue PATCH cannot mutate services or payment on terminal entries'
       error: null,
     })),
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     for (let index = 0; index < mutations.length; index += 1) {
@@ -381,11 +411,11 @@ test('generic queue PATCH treats a repeated terminal status as a read-only no-op
     service_id: 'service-1',
     service_ids: ['service-1'],
   };
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [{ data: entry, error: null }],
     services: [{ data: [{ id: 'service-1', name: 'Haircut', base_price: 100, duration_minutes: 30 }], error: null }],
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     const res = createResponse();
@@ -406,13 +436,13 @@ test('generic queue PATCH treats a repeated terminal status as a read-only no-op
 });
 
 test('generic queue PATCH detects a concurrent status transition', async () => {
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [
       { data: { id: 'queue-race', barber_id: 'barber-1', branch_id: 'branch-1', status: 'called' }, error: null },
       { data: null, error: null },
     ],
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     const res = createResponse();

@@ -1,4 +1,5 @@
 const { Pool, types } = require('pg');
+const { createPoolConfig } = require('./postgresConfig');
 
 types.setTypeParser(1082, (value) => value); // date
 types.setTypeParser(1083, (value) => value); // time
@@ -6,70 +7,14 @@ types.setTypeParser(1114, (value) => value); // timestamp
 types.setTypeParser(1184, (value) => value); // timestamptz
 types.setTypeParser(1700, (value) => (value === null ? null : Number(value))); // numeric
 
-const SSL_ENABLED_VALUES = new Set(['1', 'true', 'yes', 'require']);
-
-const hasDiscretePostgresConfig = () => Boolean(
-  (process.env.PGDATABASE || process.env.POSTGRES_DB) &&
-  (process.env.PGHOST || process.env.POSTGRES_HOST) &&
-  (process.env.PGUSER || process.env.POSTGRES_USER)
-);
-
-const isValidConnectionString = (value) => {
-  if (!value) return false;
-
-  try {
-    const parsed = new URL(value);
-    return ['postgres:', 'postgresql:'].includes(parsed.protocol);
-  } catch (_err) {
-    return false;
-  }
-};
-
-const createPoolConfig = () => {
-  const connectionString =
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    process.env.POSTGRES_CONNECTION_STRING;
-
-  const sslValue = String(process.env.POSTGRES_SSL || process.env.PGSSLMODE || '').toLowerCase();
-  const ssl = SSL_ENABLED_VALUES.has(sslValue)
-    ? { rejectUnauthorized: String(process.env.POSTGRES_SSL_REJECT_UNAUTHORIZED || 'true') !== 'false' }
-    : undefined;
-
-  if (connectionString && isValidConnectionString(connectionString)) {
-    return {
-      connectionString,
-      max: Number(process.env.POSTGRES_POOL_MAX || 10),
-      idleTimeoutMillis: Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 30000),
-      ...(ssl ? { ssl } : {}),
-    };
-  }
-
-  if (connectionString && !hasDiscretePostgresConfig()) {
-    throw new Error(
-      'Postgres DATABASE_URL is invalid: use a valid postgres:// URL or set PGHOST, PGPORT, PGDATABASE, PGUSER and PGPASSWORD'
-    );
-  }
-
-  if (!process.env.PGDATABASE && !process.env.POSTGRES_DB) {
-    throw new Error(
-      'Postgres env vars missing: set DATABASE_URL or PGHOST, PGPORT, PGDATABASE, PGUSER and PGPASSWORD'
-    );
-  }
-
-  return {
-    database: process.env.PGDATABASE || process.env.POSTGRES_DB,
-    host: process.env.PGHOST || process.env.POSTGRES_HOST || 'localhost',
-    idleTimeoutMillis: Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 30000),
-    max: Number(process.env.POSTGRES_POOL_MAX || 10),
-    password: process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD,
-    port: Number(process.env.PGPORT || process.env.POSTGRES_PORT || 5432),
-    user: process.env.PGUSER || process.env.POSTGRES_USER,
-    ...(ssl ? { ssl } : {}),
-  };
-};
-
 const pool = new Pool(createPoolConfig());
+
+// An idle client can error when the server restarts or the network drops.
+// Without a listener pg re-emits it as an uncaught 'error' and crashes the
+// process; the pool discards the broken client and reconnects on next query.
+pool.on('error', (error) => {
+  console.error('[postgres] idle client error:', error.code || error.message);
+});
 
 const quoteIdentifier = (identifier) => {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier || '')) {

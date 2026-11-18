@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
+const { isBranchAllowed, resolveStaffBranchScope } = require('../utils/adminAuth');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
 const GLOBAL_ADMIN_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
@@ -73,7 +74,8 @@ async function auth(req, res) {
   }
   if (!user) { res.status(401).json({ error: 'Session is no longer valid' }); return null; }
 
-  const role = String(payload.role || user.role || '').trim().toLowerCase();
+  // Role comes from the database, never from the token (MULTI_TENANCY 0.6).
+  const role = String(user.role || '').trim().toLowerCase();
   if (!PRIVILEGED_ROLES.has(role) && role !== 'manager') {
     res.status(403).json({ error: 'Expenses are not available for this role' });
     return null;
@@ -88,10 +90,15 @@ async function auth(req, res) {
     permissions = (result.data || []).map((row) => row.permission);
   }
 
+  const branchId = payload.branchId || payload.branch_id || user.branch_id || null;
+  // null = network role (whole network); otherwise the allowed branch ids.
+  const branchScope = await resolveStaffBranchScope({ ...user, role }, branchId);
+
   return {
     userId,
     role,
-    branchId: payload.branchId || payload.branch_id || user.branch_id || null,
+    branchId,
+    branchScope,
     permissions,
   };
 }
@@ -188,8 +195,12 @@ module.exports = {
     const values = [EXPENSE_TYPE];
     const where = ["p.metadata->>'type' = $1"];
     const add = (value) => { values.push(value); return `$${values.length}`; };
-    if (!PRIVILEGED_ROLES.has(access.role)) where.push(`p.branch_id = ${add(access.branchId)}`);
-    else if (req.query.branch_id) where.push(`p.branch_id = ${add(req.query.branch_id)}`);
+    const requestedBranchId = text(req.query.branch_id);
+    if (requestedBranchId && !isBranchAllowed(access.branchScope, requestedBranchId)) {
+      return res.status(403).json({ error: 'Branch is outside your access scope' });
+    }
+    if (requestedBranchId) where.push(`p.branch_id = ${add(requestedBranchId)}`);
+    else if (access.branchScope !== null) where.push(`p.branch_id::text = any(${add(access.branchScope)}::text[])`);
     if (req.query.category) where.push(`p.metadata->>'category' = ${add(String(req.query.category).trim())}`);
     if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
       const [year, month] = req.query.period.split('-').map(Number);
@@ -214,6 +225,9 @@ module.exports = {
     if (!access || !requirePermission(access, PERMISSIONS.create, res)) return;
     const branchId = resolveCreateBranchId(access, req.body || {});
     if (!branchId) return res.status(422).json({ error: 'Branch is required' });
+    if (!isBranchAllowed(access.branchScope, branchId)) {
+      return res.status(403).json({ error: 'Branch is outside your access scope' });
+    }
     // New expenses always belong to the calendar day on which they are created.
     // Do not trust a client-provided date, otherwise a manager can move an
     // expense into another accounting period from the mobile app.
@@ -258,8 +272,8 @@ module.exports = {
     if (draft.error) return res.status(422).json({ error: draft.error });
     const metadata = Object.fromEntries(Object.entries(draft.payload).filter(([key]) => key !== 'amount' && key !== 'spent_at'));
     const values = [JSON.stringify(metadata), draft.payload.amount ?? null, draft.payload.spent_at ?? null, req.params.id, EXPENSE_TYPE];
-    const scope = PRIVILEGED_ROLES.has(access.role) ? '' : ' and branch_id = $6';
-    if (scope) values.push(access.branchId);
+    const scope = access.branchScope === null ? '' : ' and branch_id::text = any($6::text[])';
+    if (scope) values.push(access.branchScope);
     try {
       const result = await db.query(
         `update warehouse_purchases
@@ -280,8 +294,8 @@ module.exports = {
     try { access = await auth(req, res); } catch (error) { return sendDbError(res, error); }
     if (!access || !requirePermission(access, PERMISSIONS.delete, res)) return;
     const values = [req.params.id, EXPENSE_TYPE];
-    const scope = PRIVILEGED_ROLES.has(access.role) ? '' : ' and branch_id = $3';
-    if (scope) values.push(access.branchId);
+    const scope = access.branchScope === null ? '' : ' and branch_id::text = any($3::text[])';
+    if (scope) values.push(access.branchScope);
     try {
       const result = await db.query(
         `delete from warehouse_purchases where id = $1 and metadata->>'type' = $2${scope} returning id`, values);

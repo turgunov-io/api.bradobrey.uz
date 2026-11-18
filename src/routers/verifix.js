@@ -1,7 +1,12 @@
 const express = require('express');
 const verifix = require('../models/verifix');
 
+const { attachDbActor } = require('../utils/adminAuth');
+
 const router = express.Router();
+
+// Role and branch scope come from the database (req.dbActor), not the token.
+router.use(attachDbActor);
 
 router.get('/events', (req, res) => verifix.listEvents(req, res));
 router.post('/events', (req, res) => verifix.recordEvent(req, res));

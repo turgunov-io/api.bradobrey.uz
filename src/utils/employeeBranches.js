@@ -1,5 +1,6 @@
 const { db, pool } = require('../config/postgres');
 const { applyEmployeeLogoutTransaction } = require('./employeePresenceTransaction');
+const { NETWORK_ROLES } = require('./employeeQualityAccess');
 
 const isMissingRelation = (error, relation) => {
   const text = [error?.code, error?.message, error?.details, error?.hint]
@@ -14,16 +15,41 @@ const normalizeId = (value) => {
   return id || null;
 };
 
-const selectEmployeeBranches = (branches = [], accessRows = []) => {
+const NETWORK_BRANCH_ROLES = Object.freeze([...NETWORK_ROLES]);
+
+/**
+ * Allow-list branch selection (pure mirror of the SQL in listEmployeeBranches).
+ * Allowed = home branch(es) ∪ branches with an active access row; network
+ * roles get every branch. Closed branches and explicit deny rows
+ * (is_active = false) always win.
+ *
+ * @param {Array<{id: string, is_active?: boolean}>} branches
+ * @param {Array<{branch_id: string, is_active: boolean}>} accessRows
+ * @param {{ homeBranchIds?: Array<string|null>, role?: string|null }} [options]
+ */
+const selectEmployeeBranches = (branches = [], accessRows = [], { homeBranchIds = [], role = null } = {}) => {
   const deniedBranchIds = new Set(
     accessRows
       .filter((row) => row?.is_active === false)
       .map((row) => String(row.branch_id))
   );
+  const allowedBranchIds = new Set([
+    ...homeBranchIds.map(normalizeId).filter(Boolean),
+    ...accessRows.filter((row) => row?.is_active === true).map((row) => String(row.branch_id)),
+  ]);
+  const isNetworkRole = NETWORK_ROLES.has(role);
 
   return branches.filter((branch) => (
-    branch?.is_active !== false && !deniedBranchIds.has(String(branch.id))
+    branch?.is_active !== false
+    && !deniedBranchIds.has(String(branch.id))
+    && (isNetworkRole || allowedBranchIds.has(String(branch.id)))
   ));
+};
+
+const loadFallbackBranch = async (fallback) => {
+  if (!fallback) return [];
+  const legacy = await db.query('select id, name, address, city, timezone from branches where id = $1 and is_active = true', [fallback]);
+  return legacy.rows || [];
 };
 
 async function listEmployeeBranches(employeeId, fallbackBranchId = null) {
@@ -31,14 +57,18 @@ async function listEmployeeBranches(employeeId, fallbackBranchId = null) {
   const fallback = normalizeId(fallbackBranchId);
   if (!id) return [];
 
-  // A barber's users.branch_id is the permanent/home branch, not today's
-  // workplace. Active branches are therefore selectable by default. The
-  // access table is kept as an explicit deny list (`is_active = false`) so
-  // administrators can still revoke a specific branch without turning the
-  // legacy backfilled home-branch row into a hidden allow-list barrier.
+  // ALLOW-list (Phase 0.7). users.branch_id / barbers.branch_id is the home
+  // branch; additional workplaces need an explicit `is_active = true` row in
+  // employee_branch_access (backfilled from real work history by
+  // db/postgres/employee_branch_access_allowlist_backfill.sql). Network roles
+  // (role read from the DB, not the token) keep every active branch. An
+  // explicit `is_active = false` row always revokes, including the home branch.
+  // `fallbackBranchId` is a server-side home-branch hint from the caller.
   const result = await db.query(`
     select b.id, b.name, b.address, b.city, b.timezone
       from branches b
+      left join users u on u.id = $1
+      left join barbers bb on bb.id = $1
      where b.is_active = true
        and not exists (
          select 1
@@ -47,22 +77,31 @@ async function listEmployeeBranches(employeeId, fallbackBranchId = null) {
             and a.branch_id = b.id
             and a.is_active = false
        )
+       and (
+         u.role = any($2::text[])
+         or b.id = u.branch_id
+         or b.id = bb.branch_id
+         or b.id = $3::uuid
+         or exists (
+           select 1
+             from employee_branch_access grant_row
+            where grant_row.employee_id = $1
+              and grant_row.branch_id = b.id
+              and grant_row.is_active = true
+         )
+       )
      order by b.name asc, b.id asc
-  `, [id]).catch((error) => ({ rows: [], error }));
+  `, [id, NETWORK_BRANCH_ROLES, fallback]).catch((error) => ({ rows: [], error }));
 
   if (result.error) {
     if (!isMissingRelation(result.error, 'employee_branch_access')) throw result.error;
-    if (!fallback) return [];
-    const legacy = await db.query('select id, name, address, city, timezone from branches where id = $1 and is_active = true', [fallback]);
-    return legacy.rows || [];
+    // Pre-migration schema: only the home branch is known to be allowed.
+    return loadFallbackBranch(fallback);
   }
 
-  const rows = result.rows || [];
-  if (!rows.length && fallback) {
-    const legacy = await db.query('select id, name, address, city, timezone from branches where id = $1 and is_active = true', [fallback]);
-    return legacy.rows || [];
-  }
-  return rows;
+  // No fallback when the list is empty: an empty result means every candidate
+  // branch is closed or explicitly denied, and must stay denied.
+  return result.rows || [];
 }
 
 async function resolveEmployeeBranch({ employeeId, requestedBranchId, fallbackBranchId }) {

@@ -1,7 +1,12 @@
 const express = require('express');
 const warehouse = require('../models/warehouse');
 
+const { staffAccess } = require('../middleware/staffAccess');
+
 const router = express.Router();
+
+// Same rule as the dashboard /warehouse page: a dashboard role with dashboard.access.
+router.use(staffAccess.requireStaff({ anyOf: ['dashboard.access'] }));
 
 router.get('/summary', (req, res) => warehouse.summary(req, res));
 

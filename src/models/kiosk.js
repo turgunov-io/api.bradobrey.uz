@@ -5,6 +5,7 @@ const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { issueKioskSocketTicket } = require('../kioskSocketTicket');
+const { kioskRegistry } = require('../services/kioskRegistration');
 const { buildAuthenticatedBarberRoster } = require('../utils/kioskBarberPresence');
 const {
     certificateLifecycleResponse,
@@ -28,6 +29,13 @@ const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
 const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+let warnedUnscopedServices = false;
+
+// A kiosk sees only its branch's queue entries (MULTI_TENANCY 0.3); without
+// req.kiosk (legacy / KIOSK_AUTH_ENFORCE off) behaviour is unchanged.
+const isOutsideKioskBranch = (req, entry) => Boolean(req.kiosk)
+    && String(entry?.branch_id || '').toLowerCase() !== String(req.kiosk.branchId).toLowerCase();
 
 const isMissingActivePresenceTable = (error) => {
     if (error?.code === '42P01') return true;
@@ -278,63 +286,77 @@ class Kiosk {
         });
     }
 
+    // Rate-limited (routers/kiosk.js); needs KIOSK_ENROLLMENT_CODE or staff when
+    // the code is configured, see services/kioskRegistration.js.
     async register(req, res) {
-        const { branch_id, device_name } = req.body || {};
-
-        if (!branch_id || !device_name) {
-            return res.status(400).json({ error: "branch_id and device_name are required" });
+        const { branch_id, device_name, enrollment_code } = req.body || {};
+        // Verified claims only identify the caller; the registry loads the
+        // employee (role, archived, allowed branches) from the DB.
+        let actorClaims = null;
+        const token = getBearerToken(req);
+        if (token) {
+            try {
+                actorClaims = verifyJwt(token);
+            } catch (_error) {
+                actorClaims = null;
+            }
         }
-
-        const { data: branch, error: branchError } = await db
-            .from("branches")
-            .select("id")
-            .eq("id", branch_id)
-            .maybeSingle();
-
-        if (branchError) {
-            return res.status(500).json({ error: branchError.message });
+        try {
+            const result = await kioskRegistry.register({
+                branchId: branch_id,
+                deviceName: device_name,
+                enrollmentCode: enrollment_code,
+                actorClaims,
+            });
+            return res.status(result.status).json(result.body);
+        } catch (error) {
+            console.error('[kiosk] register failed:', error?.code || error?.message);
+            return res.status(500).json({ error: 'Failed to register kiosk' });
         }
-        if (!branch) {
-            return res.status(404).json({ error: "Branch not found" });
+    }
+
+    // Staff-authorized (routers/kiosk.js): registered kiosk devices, branch-scoped.
+    async listDevices(req, res) {
+        try {
+            const result = await kioskRegistry.listKiosks({
+                actor: req.staffAccess?.actor,
+                branchId: req.query?.branch_id,
+            });
+            return res.status(result.status).json(result.body);
+        } catch (error) {
+            console.error('[kiosk] list devices failed:', error?.code || error?.message);
+            return res.status(500).json({ error: 'Failed to load kiosks' });
         }
+    }
 
-        const { error: deleteError } = await db
-            .from("kiosks")
-            .delete()
-            .eq("branch_id", branch_id);
-
-        if (deleteError) {
-            return res.status(500).json({ error: deleteError.message });
+    // Staff-authorized: frees the device name so the kiosk can register again.
+    async removeDevice(req, res) {
+        try {
+            const result = await kioskRegistry.removeKiosk({ id: req.params?.id, actor: req.staffAccess?.actor });
+            if (result.status === 204) return res.status(204).end();
+            return res.status(result.status).json(result.body);
+        } catch (error) {
+            console.error('[kiosk] remove device failed:', error?.code || error?.message);
+            return res.status(500).json({ error: 'Failed to remove kiosk' });
         }
-
-        const { data: inserted, error: insertError } = await db
-            .from("kiosks")
-            .insert({
-                branch_id,
-                device_name,
-            })
-            .select("id, branch_id, device_name")
-            .maybeSingle();
-
-        if (insertError) {
-            return res.status(500).json({ error: insertError.message });
-        }
-
-        return res.status(201).json({ branch_id: inserted.branch_id });
     }
 
     async socketTicket(req, res) {
-        const { branch_id, device_name } = req.body || {};
-        if (!branch_id || !device_name) return res.status(400).json({ error: "branch_id and device_name are required" });
+        const { branch_id, device_name, device_token } = req.body || {};
 
-        const { data: kiosk, error } = await db
-            .from('kiosks')
-            .select('id, branch_id, device_name')
-            .eq('branch_id', branch_id)
-            .eq('device_name', String(device_name).trim())
-            .maybeSingle();
-        if (error) return res.status(500).json({ error: error.message });
-        if (!kiosk) return res.status(403).json({ error: 'Kiosk is not registered for this branch' });
+        let authorization;
+        try {
+            authorization = await kioskRegistry.authorizeTicket({
+                branchId: branch_id,
+                deviceName: device_name,
+                deviceToken: device_token,
+            });
+        } catch (error) {
+            console.error('[kiosk] socket ticket lookup failed:', error?.code || error?.message);
+            return res.status(500).json({ error: 'Failed to issue kiosk socket ticket' });
+        }
+        if (authorization.status !== 200) return res.status(authorization.status).json(authorization.body);
+        const { kiosk } = authorization;
 
         try {
             const ticket = issueKioskSocketTicket({
@@ -568,8 +590,28 @@ class Kiosk {
 
     async services(req, res) {
         const { active, grouped, include_inactive } = req.query || {};
+        // Branch from the authenticated kiosk, else ?branch_id (dashboard).
+        // A bearer employee without ?branch_id (enforce mode, req.kioskStaff
+        // from middleware/kioskAuth.js) sees only its allowed branches; network
+        // roles (branchScope null) keep the full list.
+        const staffScope = Array.isArray(req.kioskStaff?.branchScope) ? req.kioskStaff.branchScope.map(String) : null;
+        const branchId = req.kiosk?.branchId
+            || normalizeText(req.query?.branch_id)
+            || (staffScope?.length === 1 ? staffScope[0] : null);
+        const scopeFilter = !branchId && staffScope
+            ? (service) => !service.branch_id || staffScope.some((id) => id.toLowerCase() === String(service.branch_id).toLowerCase())
+            : () => true;
+        if (branchId && !UUID_PATTERN.test(String(branchId))) {
+            return res.status(400).json({ error: 'branch_id is invalid' });
+        }
 
         let query = db.from("services").select("*");
+        if (branchId) {
+            query = query.or(`branch_id.eq.${branchId},branch_id.is.null`);
+        } else if (!staffScope && !warnedUnscopedServices) {
+            warnedUnscopedServices = true;
+            console.warn('[kiosk] GET /api/kiosk/services without kiosk token or branch_id returns every branch service (legacy)');
+        }
 
         if (active !== undefined) {
             const activeFlag = String(active).toLowerCase() === "true" || active === "1";
@@ -588,7 +630,7 @@ class Kiosk {
             return res.status(500).json({ error: error.message });
         }
 
-        const services = (data || []).map((service) => serviceItem(req, service));
+        const services = (data || []).filter(scopeFilter).map((service) => serviceItem(req, service));
         const categories = groupServicesByCategory(services);
 
         if (grouped === "true" || grouped === "1") {
@@ -820,15 +862,20 @@ class Kiosk {
 
         const { data: services, error: servicesError } = await db
             .from('services')
-            .select('id, is_active, base_price')
+            .select('id, is_active, base_price, branch_id')
             .in('id', serviceIds);
         if (servicesError) return res.status(500).json({ error: servicesError.message });
         if (!services || services.length !== serviceIds.length) {
             return res.status(400).json({ error: 'One or more service_ids are invalid' });
         }
-        const inactive = services.find((s) => s.is_active === false);
+        const inactive = services.find((s) => s.is_active !== true);
         if (inactive) {
             return res.status(400).json({ error: `Service ${inactive.id} is not active` });
+        }
+        // Only this branch's services or shared ones (branch_id null) (MULTI_TENANCY 0.8).
+        const foreign = services.find((s) => s.branch_id != null && String(s.branch_id).toLowerCase() !== String(branch_id).toLowerCase());
+        if (foreign) {
+            return res.status(400).json({ error: `Service ${foreign.id} is not available in this branch` });
         }
 
         const priceById = new Map(
@@ -1564,7 +1611,7 @@ class Kiosk {
             .maybeSingle();
 
         if (error) return res.status(500).json({ error: error.message });
-        if (!entry) return res.status(404).json({ error: 'Queue entry not found' });
+        if (!entry || isOutsideKioskBranch(req, entry)) return res.status(404).json({ error: 'Queue entry not found' });
 
         if (TERMINAL_QUEUE_STATUSES.includes(entry.status)) {
             return res.json({
@@ -1617,10 +1664,12 @@ class Kiosk {
 
         const queueSelect = 'id, status, branch_id, barber_id, service_id, service_ids, client_id, created_at, finished_at';
         const finishedAt = new Date().toISOString();
-        const { data: cancelled, error } = await db
+        // An authenticated kiosk can only cancel entries of its own branch.
+        const scopeToKiosk = (query) => (req.kiosk ? query.eq('branch_id', req.kiosk.branchId) : query);
+        const { data: cancelled, error } = await scopeToKiosk(db
             .from('queue_entries')
             .update({ status: 'cancelled', finished_at: finishedAt })
-            .eq('id', id)
+            .eq('id', id))
             .in('status', CLIENT_CANCELLABLE_STATUSES)
             .select(queueSelect)
             .maybeSingle();
@@ -1628,10 +1677,10 @@ class Kiosk {
         if (error) return res.status(500).json({ error: error.message });
 
         if (!cancelled) {
-            const { data: existing, error: lookupError } = await db
+            const { data: existing, error: lookupError } = await scopeToKiosk(db
                 .from('queue_entries')
                 .select(queueSelect)
-                .eq('id', id)
+                .eq('id', id))
                 .maybeSingle();
 
             if (lookupError) return res.status(500).json({ error: lookupError.message });
@@ -1667,18 +1716,21 @@ class Kiosk {
             return res.status(400).json({ error: 'certificate id is required' });
         }
 
-        const token = getBearerToken(req);
-        if (!token) {
-            return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
-        }
-        let payload;
-        try {
-            payload = verifyJwt(token);
-        } catch (_error) {
-            return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
-        }
-        if (payload?.role !== MARKETPLACE_ROLE && !CASHBACK_STAFF_ROLES.has(payload?.role)) {
-            return res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
+        // An authenticated kiosk (middleware/kioskAuth.js) or a marketplace/staff JWT.
+        if (!req.kiosk) {
+            const token = getBearerToken(req);
+            if (!token) {
+                return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+            }
+            let payload;
+            try {
+                payload = verifyJwt(token);
+            } catch (_error) {
+                return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+            }
+            if (payload?.role !== MARKETPLACE_ROLE && !CASHBACK_STAFF_ROLES.has(payload?.role)) {
+                return res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
+            }
         }
 
         const { data: cert, error } = await db

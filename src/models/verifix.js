@@ -191,6 +191,13 @@ const dayOfWeekFromLocalParts = (parts) => {
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
 };
 
+// Branch scope (MULTI_TENANCY 0.6): null = every branch, otherwise the list
+// of branch ids the caller may see or change.
+const inScope = (scope, branchId) => (
+  scope === null || (branchId !== null && branchId !== undefined && scope.includes(String(branchId)))
+);
+const SCOPE_FORBIDDEN = { error: 'Branch is outside your access scope' };
+
 const requireAuth = (req, res) => {
   const token = getBearerToken(req);
 
@@ -201,11 +208,22 @@ const requireAuth = (req, res) => {
 
   try {
     const payload = verifyJwt(token);
+    const branchId = payload.branchId || payload.branch_id || null;
+    // Role and branch scope come only from the database: routers/verifix.js
+    // and the /api/barbers/shift/* routes run attachDbActor first. Without a
+    // DB-loaded actor (non-UUID/missing subject, or a caller that skipped the
+    // middleware) fail closed instead of trusting the token role.
+    const actor = req.dbActor;
+    if (!actor) {
+      res.status(401).json({ error: 'Invalid token payload' });
+      return null;
+    }
     return {
-      id: payload.sub || payload.id,
+      id: actor.id,
       login: payload.login || null,
-      role: payload.role || null,
-      branchId: payload.branchId || payload.branch_id || null,
+      role: actor.role,
+      branchId: actor.sessionBranchId || branchId,
+      branchScope: actor.branchScope,
     };
   } catch (_error) {
     res.status(401).json({ error: 'Invalid or expired token' });
@@ -493,7 +511,9 @@ class Verifix {
       }
 
       if (ADMIN_ROLES.has(auth.role)) {
+        if (branch_id && !inScope(auth.branchScope, String(branch_id))) return res.status(403).json(SCOPE_FORBIDDEN);
         if (branch_id) query = query.eq('branch_id', String(branch_id));
+        else if (auth.branchScope !== null) query = query.in('branch_id', auth.branchScope);
         if (barber_id) query = query.eq('barber_id', String(barber_id));
       } else if (BARBER_ROLES.has(auth.role)) {
         query = query.eq('barber_id', auth.id);
@@ -539,6 +559,14 @@ class Verifix {
       const occurredAt = normalizeDateTime(body.occurred_at, new Date());
       if (!occurredAt) {
         return res.status(400).json({ error: 'occurred_at must be a valid date/time' });
+      }
+
+      if (isAdmin && auth.branchScope !== null) {
+        const targetBarber = await getBarber(barberId);
+        if (!targetBarber) return res.status(404).json({ error: 'Barber not found' });
+        if (!inScope(auth.branchScope, normalizeId(body.branch_id) || targetBarber.branch_id)) {
+          return res.status(403).json(SCOPE_FORBIDDEN);
+        }
       }
 
       const event = await recordActivityEvent({
@@ -598,6 +626,8 @@ class Verifix {
 
       const branchId = normalizeId(body.branch_id) || auth.branchId || currentBarber.branch_id;
       if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
+
+      if (isAdmin && !inScope(auth.branchScope, branchId)) return res.status(403).json(SCOPE_FORBIDDEN);
 
       const branch = await getBranch(branchId);
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
@@ -677,7 +707,7 @@ class Verifix {
     if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string' || !uuid.test(id)) || new Set(ids).size !== ids.length || !start || !end || !isValidShiftTimeRange(start, end) || !Number.isInteger(grace) || grace < 0 || grace > 2147483647) {
       return res.status(400).json({ error: 'Provide unique branch_ids, an end time after the start time, and non-negative integer grace_minutes' });
     }
-    if (!['admin_network', 'admin'].includes(auth.role) && ids.some(id => id !== auth.branchId)) {
+    if (ids.some(id => !inScope(auth.branchScope, id))) {
       return res.status(403).json({ error: 'Cannot change schedules for other branches' });
     }
     let client;
@@ -722,7 +752,9 @@ class Verifix {
       if (activeFilter !== undefined) query = query.eq('is_active', activeFilter);
 
       if (ADMIN_ROLES.has(auth.role)) {
+        if (branch_id && !inScope(auth.branchScope, String(branch_id))) return res.status(403).json(SCOPE_FORBIDDEN);
         if (branch_id) query = query.eq('branch_id', String(branch_id));
+        else if (auth.branchScope !== null) query = query.in('branch_id', auth.branchScope);
         if (barber_id) query = query.eq('barber_id', String(barber_id));
       } else if (BARBER_ROLES.has(auth.role)) {
         query = query.or(`barber_id.eq.${auth.id},barber_id.is.null`);
@@ -759,6 +791,7 @@ class Verifix {
         : normalizeTime(body.end_time);
 
       if (!branchId) return res.status(400).json({ error: 'branch_id is required' });
+      if (!inScope(auth.branchScope, branchId)) return res.status(403).json(SCOPE_FORBIDDEN);
       if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
         return res.status(400).json({ error: 'day_of_week must be an integer from 0 to 6' });
       }
@@ -804,11 +837,12 @@ class Verifix {
 
       const { data: currentSchedule, error: currentScheduleError } = await db
         .from('barber_work_schedules')
-        .select('start_time, end_time')
+        .select('branch_id, start_time, end_time')
         .eq('id', id)
         .maybeSingle();
       if (currentScheduleError) return res.status(500).json({ error: currentScheduleError.message });
       if (!currentSchedule) return res.status(404).json({ error: 'Schedule not found' });
+      if (!inScope(auth.branchScope, currentSchedule.branch_id)) return res.status(404).json({ error: 'Schedule not found' });
 
       const update = { updated_at: new Date().toISOString() };
       const requestedIsWorking = body.is_working === undefined
@@ -818,6 +852,7 @@ class Verifix {
       if (body.branch_id !== undefined) {
         const branchId = normalizeId(body.branch_id);
         if (!branchId) return res.status(400).json({ error: 'branch_id cannot be empty' });
+        if (!inScope(auth.branchScope, branchId)) return res.status(403).json(SCOPE_FORBIDDEN);
         update.branch_id = branchId;
       }
 
@@ -894,6 +929,18 @@ class Verifix {
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'schedule id is required' });
 
+      if (auth.branchScope !== null) {
+        const { data: existing, error: existingError } = await db
+          .from('barber_work_schedules')
+          .select('id, branch_id')
+          .eq('id', id)
+          .maybeSingle();
+        if (existingError) return res.status(500).json({ error: existingError.message });
+        if (!existing || !inScope(auth.branchScope, existing.branch_id)) {
+          return res.status(404).json({ error: 'Schedule not found' });
+        }
+      }
+
       const { data, error } = await db
         .from('barber_work_schedules')
         .update({ is_active: false, updated_at: new Date().toISOString() })
@@ -913,5 +960,5 @@ class Verifix {
 
 module.exports = Object.assign(new Verifix(), {
   recordActivityEvent,
-  _private: { isValidShiftTimeRange },
+  _private: { inScope, isValidShiftTimeRange },
 });

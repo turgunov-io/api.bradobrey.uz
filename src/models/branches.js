@@ -1,8 +1,12 @@
 const { db } = require("../config/postgres");
+const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
 
 const SELECT_WITH_MARKETPLACE =
   "id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id";
 const SELECT_BASE = "id, name, address, city, work_hours, timezone, is_active";
+// photo_url comes from db/postgres/branches.sql; reads fall back while the
+// column is not migrated yet so listing branches never breaks.
+const SELECT_WITH_PHOTO = `${SELECT_WITH_MARKETPLACE}, photo_url`;
 
 const normalizeText = (value) => {
   if (value === undefined) return undefined;
@@ -49,7 +53,11 @@ const isMissingColumnError = (error, column) => {
 };
 
 const withMarketplaceFallback = async (queryFactory) => {
-  let { data, error, count } = await queryFactory(SELECT_WITH_MARKETPLACE);
+  let { data, error, count } = await queryFactory(SELECT_WITH_PHOTO);
+
+  if (isMissingColumnError(error, "photo_url")) {
+    ({ data, error, count } = await queryFactory(SELECT_WITH_MARKETPLACE));
+  }
 
   if (isMissingColumnError(error, "marketplace_barbershop_id")) {
     ({ data, error, count } = await queryFactory(SELECT_BASE));
@@ -74,6 +82,12 @@ const normalizeBranchPayload = (body = {}, { partial = false } = {}) => {
     return { error: "name is required" };
   }
 
+  // photo_url may only be cleared through the payload; new photos arrive as an uploaded file.
+  if (body.photo_url !== undefined) {
+    if (normalizeText(body.photo_url) !== null) return { error: "photo_url can only be cleared; upload a file to set it" };
+    payload.photo_url = null;
+  }
+
   for (const key of ["address", "city", "timezone", "marketplace_barbershop_id"]) {
     if (body[key] !== undefined) payload[key] = normalizeText(body[key]);
   }
@@ -95,6 +109,29 @@ const normalizeBranchPayload = (body = {}, { partial = false } = {}) => {
   }
 
   return { payload };
+};
+
+const PHOTO_CONTENT_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+
+// Stores an uploaded branch photo (multipart field "photo") and saves its URL.
+const attachUploadedPhoto = async (file, branchId) => {
+  if (!file) return { photoUrl: undefined };
+  if (!PHOTO_CONTENT_TYPES.has(String(file.mimetype || "").toLowerCase())) {
+    return { error: { status: 400, message: "photo must be a JPEG, PNG or WebP image" } };
+  }
+
+  const { data: upload, error: uploadError } = await uploadBufferImageWithFolder(file.buffer, file.mimetype, "branches", branchId);
+  if (uploadError) return { error: { status: 500, message: "Failed to store branch photo" } };
+
+  const { error } = await db.from("branches").update({ photo_url: upload.publicUrl }).eq("id", branchId);
+  if (error) {
+    const message = isMissingColumnError(error, "photo_url")
+      ? "Branch photos are not available: apply db/postgres/branches.sql"
+      : error.message;
+    return { error: { status: 500, message } };
+  }
+
+  return { photoUrl: upload.publicUrl };
 };
 
 const conflictResponse = (res, code, message) => res.status(409).json({
@@ -168,6 +205,11 @@ class Branches {
     }
 
     if (error) return res.status(500).json({ error: error.message });
+
+    const { photoUrl, error: photoError } = await attachUploadedPhoto(req.file, data.id);
+    if (photoError) return res.status(photoError.status).json({ error: photoError.message, branch: data });
+    if (photoUrl) data.photo_url = photoUrl;
+
     return res.status(201).json({ branch: data, entry: data, item: data });
   }
 
@@ -177,15 +219,22 @@ class Branches {
 
     const { payload, error: payloadError } = normalizeBranchPayload(req.body || {}, { partial: true });
     if (payloadError) return res.status(400).json({ error: payloadError });
-    if (!Object.keys(payload).length) return res.status(400).json({ error: "No fields to update" });
+    if (!Object.keys(payload).length && !req.file) return res.status(400).json({ error: "No fields to update" });
 
     let writePayload = { ...payload };
-    let { data, error } = await db
-      .from("branches")
-      .update(writePayload)
-      .eq("id", id)
-      .select(SELECT_WITH_MARKETPLACE)
-      .maybeSingle();
+    // A photo-only PATCH has nothing else to write; read the branch instead.
+    let { data, error } = Object.keys(writePayload).length
+      ? await db
+        .from("branches")
+        .update(writePayload)
+        .eq("id", id)
+        .select(SELECT_WITH_MARKETPLACE)
+        .maybeSingle()
+      : await db
+        .from("branches")
+        .select(SELECT_WITH_MARKETPLACE)
+        .eq("id", id)
+        .maybeSingle();
 
     if (isMissingColumnError(error, "marketplace_barbershop_id")) {
       delete writePayload.marketplace_barbershop_id;
@@ -208,6 +257,10 @@ class Branches {
 
     if (error) return res.status(500).json({ error: error.message });
     if (!data) return res.status(404).json({ error: "Branch not found" });
+
+    const { photoUrl, error: photoError } = await attachUploadedPhoto(req.file, data.id);
+    if (photoError) return res.status(photoError.status).json({ error: photoError.message, branch: data });
+    if (photoUrl) data.photo_url = photoUrl;
 
     return res.json({ branch: data, entry: data, item: data });
   }
@@ -292,3 +345,4 @@ class Branches {
 }
 
 module.exports = new Branches();
+module.exports._internals = { normalizeBranchPayload, attachUploadedPhoto };

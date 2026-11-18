@@ -1,14 +1,20 @@
-node_modules
-*/node_modules
-node_modules/*
+node_modules/
 
 # Environment / secrets (never commit)
 .env
 .env.*
 !.env.example
 firebase-service-account*.json
-.git 
-netlify
-netlif/*
-netlify.*
+
+# Runtime uploads
 public/uploads/
+
+# Logs / coverage
+*.log
+coverage/
+
+# OS / tooling artifacts
+desktop.ini
+Thumbs.db
+.DS_Store
+.codex-remote-attachments/

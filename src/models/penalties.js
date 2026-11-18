@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { db } = require('../config/postgres');
+const { isBranchAllowed, resolveStaffBranchScope } = require('../utils/adminAuth');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
 const PENALTY_TYPE = 'penalty';
@@ -52,7 +53,8 @@ async function auth(req, res) {
   }
   if (!user) { res.status(401).json({ error: 'Session is no longer valid' }); return null; }
 
-  const role = String(payload.role || user.role || '').trim().toLowerCase();
+  // Role comes from the database, never from the token (MULTI_TENANCY 0.6).
+  const role = String(user.role || '').trim().toLowerCase();
   if (!PRIVILEGED_ROLES.has(role) && role !== 'manager') {
     res.status(403).json({ error: 'Penalties are not available for this role' });
     return null;
@@ -67,10 +69,15 @@ async function auth(req, res) {
     permissions = (result.data || []).map((row) => row.permission);
   }
 
+  const branchId = payload.branchId || payload.branch_id || user.branch_id || null;
+  // null = network role (whole network); otherwise the allowed branch ids.
+  const branchScope = await resolveStaffBranchScope({ ...user, role }, branchId);
+
   return {
     userId,
     role,
-    branchId: payload.branchId || payload.branch_id || user.branch_id || null,
+    branchId,
+    branchScope,
     permissions,
   };
 }
@@ -142,8 +149,12 @@ module.exports = {
     const values = [PENALTY_TYPE];
     const where = ["p.metadata->>'type' = $1"];
     const add = (value) => { values.push(value); return `$${values.length}`; };
-    if (!PRIVILEGED_ROLES.has(access.role)) where.push(`p.branch_id = ${add(access.branchId)}`);
-    else if (req.query.branch_id) where.push(`p.branch_id = ${add(req.query.branch_id)}`);
+    const requestedBranchId = text(req.query.branch_id);
+    if (requestedBranchId && !isBranchAllowed(access.branchScope, requestedBranchId)) {
+      return res.status(403).json({ error: 'Branch is outside your access scope' });
+    }
+    if (requestedBranchId) where.push(`p.branch_id = ${add(requestedBranchId)}`);
+    else if (access.branchScope !== null) where.push(`p.branch_id::text = any(${add(access.branchScope)}::text[])`);
     if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
       const [year, month] = req.query.period.split('-').map(Number);
       where.push(`p.purchased_at >= ${add(`${req.query.period}-01`)}`);
@@ -182,8 +193,8 @@ module.exports = {
       if (status === 'cancelled') lateWhere.push(`e.metadata->>'canceled' = 'true'`);
       if (status === 'active') lateWhere.push(`coalesce(e.metadata->>'canceled', 'false') <> 'true'`);
       if (recipientId) lateWhere.push(`e.barber_id = ${lateAdd(recipientId)}`);
-      if (!PRIVILEGED_ROLES.has(access.role)) lateWhere.push(`e.branch_id = ${lateAdd(access.branchId)}`);
-      else if (req.query.branch_id) lateWhere.push(`e.branch_id = ${lateAdd(req.query.branch_id)}`);
+      if (requestedBranchId) lateWhere.push(`e.branch_id = ${lateAdd(requestedBranchId)}`);
+      else if (access.branchScope !== null) lateWhere.push(`e.branch_id::text = any(${lateAdd(access.branchScope)}::text[])`);
       if (req.query.period && /^\d{4}-\d{2}$/.test(req.query.period)) {
         const [year, month] = req.query.period.split('-').map(Number);
         lateWhere.push(`e.occurred_at >= ${lateAdd(`${req.query.period}-01T00:00:00.000Z`)}`);
@@ -232,6 +243,9 @@ module.exports = {
       ? (text(req.body?.branch_id || req.body?.branchId) || access.branchId)
       : access.branchId;
     if (!branchId) return res.status(422).json({ error: 'Branch is required' });
+    if (!isBranchAllowed(access.branchScope, branchId)) {
+      return res.status(403).json({ error: 'Branch is outside your access scope' });
+    }
 
     const recipientId = text(req.body?.recipient_id || req.body?.recipientId);
     const comment = text(req.body?.comment);
@@ -295,7 +309,7 @@ module.exports = {
         }
         if (!lateResult.rows.length) return res.status(404).json({ error: 'Penalty not found' });
         const lateRow = lateResult.rows[0];
-        if (!PRIVILEGED_ROLES.has(access.role) && lateRow.branch_id !== access.branchId) {
+        if (!isBranchAllowed(access.branchScope, lateRow.branch_id)) {
           return res.status(404).json({ error: 'Penalty not found' });
         }
         if (lateRow.metadata?.canceled === true) {
@@ -311,7 +325,7 @@ module.exports = {
         return res.json({ penalty: toItem(canceled) });
       }
       const row = existing.rows[0];
-      if (!PRIVILEGED_ROLES.has(access.role) && row.branch_id !== access.branchId) {
+      if (!isBranchAllowed(access.branchScope, row.branch_id)) {
         return res.status(404).json({ error: 'Penalty not found' });
       }
       if (row.status === 'cancelled' || row.metadata?.canceled === true) {

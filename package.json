@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
@@ -27,10 +30,12 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "nodemailer": "^6.10.1",
-    "nodemon": "^3.1.11",
     "pg": "^8.22.0",
     "pm2": "^6.0.14",
     "socket.io": "^4.8.3",
     "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
   }
 }

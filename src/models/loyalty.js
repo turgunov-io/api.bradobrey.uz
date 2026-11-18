@@ -1,6 +1,16 @@
 const { db } = require('../config/postgres');
 const { DEFAULT_LOYALTY_LEVELS, validateLoyaltyLevels } = require('../utils/loyaltyLevels');
-const { requireAdmin } = require('../utils/adminAuth');
+const { createAdminAuth, createNetworkWriteAuth } = require('../utils/adminAuth');
+
+// Role and archived status come from the database (MULTI_TENANCY 0.10).
+// Any admin may read; loyalty levels are network-wide, so only network roles
+// may change them.
+const LOYALTY_FORBIDDEN = 'Only admins can manage loyalty settings';
+const authorizeLoyaltyReader = createAdminAuth({ forbiddenMessage: LOYALTY_FORBIDDEN });
+const authorizeLoyaltyWriter = createNetworkWriteAuth({
+  forbiddenMessage: LOYALTY_FORBIDDEN,
+  networkMessage: 'Only network administrators can change loyalty settings',
+});
 const LEGACY_RANK_DEFAULTS = Object.freeze({ bronze_min_visits: 2, silver_min_visits: 5, gold_min_visits: 10 });
 
 const listLevels = (value) => Object.entries(value || {})
@@ -33,7 +43,7 @@ class Loyalty {
   }
 
   async getRankSettings(req, res) {
-    if (!requireAdmin(req, res)) return;
+    if (!(await authorizeLoyaltyReader(req, res))) return;
     try {
       const [levels, legacy] = await Promise.all([
         this.readLevels(),
@@ -57,7 +67,7 @@ class Loyalty {
   }
 
   async updateRankSettings(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await authorizeLoyaltyWriter(req, res);
     if (!auth) return;
     const body = req.body || {};
 

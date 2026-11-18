@@ -2,6 +2,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 require('dotenv').config();
+// Fail fast on missing JWT_SECRET / DB config before any module opens the pool.
+require('./config/env').validateEnv();
 const app = require('./app');
 const { startQueueAutoCloseScheduler, stopQueueAutoCloseScheduler } = require('./jobs/autoCloseQueue');
 const { startExpiryScheduler, stopExpiryScheduler } = require('./models/queueTransfers');

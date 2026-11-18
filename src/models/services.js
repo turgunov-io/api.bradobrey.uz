@@ -77,6 +77,34 @@ const groupServicesByCategory = (services = []) => {
     }));
 };
 
+// Branch scope (MULTI_TENANCY 0.4). Network roles see and manage everything.
+// Other roles read services of their allowed branches plus shared (NULL
+// branch) services, and may only modify services of their allowed branches.
+// scope: null = unrestricted, otherwise an array of allowed branch ids.
+const inScope = (scope, branchId) => (
+    branchId !== null && branchId !== undefined && scope.includes(String(branchId))
+);
+const canReadService = (scope, branchId) => (
+    scope === null || branchId === null || branchId === undefined || inScope(scope, branchId)
+);
+const canModifyService = (scope, branchId) => scope === null || inScope(scope, branchId);
+
+// routers/services.js resolves req.branchScope (from the DB-loaded actor)
+// after the staffAccess guard. A request that went through the guard but has
+// no resolved scope fails closed; direct internal calls stay unrestricted.
+const resolveScope = async (req) => {
+    if (req?.branchScope !== undefined) return req.branchScope;
+    return req?.staffAccess ? [] : null;
+};
+
+const SCOPE_FORBIDDEN = { error: "Service is outside your branch scope" };
+
+const loadServiceBranch = async (id) => {
+    const { data, error } = await db.from("services").select("id, branch_id").eq("id", id).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data;
+};
+
 class Services {
     async reorder(req, res) {
         const items = req.body?.items;
@@ -93,6 +121,20 @@ class Services {
             category: normalizeCategory(item.category),
             sort_order: item.sort_order,
         }));
+        try {
+            const scope = await resolveScope(req);
+            if (scope !== null) {
+                const existing = await pool.query(
+                    'SELECT id, branch_id FROM services WHERE id = ANY($1::uuid[])',
+                    [normalizedItems.map(item => item.id)]
+                );
+                if (existing.rows.some(row => !canModifyService(scope, row.branch_id))) {
+                    return res.status(403).json(SCOPE_FORBIDDEN);
+                }
+            }
+        } catch (error) {
+            return res.status(500).json({ error: error.message });
+        }
         let client;
         try {
             client = await pool.connect();
@@ -136,7 +178,14 @@ class Services {
 
         if (error) return res.status(500).json({ error: error.message });
 
-        const items = serviceItems(req, data || []);
+        let scope;
+        try {
+            scope = await resolveScope(req);
+        } catch (scopeError) {
+            return res.status(500).json({ error: scopeError.message });
+        }
+        const visible = (data || []).filter((service) => canReadService(scope, service.branch_id));
+        const items = serviceItems(req, visible);
         const categories = groupServicesByCategory(items);
 
         if (grouped === "true" || grouped === "1") {
@@ -158,6 +207,14 @@ class Services {
 
         if (error) return res.status(500).json({ error: error.message });
         if (!data) return res.status(404).json({ error: "Service not found" });
+
+        try {
+            if (!canReadService(await resolveScope(req), data.branch_id)) {
+                return res.status(404).json({ error: "Service not found" });
+            }
+        } catch (scopeError) {
+            return res.status(500).json({ error: scopeError.message });
+        }
 
         return res.json({ entry: serviceItem(req, data) });
     }
@@ -192,6 +249,23 @@ class Services {
             return res.status(400).json({ error: "base_price must be a non-negative number" });
         }
 
+        let targetBranchId = normalizeText(branch_id);
+        // Only network roles (scope null) may link a marketplace merchant.
+        let marketplaceBarbershopId = null;
+        try {
+            const scope = await resolveScope(req);
+            if (scope === null) marketplaceBarbershopId = normalizeText(marketplace_barbershop_id);
+            if (scope !== null) {
+                // Branch-level staff cannot create network-wide (NULL branch)
+                // services; default to their home branch when none is given.
+                targetBranchId = targetBranchId || normalizeText(req.staffAccess?.actor?.branch_id);
+                if (!targetBranchId) return res.status(422).json({ error: "branch_id is required" });
+                if (!canModifyService(scope, targetBranchId)) return res.status(403).json(SCOPE_FORBIDDEN);
+            }
+        } catch (scopeError) {
+            return res.status(500).json({ error: scopeError.message });
+        }
+
         let uploadedImageUrl;
         try {
             uploadedImageUrl = await uploadServiceImage(req);
@@ -205,14 +279,14 @@ class Services {
             .from("services")
             .insert({
                 base_price: priceValue,
-                branch_id: normalizeText(branch_id),
+                branch_id: targetBranchId,
                 category: normalizedCategory,
                 duration_minutes: durationValue,
                 image: uploadedImageUrl !== undefined
                     ? normalizeImageUrl(req, uploadedImageUrl)
                     : normalizeImageUrl(req, image),
                 is_active: parseBoolean(is_active, true),
-                marketplace_barbershop_id: normalizeText(marketplace_barbershop_id),
+                marketplace_barbershop_id: marketplaceBarbershopId,
                 name: String(name).trim(),
             })
             .select("*")
@@ -267,6 +341,24 @@ class Services {
             update.is_active = activeFlag;
         }
 
+        // marketplace_barbershop_id links a service to a marketplace merchant;
+        // only network roles (scope null) may set it, others are ignored.
+        let canSetMarketplace = false;
+        try {
+            const scope = await resolveScope(req);
+            canSetMarketplace = scope === null;
+            if (scope !== null) {
+                const existing = await loadServiceBranch(id);
+                if (!existing) return res.status(404).json({ error: "Service not found" });
+                if (!canModifyService(scope, existing.branch_id)) return res.status(403).json(SCOPE_FORBIDDEN);
+                if (branch_id !== undefined && !canModifyService(scope, normalizeText(branch_id))) {
+                    return res.status(403).json(SCOPE_FORBIDDEN);
+                }
+            }
+        } catch (scopeError) {
+            return res.status(500).json({ error: scopeError.message });
+        }
+
         let uploadedImageUrl;
         try {
             uploadedImageUrl = await uploadServiceImage(req);
@@ -288,7 +380,7 @@ class Services {
             update.branch_id = normalizeText(branch_id);
         }
 
-        if (marketplace_barbershop_id !== undefined) {
+        if (canSetMarketplace && marketplace_barbershop_id !== undefined) {
             update.marketplace_barbershop_id = normalizeText(marketplace_barbershop_id);
         }
 
@@ -316,6 +408,17 @@ class Services {
             req.params?.id ?? req.body?.id ?? req.body?.service_id ?? req.query?.id ?? req.query?.service_id
         );
         if (!id) return res.status(400).json({ error: "Service id is required" });
+
+        try {
+            const scope = await resolveScope(req);
+            if (scope !== null) {
+                const existing = await loadServiceBranch(id);
+                if (!existing) return res.status(404).json({ error: "Service not found" });
+                if (!canModifyService(scope, existing.branch_id)) return res.status(403).json(SCOPE_FORBIDDEN);
+            }
+        } catch (scopeError) {
+            return res.status(500).json({ error: scopeError.message });
+        }
 
         const { data, error } = await db
             .from("services")
@@ -353,3 +456,5 @@ class Services {
 }
 
 module.exports = new Services();
+module.exports.canReadService = canReadService;
+module.exports.canModifyService = canModifyService;

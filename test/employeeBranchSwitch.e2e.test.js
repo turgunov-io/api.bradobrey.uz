@@ -17,14 +17,25 @@ const branchClosed = { id: 'branch-closed', name: 'Closed branch', is_active: fa
 
 test('isolated cross-branch employee flow uses active branch without production data', () => {
   const employee = { id: 'barber-1', branch_id: branchA.id };
-  const accessRows = [{ employee_id: employee.id, branch_id: branchA.id, is_active: true }];
+  // Allow-list: the home branch plus an explicit active access row for B.
+  const accessRows = [
+    { employee_id: employee.id, branch_id: branchA.id, is_active: true },
+    { employee_id: employee.id, branch_id: branchB.id, is_active: true },
+  ];
 
-  // This reproduces the reported state: only the legacy/home row exists.
   const availableBranches = selectEmployeeBranches(
     [branchA, branchB, branchClosed],
     accessRows,
+    { homeBranchIds: [branchA.id] },
   );
   assert.deepEqual(availableBranches.map((branch) => branch.id), [branchA.id, branchB.id]);
+
+  // Without the explicit B row only the home branch is allowed.
+  assert.deepEqual(
+    selectEmployeeBranches([branchA, branchB, branchClosed], [], { homeBranchIds: [branchA.id] })
+      .map((branch) => branch.id),
+    [branchA.id],
+  );
 
   // Login/session selection persists B independently of users.branch_id.
   let session = { employeeId: employee.id, activeBranchId: branchB.id };
@@ -56,7 +67,7 @@ test('explicit inactive branch restriction and inactive branch status are enforc
   const branches = [branchA, branchB, branchClosed];
   const deniedB = [{ employee_id: 'barber-1', branch_id: branchB.id, is_active: false }];
   assert.deepEqual(
-    selectEmployeeBranches(branches, deniedB).map((branch) => branch.id),
+    selectEmployeeBranches(branches, deniedB, { homeBranchIds: [branchA.id] }).map((branch) => branch.id),
     [branchA.id],
   );
   assert.equal(selectEmployeeBranches(branches, []).some((branch) => branch.id === branchClosed.id), false);

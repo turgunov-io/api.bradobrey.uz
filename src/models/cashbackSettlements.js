@@ -1,61 +1,56 @@
-const jwt = require('jsonwebtoken');
+// Cashback settlements (routers/cashbackSettlements.js, /api/finance/cashback-settlements).
+//
+// Authorization (MULTI_TENANCY 0.6, H2): the caller is loaded from the DB by
+// createAdminAuth (role + archived status from the DB, never the token).
+// Network roles are unrestricted; admin_branch / merchant are limited to
+// resolveAllowedBranchIds() — an out-of-scope branch is 403, no branch lists
+// only the allowed branches.
+const { createAdminAuth, isBranchAllowed, resolveAllowedBranchIds } = require('../utils/adminAuth');
+const { NETWORK_ROLES } = require('../utils/employeeQualityAccess');
 
-const { pool } = require('../config/postgres');
-
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
+const SETTLEMENT_ROLES = new Set([...NETWORK_ROLES, 'admin_network', 'admin_branch', 'admin', 'merchant']);
 const TERMINAL_STATUSES = new Set(['SETTLED', 'REVERSED']);
 
-function getBearerToken(req) {
-  const value = req.headers.authorization || '';
-  return value.startsWith('Bearer ') ? value.slice(7) : null;
-}
-
-function requireAdmin(req, res) {
-  const token = getBearerToken(req);
-  if (!token) {
-    res.status(401).json({ error: 'Authorization token is required' });
-    return null;
-  }
-
-  let payload;
-  try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
-  } catch (_error) {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return null;
-  }
-
-  if (!ADMIN_ROLES.has(payload?.role)) {
-    res.status(403).json({ error: 'Only admins can manage cashback settlements' });
-    return null;
-  }
-
-  return payload;
-}
+const defaultAuthorize = createAdminAuth({
+  roles: SETTLEMENT_ROLES,
+  forbiddenMessage: 'Only admins can manage cashback settlements',
+});
+// Resolved lazily so the module can load without database env.
+const defaultPool = () => require('../config/postgres').pool;
 
 function normalizeId(value) {
   const text = String(value || '').trim();
   return text || null;
 }
 
-function scopedBranchId(auth, requested) {
-  const ownBranch = normalizeId(auth?.branch_id || auth?.branchId);
-  const branchId = normalizeId(requested);
-  if (auth?.role === 'admin_branch') return ownBranch;
-  return branchId;
-}
-
-function canAccessBranch(auth, branchId) {
-  if (auth?.role !== 'admin_branch') return true;
-  const ownBranch = normalizeId(auth?.branch_id || auth?.branchId);
-  const targetBranch = normalizeId(branchId);
-  return Boolean(ownBranch && targetBranch && ownBranch === targetBranch);
-}
+const outOfScope = (res) => res.status(403).json({ error: 'Settlement is outside the administrator branch scope' });
 
 class CashbackSettlements {
+  constructor({ authorize = defaultAuthorize, resolveScope = resolveAllowedBranchIds, pool = null } = {}) {
+    this.authorizeAdmin = authorize;
+    this.resolveScope = resolveScope;
+    this.getPool = pool ? () => pool : defaultPool;
+  }
+
+  // DB-loaded caller plus branch scope (null = unrestricted), or null after
+  // an error response has been sent.
+  async authorize(req, res) {
+    const auth = await this.authorizeAdmin(req, res);
+    if (!auth) return null;
+    try {
+      const branchScope = await this.resolveScope(auth);
+      return { ...auth, branchScope };
+    } catch (error) {
+      console.error('[cashback-settlements] scope resolution failed:', error?.code || error?.message);
+      res.status(500).json({ error: 'Failed to authorize request' });
+      return null;
+    }
+  }
+
   async list(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await this.authorize(req, res);
     if (!auth) return;
+    const pool = this.getPool();
 
     const status = String(req.query?.status || '').trim().toUpperCase();
     if (status && !['PENDING', 'SETTLED', 'REVERSED'].includes(status)) {
@@ -63,19 +58,16 @@ class CashbackSettlements {
     }
 
     const requestedBranch = normalizeId(req.query?.branch_id);
-    if (auth.role === 'admin_branch' && !normalizeId(auth.branch_id || auth.branchId)) {
-      return res.status(403).json({ error: 'Branch scope is missing for the administrator' });
-    }
-    if (auth.role === 'admin_branch' && requestedBranch && !canAccessBranch(auth, requestedBranch)) {
-      return res.status(403).json({ error: 'Settlement is outside the administrator branch scope' });
-    }
+    if (requestedBranch && !isBranchAllowed(auth.branchScope, requestedBranch)) return outOfScope(res);
 
     const params = [];
     const filters = [];
-    const branchId = scopedBranchId(auth, requestedBranch);
-    if (branchId) {
-      params.push(branchId);
+    if (requestedBranch) {
+      params.push(requestedBranch);
       filters.push(`s.branch_id = $${params.length}`);
+    } else if (auth.branchScope !== null) {
+      params.push(auth.branchScope);
+      filters.push(`s.branch_id::text = any($${params.length}::text[])`);
     }
     if (status) {
       params.push(status);
@@ -104,8 +96,9 @@ class CashbackSettlements {
   }
 
   async process(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await this.authorize(req, res);
     if (!auth) return;
+    const pool = this.getPool();
 
     const id = normalizeId(req.params?.id);
     const nextStatus = String(req.body?.status || '').trim().toUpperCase();
@@ -128,9 +121,9 @@ class CashbackSettlements {
         await client.query('rollback');
         return res.status(404).json({ error: 'Cashback settlement not found' });
       }
-      if (!canAccessBranch(auth, row.branch_id)) {
+      if (!isBranchAllowed(auth.branchScope, row.branch_id)) {
         await client.query('rollback');
-        return res.status(403).json({ error: 'Settlement is outside the administrator branch scope' });
+        return outOfScope(res);
       }
       if (row.status === nextStatus) {
         await client.query('commit');
@@ -175,4 +168,7 @@ class CashbackSettlements {
   }
 }
 
+const createCashbackSettlements = (deps) => new CashbackSettlements(deps);
+
 module.exports = new CashbackSettlements();
+module.exports.createCashbackSettlements = createCashbackSettlements;

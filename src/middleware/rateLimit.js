@@ -1,29 +1,44 @@
 const buckets = new Map();
+const MAX_BUCKETS = 10000;
 const jwt = require('jsonwebtoken');
 
-const requestIdentity = (req) => {
-  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+const networkIdentity = (req) => String(req.ip || req.headers['x-forwarded-for'] || 'unknown');
+
+const requestIdentity = (req, keyBy) => {
+  if (keyBy === 'ip') return networkIdentity(req);
+
   const header = String(req.headers.authorization || '');
-  if (header.startsWith('Bearer ')) {
+  const secret = process.env.JWT_SECRET;
+  if (header.startsWith('Bearer ') && secret) {
     try {
-      const payload = jwt.decode(header.slice(7));
+      // Only a signature-verified subject may own a bucket; jwt.decode would
+      // let a client mint a fresh subject per request and bypass the limit.
+      const payload = jwt.verify(header.slice(7), secret);
       const subject = payload?.sub || payload?.id;
-      if (subject) return String(subject);
+      if (subject) return `sub:${subject}`;
     } catch (_) {
       // Authentication middleware remains authoritative; rate limiting falls
-      // back to the network identity for malformed tokens.
+      // back to the network identity for invalid or expired tokens.
     }
   }
-  return String(ip);
+  return networkIdentity(req);
 };
 
-function rateLimit({ windowMs, max, keyPrefix }) {
+// keyBy: 'auto' (default) uses the verified JWT subject when present, else IP;
+// 'ip' always keys by network identity (for unauthenticated endpoints).
+function rateLimit({ windowMs, max, keyPrefix, keyBy = 'auto' }) {
   return (req, res, next) => {
-    const identity = `${keyPrefix}:${requestIdentity(req)}`;
+    const identity = `${keyPrefix}:${requestIdentity(req, keyBy)}`;
     const now = Date.now();
-    if (buckets.size > 10000) {
+    if (buckets.size > MAX_BUCKETS) {
       for (const [key, bucket] of buckets) {
         if (bucket.resetAt <= now) buckets.delete(key);
+      }
+      // Hard cap: spoofed identities must not grow memory without bound.
+      // Map iteration is insertion order, so this evicts the oldest buckets.
+      for (const key of buckets.keys()) {
+        if (buckets.size <= MAX_BUCKETS) break;
+        buckets.delete(key);
       }
     }
     const current = buckets.get(identity);

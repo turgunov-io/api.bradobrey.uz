@@ -1,36 +1,13 @@
-const jwt = require('jsonwebtoken');
-
 const { db } = require('../../config/postgres');
+const { createAdminAuth } = require('../../utils/adminAuth');
+const { NETWORK_ROLES } = require('../../utils/employeeQualityAccess');
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
-
-const getBearerToken = (req) => {
-  const authHeader = req.headers.authorization || '';
-  return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-};
-
-const requireAdmin = (req, res) => {
-  const token = getBearerToken(req);
-  if (!token) {
-    res.status(401).json({ error: 'Authorization token is required' });
-    return null;
-  }
-
-  let payload;
-  try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
-  } catch (_err) {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return null;
-  }
-
-  if (!ADMIN_ROLES.has(payload?.role)) {
-    res.status(403).json({ error: 'Only admins can manage marketplace clients' });
-    return null;
-  }
-
-  return payload;
-};
+// Network-wide marketplace data (every client's phone, all reviews, push to
+// any client): network roles only (admin_network, admin, super-manager). The
+// role is loaded from the database by authorizeAdmin, never trusted from the
+// JWT. admin_branch / merchant have no scoped use for these endpoints (dash
+// merchant pages do not call them), so they are denied rather than scoped.
+const authorizeNetworkAdmin = createAdminAuth({ roles: NETWORK_ROLES });
 
 const parseBoolean = (value, fallback = undefined) => {
   if (value === undefined) return fallback;
@@ -47,7 +24,7 @@ const selectFields = 'id,email,phone,photo_url,is_active,created_at,last_login_a
 
 class MarketplaceClients {
   async list(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await authorizeNetworkAdmin(req, res);
     if (!auth) return;
 
     try {
@@ -93,7 +70,7 @@ class MarketplaceClients {
   }
 
   async getById(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await authorizeNetworkAdmin(req, res);
     if (!auth) return;
 
     try {
@@ -117,7 +94,7 @@ class MarketplaceClients {
   }
 
   async activate(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await authorizeNetworkAdmin(req, res);
     if (!auth) return;
 
     try {
@@ -142,7 +119,7 @@ class MarketplaceClients {
   }
 
   async deactivate(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await authorizeNetworkAdmin(req, res);
     if (!auth) return;
 
     try {

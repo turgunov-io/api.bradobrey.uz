@@ -1,36 +1,15 @@
-const jwt = require('jsonwebtoken');
-
 const { db } = require('../config/postgres');
+const { ADMIN_ROLES, createAdminAuth, createNetworkWriteAuth } = require('../utils/adminAuth');
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
-
-const getBearerToken = (req) => {
-  const authHeader = req.headers.authorization || '';
-  return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-};
-
-const requireAdmin = (req, res) => {
-  const token = getBearerToken(req);
-  if (!token) {
-    res.status(401).json({ error: 'Authorization token is required' });
-    return null;
-  }
-
-  let payload;
-  try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
-  } catch (_err) {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return null;
-  }
-
-  if (!ADMIN_ROLES.has(payload?.role)) {
-    res.status(403).json({ error: 'Only admins can manage kiosk ads settings' });
-    return null;
-  }
-
-  return payload;
-};
+// Role and archived status come from the database (MULTI_TENANCY 0.10).
+// Any admin role may read the settings; the singleton is network-wide, so
+// only network roles may change it (MULTI_TENANCY 0.6).
+const KIOSK_ADS_FORBIDDEN = 'Only admins can manage kiosk ads settings';
+const requireAdmin = createAdminAuth({ forbiddenMessage: KIOSK_ADS_FORBIDDEN, roles: ADMIN_ROLES });
+const requireNetworkAdmin = createNetworkWriteAuth({
+  forbiddenMessage: KIOSK_ADS_FORBIDDEN,
+  networkMessage: 'Only network administrators can change kiosk ads settings',
+});
 
 const ALLOWED_YOUTUBE_HOSTS = new Set([
   'youtube.com',
@@ -79,7 +58,7 @@ const parseYoutubeUrlArray = (value, fieldName) => {
 
 class KioskAds {
   async getSettings(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await requireAdmin(req, res);
     if (!auth) return;
 
     const { data, error } = await db
@@ -108,7 +87,7 @@ class KioskAds {
   }
 
   async updateSettings(req, res) {
-    const auth = requireAdmin(req, res);
+    const auth = await requireNetworkAdmin(req, res);
     if (!auth) return;
 
     const body = req.body || {};

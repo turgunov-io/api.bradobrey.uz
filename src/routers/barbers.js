@@ -6,14 +6,22 @@ const barbers = require('../models/barbers')
 const verifix = require('../models/verifix')
 const queueTransfers = require('../models/queueTransfers')
 const location = require('../services/barberLocation');
+const { employeeManagement } = require('../middleware/employeeManagement');
+const { attachDbActor } = require('../utils/adminAuth');
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
-router.get("/", (req, res) => barbers.list(req, res));
-router.post('/register', upload.single('file'), (req, res) => barbers.register(req, res));
+router.get("/", employeeManagement.authorize('read'), (req, res) => barbers.list(req, res));
+router.post(
+  '/register',
+  employeeManagement.authorize('create'),
+  upload.single('file'),
+  employeeManagement.checkPayload,
+  (req, res) => barbers.register(req, res),
+);
 router.post('/login', (req, res) => barbers.login(req, res));
 router.post('/admin/login', (req, res) => barbers.adminLogin(req, res));
 router.post('/logout', (req, res) => barbers.logout(req, res));
@@ -42,11 +50,18 @@ router.patch("/queue/:id/not-in-time", (req, res) => barbers.markNotInTime(req, 
 
 router.post("/break", (req, res) => barbers.takeBreak(req, res));
 router.post("/return", (req, res) => barbers.returnFromBreak(req, res));
-router.post("/shift/start", (req, res) => verifix.startShift(req, res));
-router.post("/shift/end", (req, res) => verifix.endShift(req, res));
-router.patch("/:id/archive", (req, res) => barbers.archiveEmployee(req, res));
-router.patch("/:id/restore", (req, res) => barbers.restoreEmployee(req, res));
-router.patch("/:id", upload.single('file'), (req, res) => barbers.updateEmployee(req, res));
-router.delete("/:id", (req, res) => barbers.removeEmployee(req, res));
+// verifix requires the DB-loaded actor (role/branch scope), see attachDbActor.
+router.post("/shift/start", attachDbActor, (req, res) => verifix.startShift(req, res));
+router.post("/shift/end", attachDbActor, (req, res) => verifix.endShift(req, res));
+router.patch("/:id/archive", employeeManagement.authorize('delete'), (req, res) => barbers.archiveEmployee(req, res));
+router.patch("/:id/restore", employeeManagement.authorize('update'), (req, res) => barbers.restoreEmployee(req, res));
+router.patch(
+  "/:id",
+  employeeManagement.authorize('update'),
+  upload.single('file'),
+  employeeManagement.checkPayload,
+  (req, res) => barbers.updateEmployee(req, res),
+);
+router.delete("/:id", employeeManagement.authorize('delete'), (req, res) => barbers.removeEmployee(req, res));
 
 module.exports = router;

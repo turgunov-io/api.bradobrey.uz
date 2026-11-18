@@ -79,9 +79,33 @@ const snapshotResponse = ({ branchId = null, period, row = null }) => ({
   updated_at: row?.updated_at || null,
 });
 
+// Branch scope (MULTI_TENANCY 0.5). routers/finance.js sets req.branchScope
+// from the DB-loaded caller: null for network roles, otherwise the allowed
+// branch ids. Network roles keep the network-wide overview (a requested
+// branch is ignored, as before); other roles get only their branches, and a
+// requested branch outside their scope is rejected.
+const scopeOf = (req) => {
+  if (req?.branchScope !== undefined) return req.branchScope;
+  return req?.staffAccess ? [] : null;
+};
+
+const resolveBranchFilter = (req, requestedBranchId) => {
+  const scope = scopeOf(req);
+  if (scope === null) return { branchFilter: null };
+  const requested = normalizeId(requestedBranchId);
+  if (!requested) return { branchFilter: scope.map(String) };
+  if (!scope.includes(requested)) {
+    return { error: 'Branch is outside your access scope', status: 403 };
+  }
+  return { branchFilter: [requested] };
+};
+
 class Finance {
   async overview(req, res) {
     const { period, from, to } = periodRange(req.query?.period);
+    const filter = resolveBranchFilter(req, req.query?.branch_id || req.query?.object_id);
+    if (filter.error) return res.status(filter.status).json({ error: filter.error });
+    const { branchFilter } = filter;
 
     try {
       const turnoverResult = await db.query(
@@ -105,12 +129,13 @@ class Finance {
            where q.status = 'completed'
              and q.finished_at >= $1
              and q.finished_at < $2
+             and ($3::text[] is null or q.branch_id::text = any($3::text[]))
            group by q.id
          )
          select coalesce(sum(ce.amount), 0)::numeric as total,
                 count(ce.id)::int as orders_count
          from completed_entries ce`,
-        [from, to]
+        [from, to, branchFilter]
       );
 
       const branchesResult = await db.query(
@@ -134,6 +159,7 @@ class Finance {
            where q.status = 'completed'
              and q.finished_at >= $1
              and q.finished_at < $2
+             and ($3::text[] is null or q.branch_id::text = any($3::text[]))
            group by q.id
          )
          select b.id as branch_id,
@@ -142,16 +168,18 @@ class Finance {
                 count(ce.id)::int as orders_count
          from branches b
          left join completed_entries ce on ce.branch_id = b.id
+         where ($3::text[] is null or b.id::text = any($3::text[]))
          group by b.id, b.name
          order by b.name asc`,
-        [from, to]
+        [from, to, branchFilter]
       );
 
       const salaryResult = await db.query(
         `select branch_id, payload
          from finance_snapshots
-         where period = $1`,
-        [period]
+         where period = $1
+           and ($2::text[] is null or branch_id::text = any($2::text[]))`,
+        [period, branchFilter]
       );
 
       const salaryByBranch = new Map();
@@ -207,8 +235,9 @@ class Finance {
            where status <> 'cancelled'
              and purchased_at >= $1
              and purchased_at < $2
+             and ($3::text[] is null or branch_id::text = any($3::text[]))
            group by branch_id`,
-          [from, to]
+          [from, to, branchFilter]
         );
 
         for (const row of purchasesResult.rows || []) {
@@ -269,6 +298,8 @@ class Finance {
     if (!branchId) {
       return res.json(snapshotResponse({ period }));
     }
+    const filter = resolveBranchFilter(req, branchId);
+    if (filter.error) return res.status(filter.status).json({ error: filter.error });
 
     const { data, error } = await db
       .from('finance_snapshots')
@@ -316,3 +347,4 @@ class Finance {
 }
 
 module.exports = new Finance();
+module.exports.resolveBranchFilter = resolveBranchFilter;

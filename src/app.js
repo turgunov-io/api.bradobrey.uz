@@ -3,6 +3,7 @@ require('dotenv').config();
 const cors = require('cors');
 const express = require('express');
 const { uploadRoot } = require('./config/uploads');
+const { parseTrustProxy } = require('./config/trustProxy');
 
 const kiosk = require('./routers/kiosk');
 const monitor = require('./routers/monitor');
@@ -37,7 +38,10 @@ const app = express();
 // Only trust forwarded client IP headers when the deployment explicitly sits
 // behind a known reverse proxy. This keeps OTP/fraud/rate-limit identity data
 // from being spoofed by arbitrary clients in direct deployments.
-if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
+// Accepts true (one hop), a hop count, or a list of trusted proxy addresses;
+// see src/config/trustProxy.js.
+const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
+if (trustProxy !== null) app.set('trust proxy', trustProxy);
 app.use(securityHeaders);
 
 // Keep the notification module self-initializing on deployments where SQL files

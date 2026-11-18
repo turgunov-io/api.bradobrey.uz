@@ -1,32 +1,19 @@
-const jwt = require('jsonwebtoken');
-
 const { pool } = require('../../config/postgres');
+const { createAdminAuth } = require('../../utils/adminAuth');
+const { NETWORK_ROLES } = require('../../utils/employeeQualityAccess');
 
-const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 const ALERT_STATUSES = new Set(['OPEN', 'REVIEWED', 'DISMISSED']);
 
-function auth(req, res) {
-  const header = String(req.headers.authorization || '');
-  if (!header.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authorization token is required' });
-    return null;
-  }
-  try {
-    const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET);
-    if (!ADMIN_ROLES.has(payload?.role)) {
-      res.status(403).json({ error: 'Only admins can manage fraud alerts' });
-      return null;
-    }
-    return payload;
-  } catch (_error) {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return null;
-  }
-}
+// Network-wide marketplace data (every client's phone, all reviews, push to
+// any client): network roles only (admin_network, admin, super-manager). The
+// role is loaded from the database by authorizeAdmin, never trusted from the
+// JWT. admin_branch / merchant have no scoped use for these endpoints (dash
+// merchant pages do not call them), so they are denied rather than scoped.
+const authorizeNetworkAdmin = createAdminAuth({ roles: NETWORK_ROLES });
 
 class FraudAlerts {
   async list(req, res) {
-    const administrator = auth(req, res);
+    const administrator = await authorizeNetworkAdmin(req, res);
     if (!administrator) return;
 
     const status = String(req.query?.status || '').trim().toUpperCase();
@@ -68,7 +55,7 @@ class FraudAlerts {
   }
 
   async review(req, res) {
-    const administrator = auth(req, res);
+    const administrator = await authorizeNetworkAdmin(req, res);
     if (!administrator) return;
     const id = String(req.params?.id || '').trim();
     const status = String(req.body?.status || '').trim().toUpperCase();

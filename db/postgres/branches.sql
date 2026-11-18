@@ -11,3 +11,7 @@ create table if not exists branches (
 
 alter table if exists branches
   add column if not exists marketplace_barbershop_id uuid;
+
+-- Optional branch photo (uploaded via PATCH/POST /api/branches, multipart field "photo").
+alter table if exists branches
+  add column if not exists photo_url text;
