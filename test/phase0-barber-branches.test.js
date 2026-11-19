@@ -14,23 +14,25 @@ const {
   selectEmployeeBranches,
 } = require('../src/utils/employeeBranches');
 
-const home = { id: 'branch-home', name: 'Home', is_active: true };
-const granted = { id: 'branch-granted', name: 'Granted', is_active: true };
-const other = { id: 'branch-other', name: 'Other', is_active: true };
-const closed = { id: 'branch-closed', name: 'Closed', is_active: false };
+// selectEmployeeBranches fails closed without a company (Phase 2).
+const COMPANY = 'company-1';
+const home = { id: 'branch-home', name: 'Home', is_active: true, company_id: COMPANY };
+const granted = { id: 'branch-granted', name: 'Granted', is_active: true, company_id: COMPANY };
+const other = { id: 'branch-other', name: 'Other', is_active: true, company_id: COMPANY };
+const closed = { id: 'branch-closed', name: 'Closed', is_active: false, company_id: COMPANY };
 const ALL = [home, granted, other, closed];
 
 // ---- pure allow-list semantics ----
 
 test('allow-list: home branch plus explicitly granted branches, nothing else', () => {
   const access = [{ employee_id: 'e1', branch_id: granted.id, is_active: true }];
-  const ids = selectEmployeeBranches(ALL, access, { homeBranchIds: [home.id], role: 'barber' })
+  const ids = selectEmployeeBranches(ALL, access, { homeBranchIds: [home.id], role: 'barber', companyId: COMPANY })
     .map((branch) => branch.id);
   assert.deepEqual(ids, [home.id, granted.id]);
 });
 
 test('allow-list: an employee with no grants only sees the home branch', () => {
-  const ids = selectEmployeeBranches(ALL, [], { homeBranchIds: [home.id], role: 'barber' })
+  const ids = selectEmployeeBranches(ALL, [], { homeBranchIds: [home.id], role: 'barber', companyId: COMPANY })
     .map((branch) => branch.id);
   assert.deepEqual(ids, [home.id]);
 });
@@ -40,28 +42,28 @@ test('allow-list: an explicit deny row overrides home and grants', () => {
     { employee_id: 'e1', branch_id: home.id, is_active: false },
     { employee_id: 'e1', branch_id: granted.id, is_active: true },
   ];
-  const ids = selectEmployeeBranches(ALL, access, { homeBranchIds: [home.id], role: 'super-barber' })
+  const ids = selectEmployeeBranches(ALL, access, { homeBranchIds: [home.id], role: 'super-barber', companyId: COMPANY })
     .map((branch) => branch.id);
   assert.deepEqual(ids, [granted.id]);
 });
 
 test('allow-list: network roles keep every active (non-denied) branch', () => {
   for (const role of ['admin_network', 'admin', 'super-manager']) {
-    const ids = selectEmployeeBranches(ALL, [], { homeBranchIds: [home.id], role })
+    const ids = selectEmployeeBranches(ALL, [], { homeBranchIds: [home.id], role, companyId: COMPANY })
       .map((branch) => branch.id);
     assert.deepEqual(ids, [home.id, granted.id, other.id], role);
   }
 });
 
 test('allow-list: branch-scoped manager roles are not treated as network roles', () => {
-  const ids = selectEmployeeBranches(ALL, [], { homeBranchIds: [home.id], role: 'manager' })
+  const ids = selectEmployeeBranches(ALL, [], { homeBranchIds: [home.id], role: 'manager', companyId: COMPANY })
     .map((branch) => branch.id);
   assert.deepEqual(ids, [home.id]);
 });
 
 test('allow-list: closed branches are never selectable, even when granted', () => {
   const access = [{ employee_id: 'e1', branch_id: closed.id, is_active: true }];
-  const ids = selectEmployeeBranches(ALL, access, { homeBranchIds: [closed.id], role: 'barber' })
+  const ids = selectEmployeeBranches(ALL, access, { homeBranchIds: [closed.id], role: 'barber', companyId: COMPANY })
     .map((branch) => branch.id);
   assert.deepEqual(ids, []);
 });

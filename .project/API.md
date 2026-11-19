@@ -365,6 +365,18 @@ role in the DB (`403 PLATFORM_OWNER_REQUIRED` otherwise).
 - `POST /api/platform/companies` `{ name, code, currency?, timezone?, logo_url?, primary_color? }` → `201 { company }`. **Gate:** `409 { code: "MULTI_COMPANY_PRECONDITIONS", failed: ["KIOSK_AUTH_ENFORCE"?, "TENANT_STRICT"?] }` unless kiosk auth is enforced and `current_setting('app.tenant_strict')` is `on` (MULTI_TENANCY.md 9.9). `code` is stored upper-case, `^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$`; duplicate (case-insensitive) → `409 COMPANY_CODE_TAKEN`; unknown fields → `400`.
 - `PATCH /api/platform/companies/:id` — any of `name, code, status (active|suspended), currency, timezone, logo_url, primary_color` (`logo_url`/`primary_color` accept `null`), plus `kiosk_enrollment_code` (8–128 chars → stored as SHA-256 hash; `null` clears it; never returned). Unknown id → `404`; suspending the default company → `409 DEFAULT_COMPANY_SUSPEND_FORBIDDEN`; re-activating a suspended non-default company is subject to the same `409 MULTI_COMPANY_PRECONDITIONS` gate as creation.
 - `POST /api/platform/companies/:id/admins` `{ login, password }` → `201 { user: { id, login, role: "admin", company_id } }`. Password 8–128 chars, bcrypt (cost 10). Login taken in the company → `409 LOGIN_TAKEN` (logins are unique per company after migration 007).
+- `timezone` (create/patch) must be an IANA zone name (`Area/Location`, `UTC`, `Etc/…`); offsets like `+05:00` and abbreviations like `EST` → `400`. Stored in canonical case.
+
+### Platform owner accounts: `/api/platform/owners`
+
+Allowed for (checked in the DB, the token's role is ignored): `platform_owner`,
+or `admin_network` / `admin` whose company is the **default** company
+(`companies.is_default = true`) and `active`. Everyone else → `403 PLATFORM_OWNERS_FORBIDDEN`;
+no/invalid token or unknown account → `401`. A default-company admin can use
+only these two routes — `/api/platform/companies*` stays `403 PLATFORM_OWNER_REQUIRED`.
+
+- `GET /api/platform/owners` → `200 { owners: [{ id, login, created_at }] }` (sorted by login; `created_at` is `null` until migration `009_users_created_at` is applied).
+- `POST /api/platform/owners` `{ login, password }` → `201 { owner: { id, login, created_at } }`. Creates a `users` row with `role = 'platform_owner'`, `company_id = NULL`; password bcrypt (cost 10, as company admins). Login 1–64 chars without spaces (trimmed), password 8–128 chars, else `400`. A platform owner with that login exists → `409 LOGIN_TAKEN` (also on a concurrent duplicate via `users_platform_login_uidx`).
 
 # Company data scoping (multi-tenancy, Phase 1 step B2)
 

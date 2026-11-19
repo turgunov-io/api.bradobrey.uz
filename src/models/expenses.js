@@ -11,12 +11,7 @@ const PERMISSIONS = {
   update: 'expenses.update',
   delete: 'expenses.delete',
 };
-const tashkentDateFormatter = new Intl.DateTimeFormat('en-CA', {
-  day: '2-digit',
-  month: '2-digit',
-  timeZone: 'Asia/Tashkent',
-  year: 'numeric',
-});
+const { DEFAULT_TIMEZONE, resolveTimezone, zonedDateKey } = require('../utils/tenantTimezone');
 
 const text = (value) => {
   if (value === undefined) return undefined;
@@ -41,15 +36,14 @@ const sendDbError = (res, error) => isMissingWarehouseTable(error)
   ? res.status(501).json({ error: 'Warehouse tables are missing', hint: 'Apply db/postgres/warehouse.sql on the backend database.' })
   : res.status(500).json({ error: error.message || 'Internal server error' });
 
-const tashkentDate = (value) => {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : tashkentDateFormatter.format(date);
-};
+// Phase 2 M5: "today" is the day of the caller's (session) branch, else the
+// company, else DEFAULT_TIMEZONE — resolved in auth() for managers.
+const localDate = (value, timeZone) => (value ? zonedDateKey(value, timeZone || DEFAULT_TIMEZONE) : null);
 
 const canEditExpense = (row, access) => (
   PRIVILEGED_ROLES.has(access?.role)
-  || tashkentDate(row?.created_at) === tashkentDate(new Date())
+  || (localDate(row?.created_at, access?.timeZone) !== null
+    && localDate(row?.created_at, access?.timeZone) === localDate(new Date(), access?.timeZone))
 );
 
 async function auth(req, res) {
@@ -99,6 +93,10 @@ async function auth(req, res) {
   const branchId = payload.branchId || payload.branch_id || user.branch_id || null;
   // Allowed branch ids; network roles get every branch of their company.
   const branchScope = await resolveStaffBranchScope({ ...user, role }, branchId);
+  // Only the same-day edit rule of non-privileged roles needs the timezone.
+  const timeZone = PRIVILEGED_ROLES.has(role)
+    ? DEFAULT_TIMEZONE
+    : await resolveTimezone({ branchId, companyId }, { query: (sql, params) => db.query(sql, params) });
 
   return {
     userId,
@@ -108,6 +106,7 @@ async function auth(req, res) {
     companyId,
     companyWide: isCompanyWideScope(branchScope),
     permissions,
+    timeZone,
   };
 }
 
@@ -247,7 +246,12 @@ module.exports = {
     // New expenses always belong to the calendar day on which they are created.
     // Do not trust a client-provided date, otherwise a manager can move an
     // expense into another accounting period from the mobile app.
-    const draft = validate({ ...(req.body || {}), spent_at: tashkentDate(new Date()) });
+    // Phase 2 M5: the day of the expense's branch (-> company -> default).
+    let branchTimeZone;
+    try {
+      branchTimeZone = await resolveTimezone({ branchId, companyId: access.companyId }, { query: (sql, params) => db.query(sql, params) });
+    } catch (error) { return sendDbError(res, error); }
+    const draft = validate({ ...(req.body || {}), spent_at: localDate(new Date(), branchTimeZone) });
     if (draft.error) return res.status(422).json({ error: draft.error });
     const metadata = {
       type: EXPENSE_TYPE,

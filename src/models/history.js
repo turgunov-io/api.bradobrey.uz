@@ -3,6 +3,7 @@ const { db } = require('../config/postgres');
 const { enrichQueueEntriesWithBenefits } = require('../composable/enrichQueueBenefits');
 const { normalizeOptionalDateRange } = require('../utils/statisticsDate');
 const { requireAccessCompanyId } = require('../utils/employeeQualityAccess');
+const { resolveTimezone } = require('../utils/tenantTimezone');
 const { loadServicesForEntries } = require('../utils/serviceScope');
 
 // Managers can also accept orders, so their barber workspace history is valid.
@@ -326,7 +327,18 @@ class History {
         let to = null;
 
         if (fromValue || toValue) {
-            const range = normalizeOptionalDateRange(fromValue, toValue);
+            // Phase 2 M5: calendar dates are days of the branch/company timezone.
+            let timeZone;
+            try {
+                timeZone = await resolveTimezone({ branchId: branchId || null, companyId: requireAccessCompanyId(req.historyAccess) });
+            } catch (tzError) {
+                if (tzError?.code === 'COMPANY_SCOPE_MISSING') {
+                    return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+                }
+                console.error('History timezone lookup failed:', tzError.message);
+                return res.status(500).json({ code: 'HISTORY_LOAD_FAILED', error: 'Failed to load history' });
+            }
+            const range = normalizeOptionalDateRange(fromValue, toValue, { timeZone });
             if (range.error) return res.status(400).json({ error: range.error });
             from = range.startInclusive;
             to = range.endExclusive;
@@ -434,10 +446,27 @@ class History {
     }
 
     async branch(req, res) {
-        const id = req.historyAccess?.scope?.branchId || req.query.id;
-        if (!id) return res.status(400).json({ error: "Branch ID is required!" });
+        // Phase 2 H3: the branch comes only from the authorized scope (a
+        // requested ?id was already checked against the caller's company by
+        // authenticateHistory and turned into a branch scope). A self scope
+        // never picks a branch from the query and only sees its own orders.
+        const access = req.historyAccess;
+        let companyId;
+        try {
+            companyId = requireAccessCompanyId(access);
+        } catch (_error) {
+            return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+        }
+        const scope = access?.scope || {};
+        const isSelf = scope.type === 'self';
+        const selfEmployeeId = isSelf ? (scope.employeeId || access?.user?.id || null) : null;
+        if (isSelf && !selfEmployeeId) {
+            return res.status(403).json({ error: 'Authenticated user has no history scope' });
+        }
+        const id = scope.branchId || null;
+        if (!id && !isSelf) return res.status(400).json({ error: "Branch ID is required!" });
 
-        const { data, error } = await db
+        let query = db
             .from('queue_entries')
             .select(`
                 id,
@@ -455,9 +484,13 @@ class History {
                 client:clients ( id, name, phone, rank, completed_visits, first_visit_date ),
                 barber:barbers ( id, name )
             `)
-            .eq('branch_id', id)
+            .eq('company_id', companyId)
             .in('status', HISTORY_STATUSES)
             .order('created_at', { ascending: false });
+        if (id) query = query.eq('branch_id', id);
+        if (selfEmployeeId) query = query.eq('barber_id', String(selfEmployeeId));
+
+        const { data, error } = await query;
 
         if (error) {
             console.error('Branch history query failed:', error.message);

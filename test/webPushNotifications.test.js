@@ -23,6 +23,8 @@ function request({ userId = 'user-a', endpoint, authorized = true } = {}) {
   const token = jwt.sign({ sub: userId, role: 'admin' }, process.env.JWT_SECRET);
   return {
     headers: authorized ? { authorization: `Bearer ${token}` } : {},
+    // Set by middleware/employeeAccess (DB-loaded account, Phase 2 M3).
+    employeeAccess: { user: { id: userId, role: 'admin' }, sessionValid: true },
     body: endpoint === undefined ? {} : { endpoint },
   };
 }

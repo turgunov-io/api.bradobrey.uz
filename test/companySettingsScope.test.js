@@ -150,10 +150,18 @@ test('verifix penalty settings: no company context -> 403, company B writes its 
 test('marketplace settings: list/update target (company_id, key) of the tenant', async () => {
   const settings = require('../src/models/marketplace/settings');
   const pool = installPoolMock(() => ({ rows: [{ key: 'cashback' }] }));
+  // Role and company come from the DB (createAdminAuth, Phase 2 M3): an
+  // account without a company is refused even with a valid admin token.
+  let mock = installDbMock({
+    ...staffTables('admin'),
+    users: [{ data: { id: ADMIN_B, login: 'b', role: 'admin', branch_id: null, company_id: null }, error: null }],
+  });
   try {
     const anonymousTenant = makeRes();
     await settings.list({ headers: { authorization: bearer('admin') } }, anonymousTenant);
     assert.equal(anonymousTenant.statusCode, 403);
+    mock.restore();
+    mock = installDbMock(staffTables('admin'));
 
     const res = makeRes();
     await settings.update({
@@ -166,7 +174,7 @@ test('marketplace settings: list/update target (company_id, key) of the tenant',
     const insert = pool.calls.find((c) => /insert into platform_settings/.test(c.sql));
     assert.match(insert.sql, /on conflict \(company_id, key\)/);
     assert.equal(insert.params[2], COMPANY_B);
-  } finally { pool.restore(); }
+  } finally { pool.restore(); mock.restore(); }
 });
 
 test('marketplace profile: legacy client lookups are per company, never by phone alone', () => {

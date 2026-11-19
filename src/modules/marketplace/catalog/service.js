@@ -19,8 +19,16 @@ const {
   zonedDateTimeToUtc,
 } = require('./time');
 
-const DEFAULT_TIMEZONE = 'Asia/Tashkent';
+const { isValidTimeZone, pickTimezone, resolveTimezone } = require('../../../utils/tenantTimezone');
+
 const SLOT_INTERVAL_MINUTES = 15;
+
+// Catalog branch rows already carry the barbershop's or the branch's own
+// timezone (repository.applyEffectiveMarketplaceSchedule). Without a valid
+// one, the branch's company timezone applies, then the default (Phase 2 M5).
+const effectiveBranchTimezone = async (branch) => (
+  isValidTimeZone(branch?.timezone) ? branch.timezone : resolveTimezone({ branchId: branch?.id || null })
+);
 
 const distanceKm = (aLat, aLng, bLat, bLng) => {
   const values = [aLat, aLng, bLat, bLng].map(Number);
@@ -374,7 +382,10 @@ const quoteBooking = async (payload) => {
     throw err;
   }
 
-  const branch = await getBranchOrThrow(branchId);
+  const branchRow = await getBranchOrThrow(branchId);
+  // The quote's branch carries the effective timezone: the controller checks
+  // same-day bookings against quote.branch.timezone.
+  const branch = { ...branchRow, timezone: await effectiveBranchTimezone(branchRow) };
   const companyId = await branchCompanyIdOrThrow(branch);
 
   const { data: barber, error: barberError } = await repo.fetchBarberById(barberId);
@@ -473,7 +484,7 @@ const quoteBooking = async (payload) => {
 
 const ensureSameDay = ({ startsAt, branchTimezone }) => {
   if (!startsAt) return;
-  const tz = branchTimezone || DEFAULT_TIMEZONE;
+  const tz = pickTimezone(branchTimezone);
   const now = new Date();
   const todayLocal = getZonedDateString(now, tz);
   const startsLocal = getZonedDateString(startsAt, tz);
@@ -485,7 +496,7 @@ const ensureSameDay = ({ startsAt, branchTimezone }) => {
 };
 
 const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durationMinutes }) => {
-  const timezone = branch?.timezone || DEFAULT_TIMEZONE;
+  const timezone = await effectiveBranchTimezone(branch);
   const start = startsAt instanceof Date ? startsAt : new Date(startsAt || Date.now());
   if (Number.isNaN(start.getTime())) {
     const err = new Error('Invalid booking start time');
@@ -570,7 +581,7 @@ const ensureBookingWithinWorkHours = async ({ branch, barberId, startsAt, durati
 const listAvailability = async ({ branchId, barberId, serviceIds, date }) => {
   const branch = await getBranchOrThrow(branchId);
   const companyId = await branchCompanyIdOrThrow(branch);
-  const timezone = branch.timezone || DEFAULT_TIMEZONE;
+  const timezone = await effectiveBranchTimezone(branch);
 
   const now = new Date();
   const todayLocal = getZonedDateString(now, timezone);

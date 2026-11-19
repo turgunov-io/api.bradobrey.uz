@@ -79,6 +79,8 @@ function makeRequest({ actorId = 'barber-b', role = 'barber', decision = 'accept
   return {
     req: {
       headers: { authorization: `Bearer ${token}` },
+      // Set by middleware/employeeAccess after the DB/session check (Phase 2 M3).
+      employeeAccess: { user: { id: actorId, role }, sessionValid: true },
       params: { transferId: 'transfer-1' },
       body: reason ? { reason } : {},
       query: {},

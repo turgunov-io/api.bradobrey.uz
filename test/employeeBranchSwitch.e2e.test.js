@@ -11,9 +11,11 @@ process.env.PGPASSWORD ||= 'unit-test-only';
 
 const { selectEmployeeBranches } = require('../src/utils/employeeBranches');
 
-const branchA = { id: 'branch-a', name: 'Permanent branch', is_active: true };
-const branchB = { id: 'branch-b', name: 'Today branch', is_active: true };
-const branchClosed = { id: 'branch-closed', name: 'Closed branch', is_active: false };
+// selectEmployeeBranches fails closed without a company (Phase 2).
+const COMPANY = 'company-1';
+const branchA = { id: 'branch-a', name: 'Permanent branch', is_active: true, company_id: COMPANY };
+const branchB = { id: 'branch-b', name: 'Today branch', is_active: true, company_id: COMPANY };
+const branchClosed = { id: 'branch-closed', name: 'Closed branch', is_active: false, company_id: COMPANY };
 
 test('isolated cross-branch employee flow uses active branch without production data', () => {
   const employee = { id: 'barber-1', branch_id: branchA.id };
@@ -26,13 +28,13 @@ test('isolated cross-branch employee flow uses active branch without production 
   const availableBranches = selectEmployeeBranches(
     [branchA, branchB, branchClosed],
     accessRows,
-    { homeBranchIds: [branchA.id] },
+    { homeBranchIds: [branchA.id], companyId: COMPANY },
   );
   assert.deepEqual(availableBranches.map((branch) => branch.id), [branchA.id, branchB.id]);
 
   // Without the explicit B row only the home branch is allowed.
   assert.deepEqual(
-    selectEmployeeBranches([branchA, branchB, branchClosed], [], { homeBranchIds: [branchA.id] })
+    selectEmployeeBranches([branchA, branchB, branchClosed], [], { homeBranchIds: [branchA.id], companyId: COMPANY })
       .map((branch) => branch.id),
     [branchA.id],
   );
@@ -67,10 +69,10 @@ test('explicit inactive branch restriction and inactive branch status are enforc
   const branches = [branchA, branchB, branchClosed];
   const deniedB = [{ employee_id: 'barber-1', branch_id: branchB.id, is_active: false }];
   assert.deepEqual(
-    selectEmployeeBranches(branches, deniedB, { homeBranchIds: [branchA.id] }).map((branch) => branch.id),
+    selectEmployeeBranches(branches, deniedB, { homeBranchIds: [branchA.id], companyId: COMPANY }).map((branch) => branch.id),
     [branchA.id],
   );
-  assert.equal(selectEmployeeBranches(branches, []).some((branch) => branch.id === branchClosed.id), false);
+  assert.equal(selectEmployeeBranches(branches, [], { companyId: COMPANY }).some((branch) => branch.id === branchClosed.id), false);
 });
 
 test('server-side branch checks remain wired into the real switch, shift, and kiosk paths', () => {

@@ -9,6 +9,8 @@ const { sameId } = require('../utils/companyScope');
 
 const GLOBAL_CERTIFICATE_ROLES = new Set(['admin_network', 'admin', 'super-manager']);
 const CERTIFICATE_PERMISSION = 'certificates.manage';
+const CERTIFICATE_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager']);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const sendCertificateServerError = (res, error) => {
   console.error('[certificate] request failed', { code: error?.code || 'UNKNOWN' });
@@ -32,8 +34,7 @@ const requireCertificateAccess = async (req, res) => {
   }
 
   const userId = payload?.sub || payload?.id;
-  const role = String(payload?.role || '').trim().toLowerCase();
-  if (!userId || !role || !['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager'].includes(role)) {
+  if (!userId || !UUID_PATTERN.test(String(userId))) {
     res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
     return null;
   }
@@ -46,6 +47,12 @@ const requireCertificateAccess = async (req, res) => {
   if (userError) return sendCertificateServerError(res, userError);
   if (!user) {
     res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
+    return null;
+  }
+  // Phase 2 M3: the stored role decides, never the token's role claim.
+  const role = String(user.role || '').trim().toLowerCase();
+  if (!CERTIFICATE_ROLES.has(role)) {
+    res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
     return null;
   }
   const companyId = user.company_id ? String(user.company_id) : null;

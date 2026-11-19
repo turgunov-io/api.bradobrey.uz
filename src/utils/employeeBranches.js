@@ -21,14 +21,15 @@ const NETWORK_BRANCH_ROLES = Object.freeze([...NETWORK_ROLES]);
  * Allow-list branch selection (pure mirror of the SQL in listEmployeeBranches).
  * Allowed = home branch(es) ∪ branches with an active access row; network
  * roles get every branch of their company. Closed branches, other companies'
- * branches (when `companyId` is given) and explicit deny rows
- * (is_active = false) always win.
+ * branches and explicit deny rows (is_active = false) always win. Without a
+ * `companyId` nothing is selectable (Phase 2: fail closed).
  *
  * @param {Array<{id: string, is_active?: boolean, company_id?: string}>} branches
  * @param {Array<{branch_id: string, is_active: boolean}>} accessRows
  * @param {{ homeBranchIds?: Array<string|null>, role?: string|null, companyId?: string|null }} [options]
  */
 const selectEmployeeBranches = (branches = [], accessRows = [], { homeBranchIds = [], role = null, companyId = null } = {}) => {
+  if (!normalizeId(companyId)) return [];
   const deniedBranchIds = new Set(
     accessRows
       .filter((row) => row?.is_active === false)
@@ -42,15 +43,23 @@ const selectEmployeeBranches = (branches = [], accessRows = [], { homeBranchIds 
 
   return branches.filter((branch) => (
     branch?.is_active !== false
-    && (!companyId || String(branch?.company_id || '') === String(companyId))
+    && String(branch?.company_id || '') === String(companyId)
     && !deniedBranchIds.has(String(branch.id))
     && (isNetworkRole || allowedBranchIds.has(String(branch.id)))
   ));
 };
 
-const loadFallbackBranch = async (fallback) => {
-  if (!fallback) return [];
-  const legacy = await db.query('select id, name, address, city, timezone from branches where id = $1 and is_active = true', [fallback]);
+// Phase 2: the fallback (home) branch must belong to the employee's company;
+// no users row / no company -> nothing.
+const loadFallbackBranch = async (fallback, employeeId) => {
+  if (!fallback || !employeeId) return [];
+  const legacy = await db.query(
+    `select id, name, address, city, timezone
+       from branches
+      where id = $1 and is_active = true
+        and company_id = (select company_id from users where id = $2)`,
+    [fallback, employeeId],
+  );
   return legacy.rows || [];
 };
 
@@ -101,7 +110,7 @@ async function listEmployeeBranches(employeeId, fallbackBranchId = null) {
   if (result.error) {
     if (!isMissingRelation(result.error, 'employee_branch_access')) throw result.error;
     // Pre-migration schema: only the home branch is known to be allowed.
-    return loadFallbackBranch(fallback);
+    return loadFallbackBranch(fallback, id);
   }
 
   // No fallback when the list is empty: an empty result means every candidate

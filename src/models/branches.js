@@ -1,6 +1,7 @@
 const { db } = require("../config/postgres");
 const { uploadBufferImageWithFolder } = require("../composable/uploadImage");
 const { requireTenantCompany, sameId } = require("../utils/companyScope");
+const { normalizeTimezoneInput } = require("../utils/tenantTimezone");
 
 const SELECT_WITH_MARKETPLACE =
   "id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id";
@@ -89,9 +90,14 @@ const normalizeBranchPayload = (body = {}, { partial = false } = {}) => {
     payload.photo_url = null;
   }
 
-  for (const key of ["address", "city", "timezone", "marketplace_barbershop_id"]) {
+  for (const key of ["address", "city", "marketplace_barbershop_id"]) {
     if (body[key] !== undefined) payload[key] = normalizeText(body[key]);
   }
+
+  // Phase 2 security fix M1: only IANA zone names reach SQL `at time zone`.
+  const timezone = normalizeTimezoneInput(body.timezone);
+  if (timezone.error) return { error: timezone.error.error, code: timezone.error.code };
+  if (timezone.value !== undefined) payload.timezone = timezone.value;
 
   if (body.is_active !== undefined) {
     const isActive = parseBoolean(body.is_active, null);
@@ -202,8 +208,8 @@ class Branches {
   }
 
   async create(req, res) {
-    const { payload, error: payloadError } = normalizeBranchPayload(req.body || {});
-    if (payloadError) return res.status(400).json({ error: payloadError });
+    const { payload, error: payloadError, code: payloadCode } = normalizeBranchPayload(req.body || {});
+    if (payloadError) return res.status(400).json({ ...(payloadCode ? { code: payloadCode } : {}), error: payloadError });
     const companyId = requireTenantCompany(req, res);
     if (!companyId) return undefined;
     try {
@@ -244,8 +250,8 @@ class Branches {
     const { id } = req.params || {};
     if (!id) return res.status(400).json({ error: "Branch id is required" });
 
-    const { payload, error: payloadError } = normalizeBranchPayload(req.body || {}, { partial: true });
-    if (payloadError) return res.status(400).json({ error: payloadError });
+    const { payload, error: payloadError, code: payloadCode } = normalizeBranchPayload(req.body || {}, { partial: true });
+    if (payloadError) return res.status(400).json({ ...(payloadCode ? { code: payloadCode } : {}), error: payloadError });
     if (!Object.keys(payload).length && !req.file) return res.status(400).json({ error: "No fields to update" });
     const companyId = requireTenantCompany(req, res);
     if (!companyId) return undefined;

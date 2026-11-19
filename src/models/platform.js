@@ -9,6 +9,12 @@
 //                                             kiosk_enrollment_code (string = set/rotate, null = clear;
 //                                             stored hashed, never returned — has_kiosk_enrollment_code only)
 //   POST  /api/platform/companies/:id/admins  first company admin { login, password }
+//   GET   /api/platform/owners                platform owners [{ id, login, created_at }]
+//   POST  /api/platform/owners                new platform owner { login, password }
+//
+// /owners is guarded by requirePlatformOwnersManager (DB-checked): the
+// platform owner, or admin_network/admin of the active DEFAULT company (it
+// bootstraps the first owner). Those admins get nothing else under /platform.
 //
 // Multi-company gate (security review H2/M1): creating a company, or
 // re-activating a suspended non-default one, is 409 MULTI_COMPANY_PRECONDITIONS
@@ -24,6 +30,7 @@ const { getBearerToken, verifyStaffToken } = require('../utils/authToken');
 const { PLATFORM_OWNER_ROLE, normalizeCompanyCode } = require('../utils/tenant');
 const { isKioskAuthEnforced } = require('../middleware/kioskAuth');
 const { hashEnrollmentCode, validateEnrollmentCode } = require('../utils/kioskEnrollmentCode');
+const { canonicalTimeZone } = require('../utils/tenantTimezone');
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COLOR_PATTERN = /^#[0-9A-Fa-f]{6}$/;
@@ -49,14 +56,6 @@ const COMPANY_COLUMNS = 'id, name, code, status, currency, timezone, logo_url, p
 const TENANT_STRICT_ON = 'on';
 const MULTI_COMPANY_PRECONDITIONS = 'MULTI_COMPANY_PRECONDITIONS';
 
-function isValidTimezone(value) {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: value });
-    return true;
-  } catch (_error) {
-    return false;
-  }
-}
 
 function isHttpUrl(value) {
   try {
@@ -86,9 +85,11 @@ const FIELD_VALIDATORS = {
     const currency = typeof value === 'string' ? value.trim().toUpperCase() : '';
     return CURRENCY_PATTERN.test(currency) ? [currency] : [undefined, 'currency must be a 3-letter ISO code'];
   },
+  // Phase 2 security fix M1: IANA zone names only (no offsets/abbreviations),
+  // stored in canonical case; companies.timezone reaches SQL `at time zone`.
   timezone(value) {
-    const timezone = typeof value === 'string' ? value.trim() : '';
-    return timezone && isValidTimezone(timezone) ? [timezone] : [undefined, 'timezone must be an IANA time zone'];
+    const timezone = canonicalTimeZone(value);
+    return timezone ? [timezone] : [undefined, 'timezone must be an IANA time zone'];
   },
   logo_url(value) {
     if (value === null) return [null];
@@ -200,6 +201,48 @@ const platformRepo = {
     return result.rows[0] || null;
   },
 
+  // Caller of /owners with the company flags requirePlatformOwnersManager needs.
+  async findOwnersManagerCandidate(id) {
+    const result = await pool().query(
+      `select u.id, u.role, u.company_id, c.is_default as company_is_default, c.status as company_status
+         from users u
+         left join companies c on c.id = u.company_id
+        where u.id = $1
+        limit 1`,
+      [id],
+    );
+    return result.rows[0] || null;
+  },
+
+  async listPlatformOwners() {
+    return withoutCreatedAtFallback((createdAt) => pool().query(
+      `select id, login, ${createdAt}
+         from users
+        where role = 'platform_owner' and company_id is null
+        order by login asc`,
+    ));
+  },
+
+  async platformOwnerLoginTaken(login) {
+    const result = await pool().query(
+      "select 1 from users where role = 'platform_owner' and company_id is null and login = $1 limit 1",
+      [login],
+    );
+    return result.rowCount > 0;
+  },
+
+  // users_platform_login_uidx (003) keeps logins unique among company-less
+  // users, so a concurrent duplicate fails with 23505.
+  async createPlatformOwner({ login, passwordHash }) {
+    const rows = await withoutCreatedAtFallback((createdAt) => pool().query(
+      `insert into users (login, password_hash, role, company_id, branch_id)
+       values ($1, $2, 'platform_owner', null, null)
+       returning id, login, ${createdAt}`,
+      [login, passwordHash],
+    ));
+    return rows[0];
+  },
+
   async findUserById(id) {
     const result = await pool().query('select id, role, company_id from users where id = $1 limit 1', [id]);
     return result.rows[0] || null;
@@ -207,6 +250,17 @@ const platformRepo = {
 };
 
 const isUniqueViolation = (error) => String(error?.code || '') === '23505';
+
+// users.created_at comes from migration 009; until it is applied the owners
+// routes answer created_at: null instead of failing (42703 undefined_column).
+async function withoutCreatedAtFallback(run) {
+  try {
+    return (await run('created_at')).rows;
+  } catch (error) {
+    if (String(error?.code || '') !== '42703') throw error;
+    return (await run('null as created_at')).rows;
+  }
+}
 
 /**
  * Preconditions for running more than one company (MULTI_TENANCY 9.9).
@@ -256,6 +310,64 @@ function createPlatformOwnerGuard({ loadUser = (id) => platformRepo.findUserById
     return next();
   };
 }
+
+// Default-company roles that may manage platform owners (besides platform_owner).
+const OWNERS_MANAGER_ROLES = new Set(['admin_network', 'admin']);
+
+/** True when the DB-loaded caller may list/create platform owners. */
+function canManagePlatformOwners(user) {
+  const role = String(user?.role || '').trim().toLowerCase();
+  if (role === PLATFORM_OWNER_ROLE) return !user.company_id;
+  return OWNERS_MANAGER_ROLES.has(role)
+    && Boolean(user.company_id)
+    && user.company_is_default === true
+    && user.company_status === 'active';
+}
+
+function createPlatformOwnersManagerGuard({ loadUser = (id) => platformRepo.findOwnersManagerCandidate(id), secret } = {}) {
+  return async function requirePlatformOwnersManager(req, res, next) {
+    const token = getBearerToken(req);
+    if (!token) return res.status(401).json({ error: 'Authorization token is required' });
+    let payload;
+    try {
+      payload = verifyStaffToken(token, { secret });
+    } catch (_error) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    const userId = String(payload?.sub || payload?.id || '');
+    if (!UUID_PATTERN.test(userId)) return res.status(401).json({ error: 'Invalid token payload' });
+
+    let user;
+    try {
+      user = await loadUser(userId);
+    } catch (error) {
+      console.error('[platform] owners authorization failed:', error?.code || error?.message);
+      return res.status(500).json({ error: 'Failed to authorize request' });
+    }
+    if (!user) return res.status(401).json({ error: 'Session is no longer valid' });
+    if (!canManagePlatformOwners(user)) {
+      return res.status(403).json({ code: 'PLATFORM_OWNERS_FORBIDDEN', error: 'Not allowed to manage platform owners' });
+    }
+    req.platformOwnersManager = { id: user.id };
+    return next();
+  };
+}
+
+// Same login/password rules as the first company admin.
+function readCredentials(body) {
+  const login = typeof body?.login === 'string' ? body.login.trim() : '';
+  const password = typeof body?.password === 'string' ? body.password : '';
+  if (!login || login.length > MAX_LOGIN_LENGTH || /\s/.test(login)) {
+    return { error: `login must be 1-${MAX_LOGIN_LENGTH} characters without spaces` };
+  }
+  if (password.length < MIN_ADMIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+    return { error: `password must be ${MIN_ADMIN_PASSWORD_LENGTH}-${MAX_PASSWORD_LENGTH} characters` };
+  }
+  return { login, password };
+}
+
+const publicOwner = (row) => ({ id: row.id, login: row.login, created_at: row.created_at ?? null });
+const LOGIN_TAKEN = Object.freeze({ code: 'LOGIN_TAKEN', error: 'login already taken' });
 
 function createPlatformController({
   repo = platformRepo,
@@ -367,15 +479,38 @@ function createPlatformController({
     }
   }
 
-  return { createCompany, createCompanyAdmin, listCompanies, login, updateCompany };
+  async function listOwners(_req, res) {
+    try {
+      return res.status(200).json({ owners: (await repo.listPlatformOwners()).map(publicOwner) });
+    } catch (error) {
+      return internalError(res, 'load platform owners', error);
+    }
+  }
+
+  async function createOwner(req, res) {
+    const { login, password, error } = readCredentials(req.body);
+    if (error) return res.status(400).json({ error });
+    try {
+      if (await repo.platformOwnerLoginTaken(login)) return res.status(409).json({ ...LOGIN_TAKEN });
+      const owner = await repo.createPlatformOwner({ login, passwordHash: hashPassword(password) });
+      return res.status(201).json({ owner: publicOwner(owner) });
+    } catch (dbError) {
+      if (isUniqueViolation(dbError)) return res.status(409).json({ ...LOGIN_TAKEN });
+      return internalError(res, 'create platform owner', dbError);
+    }
+  }
+
+  return { createCompany, createCompanyAdmin, createOwner, listCompanies, listOwners, login, updateCompany };
 }
 
 module.exports = {
   createPlatformController,
   createPlatformOwnerGuard,
+  createPlatformOwnersManagerGuard,
   multiCompanyPreconditions,
   platform: createPlatformController(),
   platformRepo,
   requirePlatformOwner: createPlatformOwnerGuard(),
+  requirePlatformOwnersManager: createPlatformOwnersManagerGuard(),
   validateCompanyFields,
 };

@@ -20,6 +20,7 @@ const {
 const { verifyKioskSocketTicket } = require('./kioskSocketTicket');
 const { checkTenantAccess } = require('./utils/tenant');
 const { validatePersistedEmployeeSession } = require('./utils/employeeSession');
+const { isTokenRoleStale, SESSION_BOUND_ROLES } = require('./middleware/employeeAccess');
 const server = http.createServer(app);
 
 const corsOrigin = app.get('corsOrigin') || '*';
@@ -107,12 +108,21 @@ io.use(async (socket, next) => {
       return next(error);
     }
 
-    if (['barber', 'super-barber', 'manager', 'super-manager'].includes(payload.role)) {
+    // Phase 2 LOW: the role is the DB role. A token from before a role change
+    // is refused, and the session requirement follows the DB role, so a
+    // session-bound account cannot skip the check with a non-session claim.
+    if (isTokenRoleStale(payload, state.user)) {
+      const error = new Error('Socket session is no longer valid');
+      error.data = { code: 'TOKEN_ROLE_STALE' };
+      return next(error);
+    }
+    const dbRole = String(state.user.role || '').trim().toLowerCase();
+    if (SESSION_BOUND_ROLES.has(dbRole)) {
       const session = await validatePersistedEmployeeSession({
         employeeId: payload.sub || payload.id,
         branchId: payload.branchId,
         sessionId: payload.jti,
-        role: payload.role,
+        role: state.user.role,
       });
       if (!session.valid) {
         const error = new Error('Socket session is no longer valid');

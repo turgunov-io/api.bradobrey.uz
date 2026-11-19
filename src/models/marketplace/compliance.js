@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { verifyAny } = require('../../utils/authToken');
 const { pool } = require('../../config/postgres');
+const { resolveTimezone, zonedDateKey } = require('../../utils/tenantTimezone');
 const { settlePendingReferralBonuses } = require('../../services/referralBonus');
 const { COMPANY_CONTEXT_REQUIRED, readTenantSetting, resolveMarketplaceContextCompanyId } = require('../../utils/tenantSettings');
 
@@ -639,7 +640,8 @@ async function cancelBooking(req, res) {
     await dbClient.query('BEGIN');
     const lockedClientResult = await dbClient.query(
       `select id, phone, status_points, blocked_until,
-              case when cancel_count_date = (now() at time zone 'Asia/Tashkent')::date then cancel_count_today else 0 end as cancel_count_today,
+              cancel_count_date::text as cancel_count_date,
+              cancel_count_today as stored_cancel_count_today,
               is_active
          from marketplace_clients
         where id = $1
@@ -691,7 +693,12 @@ async function cancelBooking(req, res) {
                  from marketplace_booking_persons bp
                  join queue_entries q on q.id = bp.queue_entry_id
                 where bp.booking_id = b.id
-                limit 1) as company_id
+                limit 1) as company_id,
+              (select q.branch_id
+                 from marketplace_booking_persons bp
+                 join queue_entries q on q.id = bp.queue_entry_id
+                where bp.booking_id = b.id
+                limit 1) as timezone_branch_id
          from marketplace_bookings b
         where b.marketplace_client_id = $2 and b.status = 'ACTIVE'
           and (b.id = $1 or exists (
@@ -718,7 +725,16 @@ async function cancelBooking(req, res) {
     );
     const now = new Date();
     const cooldownUntil = new Date(now.getTime() + Number(settings.cancel_cooldown_minutes || 15) * 60000);
-    const cancelCount = Number(lockedClient.cancel_count_today || 0) + 1;
+    // The daily cancel counter rolls over at midnight of the booked branch
+    // (branch -> company -> default timezone, Phase 2 M5).
+    const cancelTimeZone = await resolveTimezone(
+      { branchId: booking.timezone_branch_id || null, companyId: bookingCompanyId },
+      { query: (sql, params) => dbClient.query(sql, params) },
+    );
+    const cancelCountToday = lockedClient.cancel_count_date === zonedDateKey(now, cancelTimeZone)
+      ? Number(lockedClient.stored_cancel_count_today || 0)
+      : 0;
+    const cancelCount = cancelCountToday + 1;
     const blockedUntil = cancelCount >= Number(settings.cancel_block_threshold || 3)
       ? new Date(now.getTime() + Number(settings.block_hours || 24) * 3600000)
       : null;
@@ -835,8 +851,8 @@ async function cancelBooking(req, res) {
       }
     }
     await dbClient.query(
-      `update marketplace_clients set cancel_count_today = $1, cancel_count_date = (now() at time zone 'Asia/Tashkent')::date, blocked_until = $2 where id = $3`,
-      [cancelCount, blockedUntil?.toISOString() || null, clientId]
+      `update marketplace_clients set cancel_count_today = $1, cancel_count_date = (now() at time zone $4)::date, blocked_until = $2 where id = $3`,
+      [cancelCount, blockedUntil?.toISOString() || null, clientId, cancelTimeZone]
     );
     if (blockedUntil) {
       await dbClient.query(

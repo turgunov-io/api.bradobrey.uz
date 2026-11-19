@@ -189,11 +189,14 @@ test('repository migrations load cleanly; the global-unique drop runs last as 00
   assert.ok(fileNames.includes('006_warehouse_categories_company.sql'));
   // Former deferred/101: runs after the additive 001-006, in the same
   // release as the company-scoped code.
-  assert.equal(fileNames.at(-2), '007_drop_global_uniques.sql');
+  assert.equal(fileNames.at(-3), '007_drop_global_uniques.sql');
   // Security review H1: per-company kiosk enrollment codes (additive, after 007).
-  assert.equal(fileNames.at(-1), '008_company_kiosk_enrollment.sql');
-  assert.match(migrations.at(-1).sql, /add column if not exists kiosk_enrollment_code_hash text/i);
-  assert.ok(migrations.at(-1).sql.includes("check (kiosk_enrollment_code_hash ~ '^[0-9a-f]{64}$')"));
+  assert.equal(fileNames.at(-2), '008_company_kiosk_enrollment.sql');
+  assert.match(migrations.at(-2).sql, /add column if not exists kiosk_enrollment_code_hash text/i);
+  assert.ok(migrations.at(-2).sql.includes("check (kiosk_enrollment_code_hash ~ '^[0-9a-f]{64}$')"));
+  // Platform owner accounts: users.created_at (additive; API tolerates its absence).
+  assert.equal(fileNames.at(-1), '009_users_created_at.sql');
+  assert.match(migrations.at(-1).sql, /add column if not exists created_at timestamptz not null default now\(\)/i);
   assert.ok(!fs.existsSync(path.join(MIGRATIONS_DIR, 'deferred')), 'no deferred migrations left');
   for (const m of migrations) {
     assert.ok(

@@ -1,13 +1,14 @@
 const { db, pool } = require('../config/postgres');
 const { resolveLoyaltyCashbackPercent } = require('../utils/loyalty');
 const { isServiceUsable } = require('../utils/serviceScope');
+const { isValidTimeZone, resolveTimezone, zonedDateKey } = require('../utils/tenantTimezone');
 
 const DEFAULT_CASHBACK_CONFIG = {
   default_percent: 1,
   promotion_percent: null,
   promotion_start_date: null,
   promotion_end_date: null,
-  timezone: 'Asia/Tashkent',
+  timezone: null,
 };
 
 const roundMoney = (value) => {
@@ -51,13 +52,20 @@ async function getCashbackPercentForEntry(entry) {
     );
     if (configuredCashback.rows[0]?.value && typeof configuredCashback.rows[0].value === 'object') {
       const config = { ...DEFAULT_CASHBACK_CONFIG, ...configuredCashback.rows[0].value };
-      const timezone = String(config.timezone || 'Asia/Tashkent');
-      const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(new Date());
-      const promotionIsActive = config.promotion_percent !== null
+      const hasPromotion = config.promotion_percent !== null
         && config.promotion_start_date
-        && config.promotion_end_date
-        && localDate >= String(config.promotion_start_date)
-        && localDate <= String(config.promotion_end_date);
+        && config.promotion_end_date;
+      let promotionIsActive = false;
+      if (hasPromotion) {
+        // Phase 2 M5: cashback.timezone if set, else branch -> company -> default.
+        const configured = String(config.timezone || '').trim();
+        const timezone = isValidTimeZone(configured)
+          ? configured
+          : await resolveTimezone({ branchId: entry?.branch_id || null, companyId });
+        const localDate = zonedDateKey(new Date(), timezone);
+        promotionIsActive = localDate >= String(config.promotion_start_date)
+          && localDate <= String(config.promotion_end_date);
+      }
       return parsePercent(promotionIsActive ? config.promotion_percent : config.default_percent);
     }
 
@@ -140,12 +148,15 @@ const getOverrideTotal = (entry) => {
   return Number.isFinite(amount) && amount > 0 ? roundMoney(amount) : null;
 };
 
-async function getPromoForOrder(orderId) {
-  if (!orderId) return null;
+// promo_code_usage.order_id has no FK (Phase 2 M1): only a usage row and a
+// promo code of the order's own company may discount it.
+async function getPromoForOrder(orderId, companyId) {
+  if (!orderId || !companyId) return null;
 
   const { data: usage, error: usageError } = await db
     .from('promo_code_usage')
     .select('promo_code_id, used_at')
+    .eq('company_id', companyId)
     .eq('order_id', String(orderId))
     .order('used_at', { ascending: false })
     .limit(1)
@@ -158,6 +169,7 @@ async function getPromoForOrder(orderId) {
     .from('promo_codes')
     .select('id, code, discount_type, discount_value')
     .eq('id', usage.promo_code_id)
+    .eq('company_id', companyId)
     .maybeSingle();
 
   if (promoError) throw promoError;
@@ -547,8 +559,9 @@ async function computeCashbackTotalsForQueueEntry(entry) {
 
   const serviceIds = getServiceIdsFromEntry(entry);
   const override = getOverrideTotal(entry);
-  const total = override ?? await getServicesTotal(serviceIds, await getCompanyIdForEntry(entry), entry.branch_id);
-  const promo = await getPromoForOrder(entry.id);
+  const companyId = await getCompanyIdForEntry(entry);
+  const total = override ?? await getServicesTotal(serviceIds, companyId, entry.branch_id);
+  const promo = await getPromoForOrder(entry.id, companyId);
   const discountedTotal = applyPromoDiscount(total, promo);
 
   return { total, discountedTotal, promo };
@@ -767,6 +780,7 @@ async function awardCashbackForCompletedQueueEntry(entry) {
 }
 
 module.exports = {
+  getCashbackPercentForEntry,
   getCompanyIdForEntry,
   roundMoney,
   parsePercent,

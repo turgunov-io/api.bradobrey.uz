@@ -78,7 +78,7 @@ test('branch-scoped location administrators cannot read events outside their bra
   let listQuery;
   let listValues;
   db.query = async (sql, params) => {
-    if (isActorQuery(sql)) return { rows: [actorRow('admin_branch')] };
+    if (isActorQuery(sql)) return { rows: [actorRow('admin_branch', { branch_id: 'branch-7' })] };
     databaseCalled = true; listQuery = sql; listValues = params; return { rows: [] };
   };
   const makeRequest = (query) => ({

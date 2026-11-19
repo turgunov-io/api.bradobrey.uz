@@ -473,12 +473,18 @@ const employeeItem = ({ user, barber, permissions = [] }) => ({
 });
 
 const loadEmployeeDirectory = async ({ archived = 'active', branchId, role, companyId } = {}) => {
+    // The employee-management guard pins the directory to the caller company;
+    // without one there is no directory (Phase 2: fail closed).
+    if (!companyId) {
+        const error = new Error('Company scope is required');
+        error.code = 'COMPANY_REQUIRED';
+        throw error;
+    }
     let query = db
         .from('users')
         .select('id, login, role, branch_id', { count: 'exact' })
-        .in('role', Array.from(EMPLOYEE_ROLES));
-    // The employee-management guard pins the directory to the caller company.
-    if (companyId) query = query.eq('company_id', companyId);
+        .in('role', Array.from(EMPLOYEE_ROLES))
+        .eq('company_id', companyId);
 
     // branch_id is the permanent assignment. A branch-filtered directory must
     // also include employees whose persisted active work branch is selected.
@@ -996,11 +1002,22 @@ const getBarberProfileFinance = async ({ barberId, branchId, period }) => {
     };
 };
 
-const getBarberWorkStatistics = async ({ barberId, period }) => {
+const emptyWorkStatistics = (period) => ({
+    period,
+    totals: { revenue: 0, services: 0, shifts: 0, worked_days: 0, worked_minutes: 0 },
+    branches: [],
+    finance: { totals: { goal: 0, profit: 0, advances: 0, penalty: 0, commission: 0, payout: 0 }, branches: [] },
+});
+
+// Phase 2 LOW: every source (orders, branches, shifts, finance snapshots) is
+// limited to the employee's company (users.company_id); no company -> empty.
+const getBarberWorkStatistics = async ({ barberId, period, companyId }) => {
     const range = periodRange(period);
+    if (!companyId) return emptyWorkStatistics(range.period);
     let { data: entries, error: entriesError } = await db
         .from('queue_entries')
         .select('id, branch_id, company_id, service_id, service_ids, price_override, finished_at')
+        .eq('company_id', companyId)
         .eq('barber_id', barberId)
         .eq('status', 'completed')
         .gte('finished_at', range.from)
@@ -1010,6 +1027,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
         ({ data: entries, error: entriesError } = await db
             .from('queue_entries')
             .select('id, branch_id, company_id, service_id, service_ids, finished_at')
+            .eq('company_id', companyId)
             .eq('barber_id', barberId)
             .eq('status', 'completed')
             .gte('finished_at', range.from)
@@ -1024,9 +1042,10 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
             ? db.from('payments').select('queue_entry_id, amount').in('queue_entry_id', entryIds)
             : { data: [], error: null },
         loadServicesForEntries(completedEntries, 'base_price'),
-        db.from('branches').select('id, name'),
+        db.from('branches').select('id, name').eq('company_id', companyId),
         db.from('barber_activity_events')
             .select('branch_id, event_type, occurred_at')
+            .eq('company_id', companyId)
             .eq('barber_id', barberId)
             .in('event_type', ['shift_start', 'shift_end'])
             .gte('occurred_at', range.from)
@@ -1034,6 +1053,7 @@ const getBarberWorkStatistics = async ({ barberId, period }) => {
             .order('occurred_at', { ascending: true }),
         db.from('finance_snapshots')
             .select('branch_id, payload')
+            .eq('company_id', companyId)
             .eq('period', range.period),
     ]);
 
@@ -1381,7 +1401,7 @@ class Barbers {
             const role = normalizeText(req.query?.role);
 
             const companyId = req.employeeManagement?.companyId || null;
-            if (req.employeeManagement && !companyId) return res.status(403).json({ error: 'Company scope is required' });
+            if (!companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
             const result = await loadEmployeeDirectory({ archived, branchId, role, companyId });
             return res.json(result);
         } catch (error) {
@@ -1598,23 +1618,12 @@ class Barbers {
     }
 
     async takeBreak(req, res) {
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = verifyAny(token);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can take a break' });
-        }
+        // Phase 2 M4: session-verified (jti + persisted active branch, archived,
+        // branch access revoked), not just the JWT signature and role claim.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can take a break');
+        if (!auth) return;
+        const { payload } = auth;
+        const sessionBranchId = payload.branchId;
 
         const minutesRaw = req.body?.minutes ?? 15;
         const minutes = Number(minutesRaw);
@@ -1622,8 +1631,8 @@ class Barbers {
             return res.status(400).json({ error: 'minutes must be between 1 and 180' });
         }
 
-        const barberId = payload.sub || payload.id;
-        const activeBranchId = payload.branchId || payload.branch_id;
+        const { barberId } = auth;
+        const activeBranchId = sessionBranchId;
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
@@ -1715,26 +1724,15 @@ class Barbers {
     }
 
     async returnFromBreak(req, res) {
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+        // Phase 2 M4: session-verified (jti + persisted active branch, archived,
+        // branch access revoked), not just the JWT signature and role claim.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can return from break');
+        if (!auth) return;
+        const { payload } = auth;
+        const sessionBranchId = payload.branchId;
 
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = verifyAny(token);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can return from break' });
-        }
-
-        const barberId = payload.sub || payload.id;
-        const activeBranchId = payload.branchId || payload.branch_id;
+        const { barberId } = auth;
+        const activeBranchId = sessionBranchId;
 
         const { data: barber, error: barberError } = await db
             .from('barbers')
@@ -2167,7 +2165,7 @@ class Barbers {
 
         const { data: user, error: userError } = await db
             .from('users')
-            .select('id, login, role, branch_id')
+            .select('id, login, role, branch_id, company_id')
             .eq('id', userId)
             .maybeSingle();
 
@@ -2222,6 +2220,7 @@ class Barbers {
             const statistics = await getBarberWorkStatistics({
                 barberId: user.id,
                 period: req.query?.period,
+                companyId: user.company_id || null,
             });
 
             barber = {
@@ -2749,35 +2748,25 @@ class Barbers {
     async callNext(req, res) {
         const { id } = req.params || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = verifyAny(token);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can call queue entries' });
-        }
+        // Phase 2 M4: session-verified (jti + persisted active branch, archived,
+        // branch access revoked), not just the JWT signature and role claim.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can call queue entries');
+        if (!auth) return;
+        const { payload } = auth;
+        const sessionBranchId = payload.branchId;
 
         if (!id) {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const barberId = payload.sub || payload.id;
+        const { barberId } = auth;
 
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status')
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .maybeSingle();
 
         if (entryError) {
@@ -2800,6 +2789,7 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .select('id, status, swapped_flag, created_at, service_id, service_ids, payment_method, branch_id, barber_id, client_id, client:clients ( id, name )')
             .maybeSingle();
 
@@ -2816,35 +2806,25 @@ class Barbers {
     async startQueue(req, res) {
         const { id } = req.params || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = verifyAny(token);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can start queue entries' });
-        }
+        // Phase 2 M4: session-verified (jti + persisted active branch, archived,
+        // branch access revoked), not just the JWT signature and role claim.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can start queue entries');
+        if (!auth) return;
+        const { payload } = auth;
+        const sessionBranchId = payload.branchId;
 
         if (!id) {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const barberId = payload.sub || payload.id;
+        const { barberId } = auth;
 
         const { data: entry, error: entryError } = await db
             .from('queue_entries')
             .select('id, barber_id, status')
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .maybeSingle();
 
         if (entryError) {
@@ -2868,6 +2848,7 @@ class Barbers {
             })
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .select('id, status, created_at, started_at, service_id, service_ids, payment_method, branch_id')
             .maybeSingle();
 
@@ -3014,29 +2995,18 @@ class Barbers {
         const { id } = req.params || {};
         const { payment_method, payments: paymentsInput } = req.body || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = verifyAny(token);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can complete queue entries' });
-        }
+        // Phase 2 M4: session-verified (jti + persisted active branch, archived,
+        // branch access revoked), not just the JWT signature and role claim.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can complete queue entries');
+        if (!auth) return;
+        const { payload } = auth;
+        const sessionBranchId = payload.branchId;
 
         if (!id) {
             return res.status(400).json({ error: 'Queue entry id is required' });
         }
 
-        const barberId = payload.sub || payload.id;
+        const { barberId } = auth;
 
         let paymentParts;
 
@@ -3051,6 +3021,7 @@ class Barbers {
             .select('id, barber_id, status, service_id, service_ids, payment_method, client_id, price_override, branch_id, created_at, started_at, client:clients ( name )')
             .eq('id', id)
             .eq('barber_id', barberId)
+            .eq('branch_id', sessionBranchId)
             .maybeSingle();
 
         if (entryError) {
@@ -3115,6 +3086,7 @@ class Barbers {
                 .update(updatePayload)
                 .eq('id', id)
                 .eq('barber_id', barberId)
+                .eq('branch_id', sessionBranchId)
                 .eq('status', entry.status)
                 .select('id, status, created_at, finished_at, service_id, service_ids, payment_method, branch_id, client_id, price_override, price_override_reason')
                 .maybeSingle();
@@ -3190,25 +3162,14 @@ class Barbers {
     async updateProfile(req, res) {
         const { photo_url, image_base64, content_type } = req.body || {};
 
-        const authHeader = req.headers.authorization || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+        // Phase 2 M4: session-verified (jti + persisted active branch, archived,
+        // branch access revoked), not just the JWT signature and role claim.
+        const auth = await authenticateBarberWorkspace(req, res, 'Only barbers can update their profile');
+        if (!auth) return;
+        const { payload } = auth;
+        const sessionBranchId = payload.branchId;
 
-        if (!token) {
-            return res.status(401).json({ error: "Authorization token is required" });
-        }
-
-        let payload;
-        try {
-            payload = verifyAny(token);
-        } catch (err) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        if (!isBarberWorkspaceRole(payload.role)) {
-            return res.status(403).json({ error: 'Only barbers can update their profile' });
-        }
-
-        const barberId = payload.sub || payload.id;
+        const { barberId } = auth;
 
         const allowedKeys = ['photo_url', 'image_base64', 'content_type'];
         if (req.body && Object.keys(req.body).some((k) => !allowedKeys.includes(k))) {
@@ -3472,3 +3433,5 @@ class Barbers {
 
 module.exports = new Barbers();
 
+// Test seam (Phase 2): company scoping of internal loaders.
+module.exports._private = { getBarberWorkStatistics, loadEmployeeDirectory };

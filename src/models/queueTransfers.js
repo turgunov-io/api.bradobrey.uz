@@ -52,16 +52,28 @@ async function targetBarberIsEligible(client, targetId, branchId) {
   return Boolean(result.rows[0]);
 }
 
+// Phase 2 M3: role and branch never come from the token alone. The global
+// middleware (middleware/employeeAccess) has loaded the account and validated
+// the persisted session for this employee + token branch (all BARBER_ROLES are
+// session-bound); without that validated context the request is rejected.
 function identity(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
+  let payload;
   try {
-    const payload = verifyAny(token);
-    const id = payload.sub || payload.id;
-    if (!BARBER_ROLES.has(payload.role) || !id) { res.status(403).json({ error: 'Only barbers and managers can transfer orders' }); return null; }
-    const branchId = payload.branchId || payload.branch_id || null;
-    return { id: String(id), branchId: branchId ? String(branchId) : null, role: payload.role };
+    payload = verifyAny(token);
   } catch (_) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
+  const id = payload.sub || payload.id;
+  const access = req.employeeAccess;
+  if (!id || !access?.user || access.sessionValid !== true || String(access.user.id) !== String(id)) {
+    res.status(401).json({ code: 'SESSION_INVALID', error: 'Session is no longer valid' });
+    return null;
+  }
+  const role = String(access.user.role || '').trim().toLowerCase();
+  if (!BARBER_ROLES.has(role)) { res.status(403).json({ error: 'Only barbers and managers can transfer orders' }); return null; }
+  // Session-validated branch (validatePersistedEmployeeSession matched it).
+  const branchId = payload.branchId || null;
+  return { id: String(id), branchId: branchId ? String(branchId) : null, role };
 }
 
 async function expirePending(client, barberId) {

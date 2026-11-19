@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { db, pool } = require('../../config/postgres');
 const { readTenantSetting } = require('../../utils/tenantSettings');
 const { findReferralAccountByCode } = require('../../utils/referralAccounts');
+const { resolveTimezone } = require('../../utils/tenantTimezone');
 
 const MARKETPLACE_ROLE = 'marketplace';
 const OTP_TTL_MS = 10 * 60 * 1000;
@@ -228,12 +229,14 @@ class MarketplaceAuth {
         const referralSettingsValue = (await readTenantSetting(client, 'referral', referralAccount.company_id)) || {};
         const dailyLimit = Number(referralSettingsValue.daily_limit || 10);
         const expiryDays = Math.max(1, Number(referralSettingsValue.expiry_days || 365));
+        // "Today" is the referral company's day (Phase 2 M5).
+        const referralTimeZone = await resolveTimezone({ companyId: referralAccount.company_id }, { query: (sql, params) => client.query(sql, params) });
         const dailyCount = await client.query(
           `select count(*)::int as count from referrals
             where referrer_client_id = $1
               and company_id = $2
-              and (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date`,
-          [referral.rows[0].marketplace_client_id, referralAccount.company_id]
+              and (created_at at time zone $3)::date = (now() at time zone $3)::date`,
+          [referral.rows[0].marketplace_client_id, referralAccount.company_id, referralTimeZone]
         );
         if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
           await client.query('ROLLBACK');
@@ -243,10 +246,10 @@ class MarketplaceAuth {
         const deviceId = otpResult.rows[0].device_id || null;
         const sourceCount = await client.query(
           `select count(*)::int as count from referrals
-            where (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date
+            where (created_at at time zone $3)::date = (now() at time zone $3)::date
               and (($1::inet is not null and source_ip = $1::inet)
                 or ($2::text is not null and device_id = $2::text))`,
-          [sourceIp, deviceId]
+          [sourceIp, deviceId, referralTimeZone]
         );
         if (Number(sourceCount.rows[0]?.count || 0) >= dailyLimit) {
           await client.query(
@@ -453,13 +456,15 @@ class MarketplaceAuth {
           const dailyLimit = Math.max(1, Number(referralSettings.daily_limit || 10));
           const expiryDays = Math.max(1, Number(referralSettings.expiry_days || 365));
           const referrerId = referral.rows[0].marketplace_client_id;
+          // "Today" is the referral company's day (Phase 2 M5).
+          const referralTimeZone = await resolveTimezone({ companyId: referralAccount.company_id }, { query: (sql, params) => pool.query(sql, params) });
           const dailyCount = await pool.query(
             `select count(*)::int as count from referrals
               where referrer_client_id = $1
                 and company_id = $2
-                and (created_at at time zone 'Asia/Tashkent')::date =
-                    (now() at time zone 'Asia/Tashkent')::date`,
-            [referrerId, referralAccount.company_id],
+                and (created_at at time zone $3)::date =
+                    (now() at time zone $3)::date`,
+            [referrerId, referralAccount.company_id, referralTimeZone],
           );
           if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
             throw new Error('REFERRAL_DAILY_LIMIT_REACHED');
@@ -469,11 +474,11 @@ class MarketplaceAuth {
           const deviceId = otp.device_id || null;
           const sourceCount = await pool.query(
             `select count(*)::int as count from referrals
-              where (created_at at time zone 'Asia/Tashkent')::date =
-                    (now() at time zone 'Asia/Tashkent')::date
+              where (created_at at time zone $3)::date =
+                    (now() at time zone $3)::date
                 and (($1::inet is not null and source_ip = $1::inet)
                   or ($2::text is not null and device_id = $2::text))`,
-            [sourceIp, deviceId],
+            [sourceIp, deviceId, referralTimeZone],
           );
           if (Number(sourceCount.rows[0]?.count || 0) >= dailyLimit) {
             await pool.query(

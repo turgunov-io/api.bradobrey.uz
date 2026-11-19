@@ -1,5 +1,6 @@
 const { verifyAny } = require('./authToken');
 const { checkTenantAccess } = require('./tenant');
+const { DEFAULT_TIMEZONE, resolveTimezone, zonedMidnightIso } = require('./tenantTimezone');
 const { pool } = require('../config/postgres');
 
 const SCOPE_TYPES = new Set(['global', 'branch', 'self']);
@@ -58,7 +59,8 @@ function addCalendarDays(value, amount) {
   return date.toISOString().slice(0, 10);
 }
 
-function parseDateRange(query = {}) {
+// Phase 2 M5: calendar days of `timeZone` (branch -> company -> default).
+function parseDateRange(query = {}, timeZone = DEFAULT_TIMEZONE) {
   const startDate = parseCalendarDate(query.start_date);
   const endDate = parseCalendarDate(query.end_date);
   if (!startDate || !endDate) return { error: 'start_date and end_date must be valid YYYY-MM-DD dates' };
@@ -71,9 +73,9 @@ function parseDateRange(query = {}) {
 
   return {
     endDate,
-    endExclusive: `${addCalendarDays(endDate, 1)}T00:00:00+05:00`,
+    endExclusive: zonedMidnightIso(addCalendarDays(endDate, 1), timeZone),
     startDate,
-    startInclusive: `${startDate}T00:00:00+05:00`,
+    startInclusive: zonedMidnightIso(startDate, timeZone),
   };
 }
 
@@ -227,16 +229,22 @@ async function authenticateStatistics(req, res, {
     }
   }
 
+  // Effective timezone of the scope: its branch, else the caller's company.
+  const timeZone = await resolveTimezone({
+    branchId: scope.type === 'global' ? null : scope.branchId,
+    companyId: user.company_id || null,
+  }, { query: (sql, params) => pool.query(sql, params) });
+
   let range = null;
   if (requireRange) {
-    range = parseDateRange(req.query || {});
+    range = parseDateRange(req.query || {}, timeZone);
     if (range.error) {
       res.status(400).json({ error: range.error });
       return null;
     }
   }
 
-  return { payload, permissions, range, role, scope, user };
+  return { payload, permissions, range, role, scope, timeZone, user };
 }
 
 async function authenticateHistory(req, res) {

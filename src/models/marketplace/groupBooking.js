@@ -1,5 +1,6 @@
 const { verifyAny } = require('../../utils/authToken');
 const { pool } = require('../../config/postgres');
+const { resolveTimezone } = require('../../utils/tenantTimezone');
 const catalogService = require('../../modules/marketplace/catalog/service');
 const { PAYMENT_METHODS } = require('../../modules/marketplace/catalog/constants');
 
@@ -126,12 +127,13 @@ async function create(req, res) {
     const limitsResult = await dbClient.query(`select tenant_setting('booking_limits', $1::uuid) as value`, [companyId]);
     const limits = limitsResult.rows[0]?.value || {};
     const dailyLimit = Number(limits.max_daily_bookings || 5);
+    // Phase 2 M5: branch timezone -> company timezone -> default.
+    const bookingTimeZone = await resolveTimezone({ branchId, companyId }, { query: (sql, params) => dbClient.query(sql, params) });
     const dailyCount = await dbClient.query(
       `select count(*)::int as count from marketplace_bookings
         where marketplace_client_id = $1
-          and (created_at at time zone coalesce($2, 'Asia/Tashkent'))::date =
-              (now() at time zone coalesce($2, 'Asia/Tashkent'))::date`,
-      [marketplaceClientId, branchResult.rows[0].timezone || 'Asia/Tashkent']
+          and (created_at at time zone $2)::date = (now() at time zone $2)::date`,
+      [marketplaceClientId, bookingTimeZone]
     );
     if (Number(dailyCount.rows[0]?.count || 0) >= dailyLimit) {
       await dbClient.query('ROLLBACK');

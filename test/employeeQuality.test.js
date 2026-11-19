@@ -228,6 +228,8 @@ test('statistics authentication denies anonymous/empty permissions and trusts DB
       if (/from users/i.test(sql)) return { rows: [{ id: userId, role: 'manager', branch_id: branchA, company_id: 'company-1', company_status: 'active' }] };
       if (/from branches where company_id/i.test(sql)) return { rows: [{ id: branchA }, { id: branchB }] };
       if (/from user_permissions/i.test(sql)) return { rows: permissionRows };
+      // Phase 2 M5: the range timezone is resolved from the scope branch/company.
+      if (/c\.timezone as company_timezone|from companies where id/i.test(sql)) return { rows: [] };
       throw new Error(`Unexpected query: ${sql}`);
     };
     const token = jwt.sign({ sub: userId, role: 'manager', branch_id: branchB }, process.env.JWT_SECRET);

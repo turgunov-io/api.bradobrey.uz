@@ -2,12 +2,13 @@ const { db } = require("../config/postgres");
 const { toAbsolutePublicUrl } = require("../config/uploads");
 const { verifyAny } = require('../utils/authToken');
 const { nextZonedDayStartIso, zonedDayStartIso } = require('../utils/timezone');
+const { timezoneOfBranchRow, zonedDateKey } = require('../utils/tenantTimezone');
 const { queueEntryTiming, serviceIdsForQueueEntry } = require('../utils/queueEta');
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
 const { issueKioskSocketTicket } = require('../kioskSocketTicket');
 const { kioskRegistry } = require('../services/kioskRegistration');
 const { buildAuthenticatedBarberRoster } = require('../utils/kioskBarberPresence');
-const { legacyDefaultCompanyId, resolveRequestCompanyId, sameId, tenantCompanyId } = require('../utils/companyScope');
+const { companyIdOfBranch, legacyDefaultCompanyId, resolveRequestCompanyId, sameId, tenantCompanyId } = require('../utils/companyScope');
 const { loadBranchServices, loadServicesForEntries } = require('../utils/serviceScope');
 const {
     certificateLifecycleResponse,
@@ -27,7 +28,6 @@ const STALE_QUEUE_HOURS = 9;
 const DEFAULT_SERVICE_CATEGORY = "Uncategorized";
 // Managers can also work as barbers and must be bookable in the kiosk.
 const OPERATIONAL_BARBER_ROLES = ['barber', 'super-barber', 'manager'];
-const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const ACTIVE_QUEUE_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const CLIENT_CANCELLABLE_STATUSES = ['waiting', 'called', 'swapped'];
 const TERMINAL_QUEUE_STATUSES = ['completed', 'cancelled', 'rejected', 'no_show', 'not_in_time'];
@@ -83,18 +83,6 @@ const parseOptionalMoney = (value) => {
     return { provided: true, amount: roundMoney(amount) };
 };
 
-const getZonedDateString = (date, timeZone) => {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-        timeZone: timeZone || DEFAULT_TIMEZONE,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-    });
-    const parts = formatter.formatToParts(date);
-    const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-    return `${map.year}-${map.month}-${map.day}`;
-};
-
 const normalizePhone = (phoneInput) => {
     const raw = String(phoneInput || '').trim();
     if (!raw) return null;
@@ -122,6 +110,18 @@ const CASHBACK_STAFF_ROLES = new Set([
     'barber',
     'super-barber',
 ]);
+
+// Phase 2 M3: the role of a staff bearer as loaded from the database by
+// kioskAuth (req.kioskStaff) or the global employeeAccess middleware
+// (req.employeeAccess.user) — never the JWT role claim. null when neither
+// vouched for this token's user.
+const dbStaffRole = (req, actorId) => {
+    const staff = req?.kioskStaff;
+    if (staff?.id && sameId(staff.id, actorId)) return String(staff.role || '').trim().toLowerCase() || null;
+    const user = req?.employeeAccess?.user;
+    if (user?.id && sameId(user.id, actorId)) return String(user.role || '').trim().toLowerCase() || null;
+    return null;
+};
 
 const getBearerToken = (req) => {
     const authHeader = req.headers.authorization || '';
@@ -394,6 +394,24 @@ class Kiosk {
 
         if (!branch_id) {
             return res.status(400).json({ error: "branch_id is required" });
+        }
+
+        // Phase 2 M2: like book(), a kiosk/staff caller only sees branches of
+        // its own company (checked before the stale-queue cleanup writes).
+        // Without a token (legacy kiosks) only while one company is active.
+        try {
+            const callerCompanyId = tenantCompanyId(req);
+            if (callerCompanyId) {
+                const branchCompanyId = await companyIdOfBranch(branch_id);
+                if (!branchCompanyId) return res.status(404).json({ error: 'Branch not found' });
+                if (!sameId(callerCompanyId, branchCompanyId)) {
+                    return res.status(403).json({ error: 'Branch belongs to another company', code: 'BRANCH_COMPANY_MISMATCH' });
+                }
+            } else if (!(await legacyDefaultCompanyId())) {
+                return res.status(401).json({ ...KIOSK_TOKEN_REQUIRED });
+            }
+        } catch (_companyError) {
+            return res.status(500).json({ error: 'Failed to resolve company' });
         }
 
         const cutoffDate = new Date(Date.now() - STALE_QUEUE_HOURS * 60 * 60 * 1000);
@@ -802,12 +820,12 @@ class Kiosk {
                 }
 
                 cashbackActor = { type: 'marketplace', id: marketplaceClient.id, role: payload.role };
-            } else if (CASHBACK_STAFF_ROLES.has(payload?.role)) {
+            } else if (CASHBACK_STAFF_ROLES.has(dbStaffRole(req, actorId))) {
                 if (normalizedSource === 'site') {
                     return res.status(403).json({ error: 'Marketplace cashback orders require a marketplace user token' });
                 }
 
-                cashbackActor = { type: 'staff', id: actorId, role: payload.role };
+                cashbackActor = { type: 'staff', id: actorId, role: dbStaffRole(req, actorId) };
             } else {
                 return res.status(403).json({ error: 'Only marketplace users or staff can use cashback' });
             }
@@ -857,9 +875,10 @@ class Kiosk {
             }
 
             if (normalizedSource === 'site') {
-                const tz = branch?.timezone || DEFAULT_TIMEZONE;
-                const todayLocal = getZonedDateString(new Date(), tz);
-                const startsLocal = getZonedDateString(start, tz);
+                // Phase 2 M5: branch timezone -> company timezone -> default.
+                const tz = await timezoneOfBranchRow(branch);
+                const todayLocal = zonedDateKey(new Date(), tz);
+                const startsLocal = zonedDateKey(start, tz);
                 if (todayLocal !== startsLocal) {
                     return res.status(400).json({ error: 'Only same-day booking is allowed' });
                 }
@@ -1057,12 +1076,13 @@ class Kiosk {
             if (activeBooking) return res.status(409).json({ error: 'ALREADY_HAS_ACTIVE_BOOKING' });
 
             if (marketplaceBookingTablesAvailable) {
+                const bookingDayTimeZone = await timezoneOfBranchRow(branch);
                 const { data: recentBookings, error: recentBookingsError } = await db
                     .from('marketplace_bookings')
                     .select('id, cooldown_until')
                     .eq('marketplace_client_id', marketplaceClient.id)
-                    .gte('created_at', zonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
-                    .lt('created_at', nextZonedDayStartIso(new Date(), branch?.timezone || DEFAULT_TIMEZONE))
+                    .gte('created_at', zonedDayStartIso(new Date(), bookingDayTimeZone))
+                    .lt('created_at', nextZonedDayStartIso(new Date(), bookingDayTimeZone))
                     .order('created_at', { ascending: false });
                 if (recentBookingsError) {
                     if (recentBookingsError.code === '42P01' || recentBookingsError.code === '42703') {
@@ -1233,6 +1253,7 @@ class Kiosk {
                 const { data: promoUsage, error: promoUsageError } = await db
                     .from('promo_code_usage')
                     .select('id, promo_code_id, order_id, used_at')
+                    .eq('company_id', companyId)
                     .eq('order_id', String(existingEntry.id))
                     .order('used_at', { ascending: false })
                     .limit(1)
@@ -1250,6 +1271,7 @@ class Kiosk {
                         .from('promo_codes')
                         .select('code, discount_type, discount_value')
                         .eq('id', promoUsage.promo_code_id)
+                        .eq('company_id', companyId)
                         .maybeSingle();
 
                     if (promoRowError) {
@@ -1492,6 +1514,7 @@ class Kiosk {
             const { data: insertedUsage, error: usageError } = await db
                 .from('promo_code_usage')
                 .insert({
+                    company_id: companyId,
                     promo_code_id: promo.id,
                     user_id: null,
                     user_name: effectiveCustomerName,
@@ -1542,6 +1565,7 @@ class Kiosk {
                         .from('promo_codes')
                         .update({ used_count: nextCount })
                         .eq('id', promo.id)
+                        .eq('company_id', companyId)
                         .eq('used_count', currentCount)
                         .select('id, used_count, usage_limit, status, is_unlimited')
                         .maybeSingle();
@@ -1573,6 +1597,7 @@ class Kiosk {
                         .from('promo_codes')
                         .select('used_count, usage_limit, status, is_unlimited')
                         .eq('id', promo.id)
+                        .eq('company_id', companyId)
                         .maybeSingle();
 
                     if (freshError || !freshPromo) {
@@ -1799,7 +1824,8 @@ class Kiosk {
             } catch (_error) {
                 return res.status(401).json({ error: 'UNAUTHORIZED', code: 'UNAUTHORIZED' });
             }
-            if (payload?.role !== MARKETPLACE_ROLE && !CASHBACK_STAFF_ROLES.has(payload?.role)) {
+            if (payload?.role !== MARKETPLACE_ROLE
+                && !CASHBACK_STAFF_ROLES.has(dbStaffRole(req, payload?.sub || payload?.id))) {
                 return res.status(403).json({ error: 'FORBIDDEN', code: 'FORBIDDEN' });
             }
         }

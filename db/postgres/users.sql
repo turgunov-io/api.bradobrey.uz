@@ -12,3 +12,7 @@ alter table if exists users
 
 create index if not exists idx_users_marketplace_barbershop
   on users (marketplace_barbershop_id, role);
+
+-- db/migrations/009_users_created_at.sql
+alter table if exists users
+  add column if not exists created_at timestamptz not null default now();

@@ -199,6 +199,8 @@ const normalizeError = (error) => {
 
   return {
     code: error.code,
+    // Violated constraint name (unique/foreign key/check) when Postgres reports one.
+    ...(error.constraint ? { constraint: error.constraint } : {}),
     details: error.detail,
     hint: error.hint,
     message: error.message || String(error),

@@ -8,6 +8,29 @@ const toNumberOrNull = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
+const sameCompany = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase();
+
+// order id -> company id: from the entries themselves, otherwise from
+// queue_entries (callers select different column sets).
+async function loadOrderCompanies(items, orderIds) {
+  const companies = new Map();
+  for (const entry of items) {
+    if (entry?.id && entry?.company_id) companies.set(String(entry.id), String(entry.company_id));
+  }
+  const missing = orderIds.filter((id) => !companies.has(id));
+  if (!missing.length) return companies;
+
+  const { data, error } = await db.from('queue_entries').select('id, company_id').in('id', missing);
+  if (error) {
+    console.error('Failed to fetch queue entry companies:', error.message);
+    return companies;
+  }
+  for (const row of data || []) {
+    if (row?.id && row?.company_id) companies.set(String(row.id), String(row.company_id));
+  }
+  return companies;
+}
+
 async function enrichQueueEntriesWithBenefits(entries = []) {
   const items = Array.isArray(entries) ? entries : [];
   if (items.length === 0) return items;
@@ -33,11 +56,15 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
     }
   }
 
+  // promo_code_usage.order_id has no FK (Phase 2 M1): a usage row (and its
+  // promo code) only counts when it belongs to the order's own company.
+  const companyByOrderId = orderIds.length ? await loadOrderCompanies(items, orderIds) : new Map();
+
   const usageByOrderId = new Map();
   if (orderIds.length) {
     const { data, error } = await db
       .from('promo_code_usage')
-      .select('promo_code_id, order_id, used_at')
+      .select('promo_code_id, order_id, used_at, company_id')
       .in('order_id', orderIds)
       .order('used_at', { ascending: false });
 
@@ -47,6 +74,7 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
       for (const row of data || []) {
         const orderId = row?.order_id ? String(row.order_id) : null;
         if (!orderId) continue;
+        if (!sameCompany(row?.company_id, companyByOrderId.get(orderId))) continue;
         if (!usageByOrderId.has(orderId)) usageByOrderId.set(orderId, row);
       }
     }
@@ -62,7 +90,7 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
   if (promoCodeIds.length) {
     const { data, error } = await db
       .from('promo_codes')
-      .select('id, code, discount_type, discount_value')
+      .select('id, code, discount_type, discount_value, company_id')
       .in('id', promoCodeIds);
 
     if (error) {
@@ -107,7 +135,8 @@ async function enrichQueueEntriesWithBenefits(entries = []) {
   return items.map((entry) => {
     const orderId = entry?.id ? String(entry.id) : null;
     const usage = orderId ? usageByOrderId.get(orderId) : null;
-    const promo = usage?.promo_code_id ? promoById.get(String(usage.promo_code_id)) : null;
+    const promoRow = usage?.promo_code_id ? promoById.get(String(usage.promo_code_id)) : null;
+    const promo = promoRow && sameCompany(promoRow.company_id, companyByOrderId.get(orderId)) ? promoRow : null;
 
     const certificateId = entry?.certificate_id ? String(entry.certificate_id) : null;
     const certificate = certificateId ? certificateById.get(certificateId) : null;

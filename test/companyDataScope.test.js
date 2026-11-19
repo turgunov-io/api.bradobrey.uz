@@ -166,7 +166,7 @@ test('notifications: checkToday re-checks only the caller company orders', async
     return { rows: [] };
   }, async (seen) => {
     const res = makeRes();
-    await notifications.notifications.checkToday({ headers: bearer({ sub: ADMIN_B, role: 'admin_network' }), body: { date: '2026-11-18' } }, res);
+    await notifications.notifications.checkToday({ headers: bearer({ sub: ADMIN_B, role: 'admin_network' }), employeeAccess: { user: { id: ADMIN_B, role: 'admin_network' }, sessionValid: true }, body: { date: '2026-11-18' } }, res);
     assert.equal(res.statusCode, 200);
     const orders = seen.find((q) => /FROM "queue_entries"/.test(q.sql));
     assert.match(orders.sql, /t\."company_id" = \$1/);
@@ -177,7 +177,7 @@ test('notifications: checkToday re-checks only the caller company orders', async
 test('notifications: checkToday without an active company is refused', async () => {
   await withSql(() => ({ rows: [] }), async (seen) => {
     const res = makeRes();
-    await notifications.notifications.checkToday({ headers: bearer({ sub: ADMIN_B, role: 'admin_network' }), body: {} }, res);
+    await notifications.notifications.checkToday({ headers: bearer({ sub: ADMIN_B, role: 'admin_network' }), employeeAccess: { user: { id: ADMIN_B, role: 'admin_network' }, sessionValid: true }, body: {} }, res);
     assert.equal(res.statusCode, 403);
     assert.ok(!seen.some((q) => /queue_entries/.test(q.sql)));
   });

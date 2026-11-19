@@ -3,6 +3,7 @@ const { verifyAny } = require('../utils/authToken');
 const { db, pool } = require('../config/postgres');
 const { toAbsolutePublicUrl } = require('../config/uploads');
 const { checkTenantAccess } = require('../utils/tenant');
+const { normalizeTimezoneInput, resolveTimezone } = require('../utils/tenantTimezone');
 
 const ACTIVE_ORDER_STATUSES = ['waiting', 'called', 'swapped', 'in_progress'];
 const HISTORY_STATUSES = ['completed', 'cancelled', 'no_show', 'not_in_time'];
@@ -329,9 +330,14 @@ const branchPayload = (body = {}, { partial = false, barbershopId }) => {
     return { error: 'name is required' };
   }
 
-  for (const key of ['address', 'city', 'timezone']) {
+  for (const key of ['address', 'city']) {
     if (body[key] !== undefined) payload[key] = normalizeText(body[key]);
   }
+
+  // Phase 2 security fix M1: only IANA zone names reach SQL `at time zone`.
+  const timezone = normalizeTimezoneInput(body.timezone);
+  if (timezone.error) return { error: timezone.error.error, code: timezone.error.code };
+  if (timezone.value !== undefined) payload.timezone = timezone.value;
 
   for (const key of ['latitude', 'longitude']) {
     if (body[key] === undefined || body[key] === null || body[key] === '') continue;
@@ -444,7 +450,7 @@ const servicePayload = (body = {}, { partial = false, barbershopId }) => {
   return { payload };
 };
 
-const barberPayload = async (body = {}, { partial = false, barbershopId }) => {
+const barberPayload = async (body = {}, { partial = false, barbershopId, companyId }) => {
   const payload = {};
 
   if (body.name !== undefined) {
@@ -457,9 +463,9 @@ const barberPayload = async (body = {}, { partial = false, barbershopId }) => {
 
   if (body.branch_id !== undefined || !partial) {
     const branchId = normalizeId(body.branch_id);
-    const resolved = branchId || await firstMerchantBranchId(barbershopId);
+    const resolved = branchId || await firstMerchantBranchId(barbershopId, companyId);
     if (!resolved) return { error: 'branch_id is required' };
-    const belongs = await branchBelongsToBarbershop(resolved, barbershopId);
+    const belongs = await branchBelongsToBarbershop(resolved, barbershopId, companyId);
     if (!belongs) return { error: 'branch_id does not belong to this barbershop' };
     payload.branch_id = resolved;
   }
@@ -484,33 +490,33 @@ const barberPayload = async (body = {}, { partial = false, barbershopId }) => {
   return { payload };
 };
 
-async function branchBelongsToBarbershop(branchId, barbershopId) {
+async function branchBelongsToBarbershop(branchId, barbershopId, companyId) {
   const result = await db.query(
     `select id
      from branches
-     where id = $1 and marketplace_barbershop_id = $2
+     where id = $1 and marketplace_barbershop_id = $2 and company_id = $3
      limit 1`,
-    [branchId, barbershopId]
+    [branchId, barbershopId, companyId]
   );
 
   return Boolean(result.rows[0]);
 }
 
-async function firstMerchantBranchId(barbershopId) {
+async function firstMerchantBranchId(barbershopId, companyId) {
   const result = await db.query(
     `select id
      from branches
-     where marketplace_barbershop_id = $1
+     where marketplace_barbershop_id = $1 and company_id = $2
      order by name asc
      limit 1`,
-    [barbershopId]
+    [barbershopId, companyId]
   );
 
   return result.rows[0]?.id || null;
 }
 
-async function listOrders({ barbershopId, statuses, limit = 50, from = null, to = null }) {
-  const params = [barbershopId, statuses, limit];
+async function listOrders({ barbershopId, companyId, statuses, limit = 50, from = null, to = null }) {
+  const params = [barbershopId, statuses, limit, companyId];
   let dateFilter = '';
 
   if (from) {
@@ -538,7 +544,7 @@ async function listOrders({ barbershopId, statuses, limit = 50, from = null, to 
         br.name as branch_name,
         coalesce(q.price_override, sum(coalesce(s.base_price, 0)), 0) as amount
      from queue_entries q
-     join branches br on br.id = q.branch_id and br.marketplace_barbershop_id = $1
+     join branches br on br.id = q.branch_id and br.marketplace_barbershop_id = $1 and br.company_id = $4
      left join clients c on c.id = q.client_id
      left join lateral unnest(
        coalesce(
@@ -576,23 +582,25 @@ class Merchant {
     if (!access) return;
 
     try {
+      // Phase 2 M5: "today" is the company's day, not the DB session's.
+      const timeZone = await resolveTimezone({ companyId: access.user.company_id }, { query: (sql, params) => db.query(sql, params) });
       const [branches, barbers, services, activeOrders, today] = await Promise.all([
-        db.query('select count(*)::int as count from branches where marketplace_barbershop_id = $1', [access.barbershopId]),
+        db.query('select count(*)::int as count from branches where marketplace_barbershop_id = $1 and company_id = $2', [access.barbershopId, access.user.company_id]),
         db.query(
           `select count(*)::int as count
            from barbers b
            join branches br on br.id = b.branch_id
-           where br.marketplace_barbershop_id = $1`,
-          [access.barbershopId]
+           where br.marketplace_barbershop_id = $1 and br.company_id = $2`,
+          [access.barbershopId, access.user.company_id]
         ),
         db.query('select count(*)::int as count from services where marketplace_barbershop_id = $1', [access.barbershopId]),
-        listOrders({ barbershopId: access.barbershopId, statuses: ACTIVE_ORDER_STATUSES, limit: 10 }),
+        listOrders({ barbershopId: access.barbershopId, companyId: access.user.company_id, statuses: ACTIVE_ORDER_STATUSES, limit: 10 }),
         db.query(
           `select
               count(distinct q.id)::int as completed,
               coalesce(sum(coalesce(q.price_override, service_totals.amount, 0)), 0) as revenue
            from queue_entries q
-           join branches br on br.id = q.branch_id and br.marketplace_barbershop_id = $1
+           join branches br on br.id = q.branch_id and br.marketplace_barbershop_id = $1 and br.company_id = $2
            left join lateral (
              select sum(coalesce(s.base_price, 0)) as amount
              from unnest(
@@ -606,9 +614,9 @@ class Merchant {
                                  and (s.branch_id is null or s.branch_id = q.branch_id)
            ) service_totals on true
            where q.status = 'completed'
-             and q.finished_at >= date_trunc('day', now())
-             and q.finished_at < date_trunc('day', now()) + interval '1 day'`,
-          [access.barbershopId]
+             and q.finished_at >= (date_trunc('day', now() at time zone $3) at time zone $3)
+             and q.finished_at < ((date_trunc('day', now() at time zone $3) + interval '1 day') at time zone $3)`,
+          [access.barbershopId, access.user.company_id, timeZone]
         ),
       ]);
 
@@ -641,7 +649,7 @@ class Merchant {
 
     try {
       const limit = Math.min(Math.max(parseInteger(req.query?.limit, 20) || 20, 1), 100);
-      const items = await listOrders({ barbershopId: access.barbershopId, statuses: ACTIVE_ORDER_STATUSES, limit });
+      const items = await listOrders({ barbershopId: access.barbershopId, companyId: access.user.company_id, statuses: ACTIVE_ORDER_STATUSES, limit });
       return res.json({ items, total: items.length });
     } catch (error) {
       return res.status(500).json({ error: error.message });
@@ -658,6 +666,7 @@ class Merchant {
       const to = normalizeText(req.query?.to || req.query?.end_date);
       const items = await listOrders({
         barbershopId: access.barbershopId,
+        companyId: access.user.company_id,
         from,
         limit,
         statuses: HISTORY_STATUSES,
@@ -677,9 +686,9 @@ class Merchant {
       const result = await db.query(
         `select id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes
          from branches
-         where marketplace_barbershop_id = $1
+         where marketplace_barbershop_id = $1 and company_id = $2
          order by name asc`,
-        [access.barbershopId]
+        [access.barbershopId, access.user.company_id]
       );
       const items = result.rows.map(branchItem);
       return res.json({ items, total: items.length });
@@ -692,10 +701,10 @@ class Merchant {
     const access = await requireMerchantAccess(req, res);
     if (!access) return;
 
-    const { payload, error: payloadError } = branchPayload(req.body || {}, {
+    const { payload, error: payloadError, code: payloadCode } = branchPayload(req.body || {}, {
       barbershopId: access.barbershopId,
     });
-    if (payloadError) return res.status(400).json({ error: payloadError });
+    if (payloadError) return res.status(400).json({ ...(payloadCode ? { code: payloadCode } : {}), error: payloadError });
 
     try {
       const result = await db.query(
@@ -728,11 +737,11 @@ class Merchant {
     const id = normalizeId(req.params?.id);
     if (!id) return res.status(400).json({ error: 'Branch id is required' });
 
-    const { payload, error: payloadError } = branchPayload(req.body || {}, {
+    const { payload, error: payloadError, code: payloadCode } = branchPayload(req.body || {}, {
       barbershopId: access.barbershopId,
       partial: true,
     });
-    if (payloadError) return res.status(400).json({ error: payloadError });
+    if (payloadError) return res.status(400).json({ ...(payloadCode ? { code: payloadCode } : {}), error: payloadError });
     if (!Object.keys(payload).length) return res.status(400).json({ error: 'No fields to update' });
 
     try {
@@ -742,9 +751,9 @@ class Merchant {
       const result = await db.query(
         `update branches
          set ${setSql}
-         where id = $${keys.length + 1} and marketplace_barbershop_id = $${keys.length + 2}
+         where id = $${keys.length + 1} and marketplace_barbershop_id = $${keys.length + 2} and company_id = $${keys.length + 3}
          returning id, name, address, city, work_hours, timezone, is_active, marketplace_barbershop_id, latitude, longitude, rating, average_wait_minutes`,
-        [...values, id, access.barbershopId]
+        [...values, id, access.barbershopId, access.user.company_id]
       );
 
       if (!result.rows[0]) return res.status(404).json({ error: 'Branch not found' });
@@ -776,8 +785,8 @@ class Merchant {
 
       // Ownership: branch must belong to this merchant's barbershop
       const owned = await client.query(
-        `select id from branches where id = $1 and marketplace_barbershop_id = $2`,
-        [id, access.barbershopId]
+        `select id from branches where id = $1 and marketplace_barbershop_id = $2 and company_id = $3`,
+        [id, access.barbershopId, access.user.company_id]
       );
       if (!owned.rows[0]) {
         await client.query('ROLLBACK');
@@ -835,8 +844,8 @@ class Merchant {
       }
 
       await client.query(
-        `delete from branches where id = $1 and marketplace_barbershop_id = $2`,
-        [id, access.barbershopId]
+        `delete from branches where id = $1 and marketplace_barbershop_id = $2 and company_id = $3`,
+        [id, access.barbershopId, access.user.company_id]
       );
 
       await client.query('COMMIT');
@@ -855,12 +864,12 @@ class Merchant {
 
     try {
       const includeInactive = parseBoolean(req.query?.include_inactive, true);
-      const params = [access.barbershopId];
+      const params = [access.barbershopId, access.user.company_id];
       const activeFilter = includeInactive === false ? 'and b.is_active = true' : '';
       const result = await db.query(
         `select b.id, b.name, b.branch_id, b.phone, b.specialization, b.photo_url, b.is_active, b.created_at, b.updated_at
          from barbers b
-         join branches br on br.id = b.branch_id and br.marketplace_barbershop_id = $1
+         join branches br on br.id = b.branch_id and br.marketplace_barbershop_id = $1 and br.company_id = $2
          where true ${activeFilter}
          order by b.name asc`,
         params
@@ -878,7 +887,7 @@ class Merchant {
 
     let normalized;
     try {
-      normalized = await barberPayload(req.body || {}, { barbershopId: access.barbershopId });
+      normalized = await barberPayload(req.body || {}, { barbershopId: access.barbershopId, companyId: access.user.company_id });
     } catch (error) {
       return res.status(500).json({ error: error.message });
     }
@@ -917,6 +926,7 @@ class Merchant {
     try {
       normalized = await barberPayload(req.body || {}, {
         barbershopId: access.barbershopId,
+        companyId: access.user.company_id,
         partial: true,
       });
     } catch (error) {
@@ -938,8 +948,9 @@ class Merchant {
          where b.id = $${keys.length + 1}
            and br.id = b.branch_id
            and br.marketplace_barbershop_id = $${keys.length + 2}
+           and br.company_id = $${keys.length + 3}
          returning b.id, b.name, b.branch_id, b.phone, b.specialization, b.photo_url, b.is_active, b.created_at, b.updated_at`,
-        [...values, id, access.barbershopId]
+        [...values, id, access.barbershopId, access.user.company_id]
       );
 
       if (!result.rows[0]) return res.status(404).json({ error: 'Barber not found' });
@@ -973,9 +984,9 @@ class Merchant {
       const owned = await client.query(
         `select b.id
          from barbers b
-         join branches br on br.id = b.branch_id and br.marketplace_barbershop_id = $2
+         join branches br on br.id = b.branch_id and br.marketplace_barbershop_id = $2 and br.company_id = $3
          where b.id = $1`,
-        [id, access.barbershopId]
+        [id, access.barbershopId, access.user.company_id]
       );
       if (!owned.rows[0]) {
         await client.query('ROLLBACK');

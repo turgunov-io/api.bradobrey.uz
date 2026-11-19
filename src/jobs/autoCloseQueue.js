@@ -1,7 +1,7 @@
 const { db } = require('../config/postgres');
 const { registerConfirmedNoShows } = require('../services/marketplaceNoShowRestriction');
+const { DEFAULT_TIMEZONE, isValidTimeZone, pickTimezone } = require('../utils/tenantTimezone');
 
-const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const OPEN_NO_SHOW_STATUSES = ['waiting', 'called', 'swapped'];
 
 let schedulerTimer = null;
@@ -73,20 +73,14 @@ const getNextLocalMidnightUtc = (date, timeZone) => {
     }, timeZone);
 };
 
-const isValidTimeZone = (value) => {
-    try {
-        getFormatter(value).format(new Date());
-        return true;
-    } catch (_error) {
-        return false;
-    }
-};
-
+// Shared precedence lives in utils/tenantTimezone.pickTimezone; this wrapper
+// only adds the warning for a configured-but-invalid zone.
 const normalizeTimeZone = (value, fallback = DEFAULT_TIMEZONE) => {
-    const timeZone = String(value || '').trim() || fallback;
-    if (isValidTimeZone(timeZone)) return timeZone;
-    console.warn(`[queue-auto-close] Invalid timezone "${timeZone}", falling back to ${fallback}`);
-    return isValidTimeZone(fallback) ? fallback : DEFAULT_TIMEZONE;
+    const timeZone = String(value || '').trim();
+    if (timeZone && !isValidTimeZone(timeZone)) {
+        console.warn(`[queue-auto-close] Invalid timezone "${timeZone}", falling back to ${fallback}`);
+    }
+    return pickTimezone(timeZone, fallback);
 };
 
 // MULTI_TENANCY B2: every company (and every branch) closes the previous day

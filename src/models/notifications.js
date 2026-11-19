@@ -4,6 +4,8 @@ const { db } = require('../config/postgres');
 const { classifyCompletedOrder } = require('../services/employeeQuality');
 const marketplacePush = require('../services/marketplacePush');
 const { loadBranchServices } = require('../utils/serviceScope');
+const { resolveTimezone, zonedDateKey, zonedMidnightIso } = require('../utils/tenantTimezone');
+const { addCalendarDays } = require('../utils/statisticsDate');
 const EMPLOYEE_ROLES = ['admin_network', 'admin_branch', 'admin', 'manager', 'super-manager', 'super-barber', 'barber'];
 
 function configureWebPush() {
@@ -52,16 +54,30 @@ async function ensureNotificationsTable() {
     `);
 }
 
+// Phase 2 M3: the role is the DB role loaded by middleware/employeeAccess
+// (which runs for every employee-role token); the returned payload carries it
+// as `role`. Without that DB-loaded account the request is rejected.
 function authenticate(req, res) {
     const token = (req.headers.authorization || '').replace(/^Bearer /, '');
     if (!token) { res.status(401).json({ error: 'Authorization token is required' }); return null; }
-    try {
-        const payload = verifyAny(token);
-        if (!EMPLOYEE_ROLES.includes(payload?.role)) { res.status(403).json({ error: 'Notifications are not available for this role' }); return null; }
-        return payload;
-    }
+    let payload;
+    try { payload = verifyAny(token); }
     catch (_error) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
+    const user = req.employeeAccess?.user;
+    const userId = payload?.sub || payload?.id;
+    if (!user || !userId || String(user.id) !== String(userId)) {
+        if (!EMPLOYEE_ROLES.includes(payload?.role)) { res.status(403).json({ error: 'Notifications are not available for this role' }); return null; }
+        res.status(401).json({ error: 'Session is no longer valid' });
+        return null;
+    }
+    const role = String(user.role || '').trim().toLowerCase();
+    if (!EMPLOYEE_ROLES.includes(role)) { res.status(403).json({ error: 'Notifications are not available for this role' }); return null; }
+    return { ...payload, role };
 }
+
+// LOW (Phase 2): re-checking a whole day of company orders is a network/admin
+// action; the role is the DB role (authenticate()).
+const CHECK_TODAY_ROLES = new Set(['admin_network', 'admin', 'admin_branch', 'super-manager']);
 
 // MULTI_TENANCY B2: fan-out recipients are staff of the SAME company as the
 // event's branch (network roles = that company's network, never the whole DB).
@@ -405,14 +421,19 @@ class Notifications {
 
     async checkToday(req, res) {
         const payload = authenticate(req, res); if (!payload) return;
-        const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.date || '')) ? String(req.body.date) : new Date().toISOString().slice(0, 10);
-        const from = `${date}T00:00:00.000Z`;
-        const to = new Date(Date.parse(from) + 86400000).toISOString();
+        if (!CHECK_TODAY_ROLES.has(payload.role)) return res.status(403).json({ error: 'Only administrators can re-check orders' });
         // MULTI_TENANCY B2: only the caller's company orders are re-checked.
         let companyId;
-        try { companyId = await loadActiveCompanyId(payload.sub || payload.id); }
-        catch (_error) { return res.status(500).json({ error: 'Failed to resolve company' }); }
+        let timeZone;
+        try {
+            companyId = await loadActiveCompanyId(payload.sub || payload.id);
+            if (companyId) timeZone = await resolveTimezone({ companyId }, { query: (sql, params) => db.query(sql, params) });
+        } catch (_error) { return res.status(500).json({ error: 'Failed to resolve company' }); }
         if (!companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
+        // Phase 2 M5: the day (default: today) is bounded in the company timezone, not UTC.
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body?.date || '')) ? String(req.body.date) : zonedDateKey(new Date(), timeZone);
+        const from = zonedMidnightIso(date, timeZone);
+        const to = zonedMidnightIso(addCalendarDays(date, 1), timeZone);
         const { data: orders, error } = await db.from('queue_entries').select('id, status, created_at, started_at, finished_at, service_id, service_ids, branch_id, barber_id, client:clients ( name )').eq('company_id', companyId).eq('status', 'completed').gte('finished_at', from).lt('finished_at', to);
         if (error) return res.status(500).json({ error: error.message });
         let suspiciousCount = 0;

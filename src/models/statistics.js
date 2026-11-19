@@ -1,11 +1,10 @@
 const { db } = require('../config/postgres');
 const { classifyCompletedOrder } = require('../services/employeeQuality');
-const { normalizeStatisticsDateRange, toTashkentDateKey } = require('../utils/statisticsDate');
+const { normalizeStatisticsDateRange, toZonedDateKey } = require('../utils/statisticsDate');
 const { requireAccessCompanyId } = require('../utils/employeeQualityAccess');
+const { DEFAULT_TIMEZONE, resolveTimezone } = require('../utils/tenantTimezone');
 
 const percent = (count, total) => (total ? Number(((count / total) * 100).toFixed(1)) : 0);
-
-const toDateKey = toTashkentDateKey;
 
 const bump = (bucket, key) => {
   const finalKey = key ?? 'unknown';
@@ -55,10 +54,13 @@ class Statistics {
       return res.status(400).json({ error: 'start_date and end_date are required' });
     }
 
-    const dateRange = normalizeStatisticsDateRange(startDate, endDate);
-    if (dateRange.error) return res.status(400).json({ error: dateRange.error });
+    // Validate first (no DB), then compute the bounds in the branch timezone.
+    const validation = normalizeStatisticsDateRange(startDate, endDate);
+    if (validation.error) return res.status(400).json({ error: validation.error });
 
     try {
+      const timeZone = await resolveTimezone({ branchId, companyId: access?.user?.company_id || null });
+      const dateRange = normalizeStatisticsDateRange(startDate, endDate, { timeZone });
       const ordersResult = await db.query(
         `select
             q.id,
@@ -320,8 +322,8 @@ class Statistics {
       return res.status(400).json({ error: 'start_date and end_date are required' });
     }
 
-    const dateRange = normalizeStatisticsDateRange(start_date, end_date);
-    if (dateRange.error) return res.status(400).json({ error: dateRange.error });
+    const validation = normalizeStatisticsDateRange(start_date, end_date);
+    if (validation.error) return res.status(400).json({ error: validation.error });
 
     let companyId;
     try {
@@ -329,6 +331,17 @@ class Statistics {
     } catch (_error) {
       return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company scope is required' });
     }
+
+    // Phase 2 M5: day bounds and daily buckets follow the branch (scope) timezone,
+    // else the company timezone.
+    let timeZone;
+    try {
+      timeZone = await resolveTimezone({ branchId: scope.branchId || null, companyId });
+    } catch (error) {
+      console.error('Statistics timezone lookup failed:', error.message);
+      return res.status(500).json({ code: 'STATISTICS_LOAD_FAILED', error: 'Failed to load statistics' });
+    }
+    const dateRange = normalizeStatisticsDateRange(start_date, end_date, { timeZone });
 
     const { data, error } = await this.fetchEntries({
       end_date: dateRange.endExclusive,
@@ -341,7 +354,7 @@ class Statistics {
       return res.status(500).json({ code: 'STATISTICS_LOAD_FAILED', error: 'Failed to load statistics' });
     }
 
-    const response = await this.buildResponse(data || [], { start_date, end_date, ...scope });
+    const response = await this.buildResponse(data || [], { start_date, end_date, ...scope, timeZone });
     return res.json(response);
   }
 
@@ -392,7 +405,7 @@ class Statistics {
       bump(buckets.statuses, item?.status || 'unknown');
 
       if (item?.created_at) {
-        bump(buckets.days, toDateKey(item.created_at));
+        bump(buckets.days, toZonedDateKey(item.created_at, meta.timeZone || DEFAULT_TIMEZONE));
       }
 
       if (item?.status === 'completed') totals.completed += 1;

@@ -1,37 +1,23 @@
-const { verifyAny } = require('../../utils/authToken');
-
 const { pool } = require('../../config/postgres');
 const { ALLOWED_KEYS, validateValue } = require('../../utils/marketplaceSettings');
+const { createAdminAuth } = require('../../utils/adminAuth');
 const ADMIN_ROLES = new Set(['admin_network', 'admin']);
 
 // Company scope (MULTI_TENANCY B2a): platform_settings rows are keyed by
-// (company_id, key). The company is req.tenant (DB-loaded by the global
-// employeeAccess middleware for staff tokens), never the request body.
-const tenantCompanyOf = (req) => req?.tenant?.companyId || null;
-
-function authenticate(req, res) {
-  const header = String(req.headers.authorization || '');
-  if (!header.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authorization token is required' });
-    return null;
-  }
-  try {
-    const payload = verifyAny(header.slice(7));
-    if (!ADMIN_ROLES.has(payload?.role)) {
-      res.status(403).json({ error: 'Only network admins can manage platform settings' });
-      return null;
-    }
-    return payload;
-  } catch (_) {
-    res.status(401).json({ error: 'Invalid or expired token' });
-    return null;
-  }
-}
+// (company_id, key). Role and company come from the database (createAdminAuth
+// loads users.role / users.company_id, Phase 2 M3), never the token claims
+// or the request body.
+const authenticate = createAdminAuth({
+  roles: ADMIN_ROLES,
+  forbiddenMessage: 'Only network admins can manage platform settings',
+});
+const tenantCompanyOf = (auth) => auth?.companyId || null;
 
 class MarketplaceSettings {
   async list(req, res) {
-    if (!authenticate(req, res)) return;
-    const companyId = tenantCompanyOf(req);
+    const administrator = await authenticate(req, res);
+    if (!administrator) return;
+    const companyId = tenantCompanyOf(administrator);
     if (!companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company context is required' });
     try {
       const result = await pool.query(
@@ -49,9 +35,9 @@ class MarketplaceSettings {
   }
 
   async update(req, res) {
-    const administrator = authenticate(req, res);
+    const administrator = await authenticate(req, res);
     if (!administrator) return;
-    const companyId = tenantCompanyOf(req);
+    const companyId = tenantCompanyOf(administrator);
     if (!companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company context is required' });
     const key = String(req.params?.key || '').trim();
     const requestValue = req.body?.value;

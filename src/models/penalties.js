@@ -1,7 +1,7 @@
 const { verifyAny } = require('../utils/authToken');
 const { db } = require('../config/postgres');
 const { isBranchAllowed, isCompanyWideScope, resolveStaffBranchScope } = require('../utils/adminAuth');
-const { zonedDateString } = require('../utils/timezone');
+const { resolveTimezone, zonedDateKey } = require('../utils/tenantTimezone');
 
 const PRIVILEGED_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'super-manager']);
 const PENALTY_TYPE = 'penalty';
@@ -267,8 +267,13 @@ module.exports = {
 
     const recipientId = text(req.body?.recipient_id || req.body?.recipientId);
     const comment = text(req.body?.comment);
-    // Manual penalties are dated by creation day, not by a client-selected date.
-    const penaltyAt = parseDate(zonedDateString(new Date()));
+    // Manual penalties are dated by creation day, not by a client-selected date
+    // — the day of the penalty's branch (-> company -> default), Phase 2 M5.
+    let branchTimeZone;
+    try {
+      branchTimeZone = await resolveTimezone({ branchId, companyId: access.companyId }, { query: (sql, params) => db.query(sql, params) });
+    } catch (error) { return res.status(500).json({ error: error.message || 'Failed to resolve timezone' }); }
+    const penaltyAt = parseDate(zonedDateKey(new Date(), branchTimeZone));
     const amount = Number(req.body?.amount);
     if (!recipientId) return res.status(422).json({ error: 'recipient_id is required' });
     if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99) {

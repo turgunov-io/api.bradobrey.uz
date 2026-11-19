@@ -15,6 +15,8 @@ const barbershopInCompany = async (barbershopId, companyId) => {
 
 const normalizeCode = (code = '') => String(code).trim().toUpperCase();
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const normalizeId = (value) => {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -102,12 +104,32 @@ class PromoCodes {
     const allowed = this.ensureAllowed(promo.data);
     if (!allowed.ok) return res.status(400).json({ success: false, message: allowed.message });
 
+    // promo_code_usage.order_id has no FK (Phase 2 M1): the order must be a
+    // queue entry of the caller's company, or readers would apply this
+    // company's promo to another company's order.
+    let orderId = null;
+    if (order_id !== undefined && order_id !== null && order_id !== '') {
+      orderId = String(order_id).trim();
+      if (!UUID_PATTERN.test(orderId)) {
+        return res.status(400).json({ success: false, code: 'ORDER_ID_INVALID', message: 'order_id must be a queue entry id' });
+      }
+      const { data: order, error: orderError } = await db
+        .from('queue_entries')
+        .select('id')
+        .eq('id', orderId)
+        .eq('company_id', companyId)
+        .maybeSingle();
+      if (orderError) return res.status(500).json({ success: false, message: orderError.message });
+      if (!order) return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', message: 'Order not found' });
+    }
+
     const { error: insertError } = await db.from('promo_code_usage').insert({
+      company_id: companyId,
       promo_code_id: promo.data.id,
       user_id: user_id || null,
       user_name: user_name || null,
       phone: phone || null,
-      order_id: order_id || null,
+      order_id: orderId,
     });
 
     if (insertError) {

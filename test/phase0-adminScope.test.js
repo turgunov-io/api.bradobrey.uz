@@ -364,6 +364,7 @@ function loadVerifix(respond) {
   const query = async (sql, params) => { calls.push({ sql: sql.trim(), params }); return { rows: [], rowCount: 0 }; };
   const context = { module: { exports: {} }, process: { env: {} }, require(name) {
     if (name === '../utils/authToken') return { verifyAny: () => ({ sub: USER_ID, role: 'admin_network', branchId: BRANCH_A }) };
+    if (name === '../utils/tenantTimezone') return require('../src/utils/tenantTimezone');
     if (name.includes('postgres')) return { db: { query, from: fakeFrom((state) => { calls.push(state); return respond(state); }) }, pool: { connect: async () => ({ query, release() {} }) } };
     throw new Error(name);
   }};

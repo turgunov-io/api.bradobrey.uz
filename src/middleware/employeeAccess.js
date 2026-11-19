@@ -30,6 +30,19 @@ const EMPLOYEE_ACCESS_ROLES = new Set([
 const TENANT_CHECKED_ROLES = new Set([...EMPLOYEE_ACCESS_ROLES, 'merchant', PLATFORM_OWNER_ROLE]);
 const SESSION_BOUND_ROLES = new Set(['barber', 'super-barber', 'manager', 'super-manager']);
 
+const normalizeRole = (value) => String(value || '').trim().toLowerCase();
+
+/**
+ * Phase 2 M3: the token role must still be the account's DB role. A token
+ * issued before a role change (promotion/demotion) is rejected with
+ * 401 TOKEN_ROLE_STALE; dash and the barber app treat 401 as "log in again".
+ * Roles are compared trimmed and case-insensitively (tokens carry
+ * users.role verbatim, there are no role aliases).
+ */
+function isTokenRoleStale(payload, user) {
+  return normalizeRole(payload?.role) !== normalizeRole(user?.role);
+}
+
 /**
  * DB state of a staff account. `user` carries company_id and company_status
  * (null for platform_owner) for checkTenantAccess().
@@ -111,8 +124,10 @@ function createEmployeeAccessMiddleware({
       return;
     }
 
-    const role = String(payload?.role || '').trim();
-    if (!TENANT_CHECKED_ROLES.has(role)) {
+    // Phase 2 security fix L1: normalised before the gate, so a token role
+    // in other casing ('Barber') cannot skip the account/tenant checks.
+    const tokenRole = normalizeRole(payload?.role);
+    if (!TENANT_CHECKED_ROLES.has(tokenRole)) {
       next();
       return;
     }
@@ -129,19 +144,27 @@ function createEmployeeAccessMiddleware({
       }
       const { tenant } = staffCheck;
 
-      if (String(user.role || '').trim().toLowerCase() === PLATFORM_OWNER_ROLE && !isPlatformPath(req)) {
+      // From here on the DB role decides (as in server.js); the token role
+      // only has to match it (TOKEN_ROLE_STALE below).
+      const dbRole = normalizeRole(user.role);
+      if (dbRole === PLATFORM_OWNER_ROLE && !isPlatformPath(req)) {
         res.status(403).json({ code: 'PLATFORM_OWNER_NO_TENANT_ACCESS', error: 'Platform owner has no access to company data' });
         return;
       }
 
-      if (SESSION_BOUND_ROLES.has(role)) {
+      if (isTokenRoleStale(payload, user)) {
+        res.status(401).json({ code: 'TOKEN_ROLE_STALE', error: 'Account role has changed, please log in again' });
+        return;
+      }
+
+      if (SESSION_BOUND_ROLES.has(dbRole)) {
         let session;
         try {
           session = await validateSession({
             employeeId: userId,
             branchId: payload?.branchId,
             sessionId: payload?.jti,
-            role,
+            role: dbRole,
           });
         } catch (_error) {
           res.status(503).json({ code: 'SESSION_VALIDATION_UNAVAILABLE', error: 'Session validation is temporarily unavailable' });
@@ -180,10 +203,12 @@ const enforceEmployeeAccess = createEmployeeAccessMiddleware();
 
 module.exports = {
   EMPLOYEE_ACCESS_ROLES,
+  SESSION_BOUND_ROLES,
   TENANT_CHECKED_ROLES,
   checkLoadedStaff,
   createEmployeeAccessMiddleware,
   enforceEmployeeAccess,
   isArchivedEmployee,
+  isTokenRoleStale,
   loadEmployeeAccessState,
 };

@@ -1,5 +1,7 @@
 const bcrypto = require('bcryptjs');
 const { db } = require('../../config/postgres');
+const { requireTenantCompany } = require('../../utils/companyScope');
+const { normalizeTimezoneInput } = require('../../utils/tenantTimezone');
 
 const normalizeText = (value) => {
   if (value === undefined) return undefined;
@@ -49,13 +51,30 @@ const parseBranchIds = (value) => {
   );
 };
 
-const syncBranches = async (barbershopId, branchIds) => {
+// MULTI_TENANCY Phase 2 (H1): every query is limited to the caller's company
+// (req.tenant, loaded from the DB by staffAccess). A company owns exactly one
+// barbershop (D1, marketplace_barbershops.company_id unique).
+
+// True when every id is a branch of the company (empty list: true).
+const branchesBelongToCompany = async (branchIds, companyId) => {
+  if (!Array.isArray(branchIds) || !branchIds.length) return true;
+  const { data, error } = await db
+    .from('branches')
+    .select('id')
+    .in('id', branchIds)
+    .eq('company_id', companyId);
+  if (error) throw error;
+  return (data || []).length === branchIds.length;
+};
+
+const syncBranches = async (barbershopId, branchIds, companyId) => {
   if (branchIds === undefined) return null;
 
   const { error: clearError } = await db
     .from('branches')
     .update({ marketplace_barbershop_id: null })
-    .eq('marketplace_barbershop_id', barbershopId);
+    .eq('marketplace_barbershop_id', barbershopId)
+    .eq('company_id', companyId);
 
   if (clearError) throw clearError;
 
@@ -64,10 +83,59 @@ const syncBranches = async (barbershopId, branchIds) => {
   const { error: assignError } = await db
     .from('branches')
     .update({ marketplace_barbershop_id: barbershopId })
-    .in('id', branchIds);
+    .in('id', branchIds)
+    .eq('company_id', companyId);
 
   if (assignError) throw assignError;
   return null;
+};
+
+const COMPANY_BARBERSHOP_EXISTS = Object.freeze({ code: 'COMPANY_BARBERSHOP_EXISTS', error: 'Your company already has a barbershop' });
+const INVALID_BRANCHES = Object.freeze({ code: 'BRANCH_NOT_IN_COMPANY', error: 'branch_ids must be branches of your company' });
+
+// Phase 2 security fix L2: only a violation of the company_id unique
+// (db/migrations/001_companies.sql, auto-named by Postgres) means "the company
+// already has its barbershop"; any other unique violation is a plain conflict.
+const COMPANY_BARBERSHOP_UNIQUE = 'marketplace_barbershops_company_id_key';
+const insertErrorResponse = (error) => {
+  if (error?.code !== '23505') return { status: 500, body: { error: error?.message || 'Internal server error' } };
+  if (error.constraint === COMPANY_BARBERSHOP_UNIQUE) return { status: 409, body: { ...COMPANY_BARBERSHOP_EXISTS } };
+  return { status: 409, body: { code: 'CONFLICT', error: 'Barbershop conflicts with an existing record' } };
+};
+
+// Phase 2 security fix M2: the query builder runs each statement on its own
+// pool connection, so create() cannot hold a transaction. If linking branches
+// or copying the schedule fails, the new barbershop is removed again (branch
+// links first), leaving no orphan row that would make the retry a 409.
+// syncLinkedBranchSchedule is a single statement, so a failure there changed
+// no branch schedule.
+const undoCreatedBarbershop = async (barbershopId, companyId) => {
+  const { error: unlinkError } = await db
+    .from('branches')
+    .update({ marketplace_barbershop_id: null })
+    .eq('marketplace_barbershop_id', barbershopId)
+    .eq('company_id', companyId);
+  const { error: deleteError } = await db
+    .from(tableName)
+    .delete()
+    .eq('id', barbershopId)
+    .eq('company_id', companyId);
+  const failure = unlinkError || deleteError;
+  if (failure) {
+    console.error('[barbershops] could not undo a failed create', barbershopId, failure.message);
+  }
+};
+
+// The caller company's barbershop row by id, or null.
+const findOwnBarbershop = async (id, companyId, fields = 'id') => {
+  const { data, error } = await db
+    .from(tableName)
+    .select(fields)
+    .eq('id', id)
+    .eq('company_id', companyId)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
 };
 
 const isRealMarketplaceBarbershop = (row) => !row?.metadata?.legacy_branch_id && row?.metadata?.fallback !== true;
@@ -92,7 +160,7 @@ const isMissingColumnError = (error, column) => {
   );
 };
 
-const syncLinkedBranchSchedule = async (barbershopId, { work_hours, timezone } = {}) => {
+const syncLinkedBranchSchedule = async (barbershopId, { work_hours, timezone } = {}, companyId) => {
   const payload = {};
   if (work_hours !== undefined) payload.work_hours = work_hours;
   if (timezone !== undefined) payload.timezone = timezone;
@@ -101,16 +169,19 @@ const syncLinkedBranchSchedule = async (barbershopId, { work_hours, timezone } =
   const { error } = await db
     .from('branches')
     .update(payload)
-    .eq('marketplace_barbershop_id', barbershopId);
+    .eq('marketplace_barbershop_id', barbershopId)
+    .eq('company_id', companyId);
   if (error) throw error;
 };
 
 class MarketplaceBarbershops {
   async list(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { active } = req.query || {};
 
-      let query = db.from(tableName).select(selectFields);
+      let query = db.from(tableName).select(selectFields).eq('company_id', companyId);
 
       if (active !== undefined) {
         const activeFlag = parseBoolean(active, null);
@@ -134,6 +205,8 @@ class MarketplaceBarbershops {
 
   async getById(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
@@ -141,6 +214,7 @@ class MarketplaceBarbershops {
         .from(tableName)
         .select(selectFields)
         .eq('id', id)
+        .eq('company_id', companyId)
         .maybeSingle();
 
       if (error) return res.status(500).json({ error: error.message });
@@ -155,6 +229,8 @@ class MarketplaceBarbershops {
 
   async create(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const {
         name,
         description,
@@ -185,6 +261,9 @@ class MarketplaceBarbershops {
         return res.status(400).json({ error: 'branch_ids must be an array' });
       }
 
+      const parsedTimezone = normalizeTimezoneInput(timezone);
+      if (parsedTimezone.error) return res.status(400).json({ ...parsedTimezone.error });
+
       const payload = {
         name: normalizedName,
         description: normalizeText(description) ?? null,
@@ -193,11 +272,24 @@ class MarketplaceBarbershops {
         address: normalizeText(address) ?? null,
         city: normalizeText(city) ?? null,
         work_hours: parsedWorkHours ?? null,
-        timezone: normalizeText(timezone) ?? null,
+        timezone: parsedTimezone.value ?? null,
         is_active: parseBoolean(is_active, true),
         sort_order: Number.isFinite(Number(sort_order)) ? Number(sort_order) : 0,
         metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {},
+        company_id: companyId,
       };
+
+      const { data: existing, error: existingError } = await db
+        .from(tableName)
+        .select('id')
+        .eq('company_id', companyId)
+        .limit(1);
+      if (existingError) return res.status(500).json({ error: existingError.message });
+      if ((existing || []).length) return res.status(409).json({ ...COMPANY_BARBERSHOP_EXISTS });
+
+      if (!(await branchesBelongToCompany(parsedBranchIds, companyId))) {
+        return res.status(400).json({ ...INVALID_BRANCHES });
+      }
 
       const { data, error } = await db
         .from(tableName)
@@ -205,12 +297,17 @@ class MarketplaceBarbershops {
         .select(selectFields)
         .maybeSingle();
 
-      if (error) return res.status(500).json({ error: error.message });
+      if (error) {
+        // A concurrent create of the same company loses the race on company_id unique.
+        const failure = insertErrorResponse(error);
+        return res.status(failure.status).json(failure.body);
+      }
 
       try {
-        await syncBranches(data.id, parsedBranchIds);
-        await syncLinkedBranchSchedule(data.id, payload);
+        await syncBranches(data.id, parsedBranchIds, companyId);
+        await syncLinkedBranchSchedule(data.id, payload, companyId);
       } catch (branchError) {
+        await undoCreatedBarbershop(data.id, companyId);
         return res.status(500).json({ error: branchError.message });
       }
 
@@ -223,6 +320,8 @@ class MarketplaceBarbershops {
 
   async update(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
@@ -254,7 +353,11 @@ class MarketplaceBarbershops {
       if (cover_url !== undefined) update.cover_url = normalizeText(cover_url);
       if (address !== undefined) update.address = normalizeText(address);
       if (city !== undefined) update.city = normalizeText(city);
-      if (timezone !== undefined) update.timezone = normalizeText(timezone);
+      if (timezone !== undefined) {
+        const parsedTimezone = normalizeTimezoneInput(timezone);
+        if (parsedTimezone.error) return res.status(400).json({ ...parsedTimezone.error });
+        update.timezone = parsedTimezone.value;
+      }
       if (sort_order !== undefined) {
         const parsedSortOrder = Number(sort_order);
         if (!Number.isFinite(parsedSortOrder)) {
@@ -296,10 +399,16 @@ class MarketplaceBarbershops {
 
       update.updated_at = new Date().toISOString();
 
+      if (!(await findOwnBarbershop(id, companyId))) return res.status(404).json({ error: 'Barbershop not found' });
+      if (!(await branchesBelongToCompany(parsedBranchIds, companyId))) {
+        return res.status(400).json({ ...INVALID_BRANCHES });
+      }
+
       const { data, error } = await db
         .from(tableName)
         .update(update)
         .eq('id', id)
+        .eq('company_id', companyId)
         .select(selectFields)
         .maybeSingle();
 
@@ -307,8 +416,8 @@ class MarketplaceBarbershops {
       if (!data) return res.status(404).json({ error: 'Barbershop not found' });
 
       try {
-        await syncBranches(id, parsedBranchIds);
-        await syncLinkedBranchSchedule(id, update);
+        await syncBranches(id, parsedBranchIds, companyId);
+        await syncLinkedBranchSchedule(id, update, companyId);
       } catch (branchError) {
         return res.status(500).json({ error: branchError.message });
       }
@@ -321,36 +430,25 @@ class MarketplaceBarbershops {
   }
 
   async activate(req, res) {
-    try {
-      const { id } = req.params || {};
-      if (!id) return res.status(400).json({ error: 'id is required' });
-
-      const { data, error } = await db
-        .from(tableName)
-        .update({ is_active: true })
-        .eq('id', id)
-        .select(selectFields)
-        .maybeSingle();
-
-      if (error) return res.status(500).json({ error: error.message });
-      if (!data) return res.status(404).json({ error: 'Barbershop not found' });
-
-      return res.json({ entry: data });
-    } catch (error) {
-      console.error(error);
-      return res.status(500).json({ error: error.message || 'Internal server error' });
-    }
+    return this.setActive(req, res, true);
   }
 
   async deactivate(req, res) {
+    return this.setActive(req, res, false);
+  }
+
+  async setActive(req, res, isActive) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
       const { data, error } = await db
         .from(tableName)
-        .update({ is_active: false })
+        .update({ is_active: isActive })
         .eq('id', id)
+        .eq('company_id', companyId)
         .select(selectFields)
         .maybeSingle();
 
@@ -366,12 +464,16 @@ class MarketplaceBarbershops {
 
   async remove(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
+      if (!(await findOwnBarbershop(id, companyId))) return res.status(404).json({ error: 'Barbershop not found' });
+
       const clearResults = await Promise.all([
-        db.from('branches').update({ marketplace_barbershop_id: null }).eq('marketplace_barbershop_id', id),
-        db.from('users').update({ marketplace_barbershop_id: null }).eq('marketplace_barbershop_id', id),
+        db.from('branches').update({ marketplace_barbershop_id: null }).eq('marketplace_barbershop_id', id).eq('company_id', companyId),
+        db.from('users').update({ marketplace_barbershop_id: null }).eq('marketplace_barbershop_id', id).eq('company_id', companyId),
       ]);
 
       const clearError = clearResults.find((result) => result.error && !isMissingColumnError(result.error, 'marketplace_barbershop_id'))?.error;
@@ -381,6 +483,7 @@ class MarketplaceBarbershops {
         .from(tableName)
         .delete()
         .eq('id', id)
+        .eq('company_id', companyId)
         .select('id')
         .maybeSingle();
 
@@ -396,22 +499,18 @@ class MarketplaceBarbershops {
 
   async listMerchants(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       if (!id) return res.status(400).json({ error: 'id is required' });
 
-      const { data: shop, error: shopError } = await db
-        .from(tableName)
-        .select('id')
-        .eq('id', id)
-        .maybeSingle();
-
-      if (shopError) return res.status(500).json({ error: shopError.message });
-      if (!shop) return res.status(404).json({ error: 'Barbershop not found' });
+      if (!(await findOwnBarbershop(id, companyId))) return res.status(404).json({ error: 'Barbershop not found' });
 
       const { data, error, count } = await db
         .from('users')
         .select('id, login, role, branch_id, marketplace_barbershop_id', { count: 'exact' })
         .eq('marketplace_barbershop_id', id)
+        .eq('company_id', companyId)
         .eq('role', 'merchant')
         .order('login', { ascending: true });
 
@@ -435,6 +534,8 @@ class MarketplaceBarbershops {
 
   async createMerchant(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       const { login, password } = req.body || {};
 
@@ -445,18 +546,12 @@ class MarketplaceBarbershops {
         return res.status(400).json({ error: 'password must be at least 6 characters' });
       }
 
-      const { data: shop, error: shopError } = await db
-        .from(tableName)
-        .select('id')
-        .eq('id', id)
-        .maybeSingle();
-
-      if (shopError) return res.status(500).json({ error: shopError.message });
-      if (!shop) return res.status(404).json({ error: 'Barbershop not found' });
+      if (!(await findOwnBarbershop(id, companyId))) return res.status(404).json({ error: 'Barbershop not found' });
 
       const { data, error } = await db
         .from('users')
         .insert({
+          company_id: companyId,
           login: normalizedLogin,
           marketplace_barbershop_id: id,
           password_hash: bcrypto.hashSync(String(password), 10),
@@ -486,15 +581,20 @@ class MarketplaceBarbershops {
 
   async deleteMerchant(req, res) {
     try {
+      const companyId = requireTenantCompany(req, res);
+      if (!companyId) return undefined;
       const { id } = req.params || {};
       const merchantId = normalizeText(req.body?.id || req.query?.id);
       if (!id) return res.status(400).json({ error: 'id is required' });
       if (!merchantId) return res.status(400).json({ error: 'merchant id is required' });
 
+      if (!(await findOwnBarbershop(id, companyId))) return res.status(404).json({ error: 'Barbershop not found' });
+
       const { data, error } = await db
         .from('users')
         .delete()
         .eq('id', merchantId)
+        .eq('company_id', companyId)
         .eq('marketplace_barbershop_id', id)
         .eq('role', 'merchant')
         .select('id, login, role, branch_id, marketplace_barbershop_id')

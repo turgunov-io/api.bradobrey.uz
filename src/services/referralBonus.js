@@ -1,4 +1,5 @@
 const { pool } = require('../config/postgres');
+const { resolveTimezone } = require('../utils/tenantTimezone');
 
 // Company scope (MULTI_TENANCY B2a): marketplace clients are still global
 // (Phase 5), but cashback wallets, clients and settings are per company. The
@@ -124,6 +125,14 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
     [Math.min(Math.max(Number(limit) || 100, 1), 500)],
   );
   let awarded = 0;
+  // Phase 2 M5: the daily cap uses the referral company's day, not a fixed zone.
+  const timeZoneByCompany = new Map();
+  const companyTimeZone = async (companyId) => {
+    if (!timeZoneByCompany.has(companyId)) {
+      timeZoneByCompany.set(companyId, await resolveTimezone({ companyId }, { query: (sql, params) => client.query(sql, params) }));
+    }
+    return timeZoneByCompany.get(companyId);
+  };
   for (const row of referrals.rows) {
     const points = Math.max(0, Number(row.points) || 0);
     if (!points) continue;
@@ -133,11 +142,12 @@ async function awardFirstVisitReferralPoints(client, { limit = 100 } = {}) {
          from platform_settings where company_id = $1 and key = 'status_points'`,
       [row.company_id],
     );
+    const timeZone = await companyTimeZone(row.company_id);
     const earned = await client.query(
       `select coalesce(sum(amount), 0) as total from status_point_transactions
         where marketplace_client_id = $1 and amount > 0
-          and (created_at at time zone 'Asia/Tashkent')::date = (now() at time zone 'Asia/Tashkent')::date`,
-      [row.referrer_client_id],
+          and (created_at at time zone $2)::date = (now() at time zone $2)::date`,
+      [row.referrer_client_id, timeZone],
     );
     if (Number(earned.rows[0]?.total || 0) + points > Number(cap.rows[0]?.daily_limit ?? 20)) continue;
     const oldClient = await client.query(
@@ -379,4 +389,4 @@ function startReferralBonusScheduler() {
   return () => clearInterval(timer);
 }
 
-module.exports = { settlePendingReferralBonuses, startReferralBonusScheduler };
+module.exports = { awardFirstVisitReferralPoints, settlePendingReferralBonuses, startReferralBonusScheduler };

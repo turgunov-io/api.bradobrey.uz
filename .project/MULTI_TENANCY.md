@@ -314,3 +314,66 @@
 - **Внимание при деплое:** рабочая копия на Windows хранит `.sh`/`.sql` с CRLF; `apply-schema.sh` в Linux с CRLF падает (`$'\r': command not found`). Архив для сервера собирать с LF (или `sed -i 's/\r$//'` на сервере перед запуском).
 - Не проверено: вход реальных пользователей (нет паролей), киоски/приложения против этой копии, нагрузка.
 - Решение за владельцем: компания `SHOP_D8A01905` («Navoiy», 0 филиалов) — заготовка под франшизу Навои? Переименовать код и активировать после выполнения предусловий, либо удалить барбершоп.
+
+## 11. Фаза 2 — завершение скоупинга (2026-11-19)
+
+Ветка `feat/phase2-scoping`, не закоммичено и не задеплоено. `npm test` зелёный (тесты `test/phase2-*.test.js`).
+
+### 11.1. Что исправлено
+
+- **Marketplace barbershops / merchant (H1).** Роутер marketplace-admin barbershops скоупится по компании вызывающего: чужой барбершоп, его филиалы и merchant-аккаунты не читаются и не меняются; `branch_ids` должны быть филиалами своей компании (`BRANCH_NOT_IN_COMPANY`). Все merchant-запросы через `branches.marketplace_barbershop_id` дополнительно фиксируют `branches.company_id` = компания мерчанта (защита от битой ссылки).
+- **Verifix shift (H2).** `POST /api/barbers/shift/{start,end}` грузит и обновляет барбера только в компании вызывающего и проверяет, что барбер может работать в выбранном филиале (и для админов тоже).
+- **History self-scope (H3).** `GET /api/history/branch` не выходит за компанию; self-scope (барбер) видит только свои заказы, `?id=` чужого филиала игнорируется.
+- **Promo order company (M1).** `promo_code_usage.order_id` без FK — теперь это должен быть UUID записи очереди своей компании (иначе 400/404).
+- **Kiosk barbers company check (M2).** `GET /api/kiosk/barbers/:branch_id` и `/api/monitor/barbers/:branch_id` сравнивают компанию токена (киоск/сотрудник) с компанией филиала, как `book()`. Без токена ростер публичен, только пока активна одна компания.
+- **Роли из БД + `TOKEN_ROLE_STALE` (M3/LOW).** Роль берётся из `users.role`; токен, выпущенный до смены роли, отклоняется (`401 TOKEN_ROLE_STALE`, для сокетов — ошибка подключения с `data.code = TOKEN_ROLE_STALE`). Требование сессии следует роли из БД.
+- **Barber workspace (M4).** break/return/call/start/complete/profile требуют живую сессию (`authenticateBarberWorkspace`), записи очереди — только в филиале сессии.
+- **Таймзоны по филиалам (M5).** Единый модуль `src/utils/tenantTimezone.js`: `branches.timezone → companies.timezone → DEFAULT_TIMEZONE (Asia/Tashkent)`, невалидные значения (не IANA-имена, см. 11.4) пропускаются. API: `pickTimezone`/`effectiveTimeZone` (чистые), `resolveTimezone({branchId, companyId}, {query|db})` (филиал чужой компании игнорируется), `branchTimeZone`/`companyTimeZone` (обёртки над `resolveTimezone`), `timezoneOfBranchRow(row)` (без запроса, если у строки валидная зона), `zonedDateKey`, `zonedMidnightIso`. Две параллельные реализации (группы A и B) сведены в одну: дублирующие SQL-запросы `branchTimeZone`/`companyTimeZone` удалены, `autoCloseQueue` использует `pickTimezone` (поведение и warning сохранены). На этот модуль переведены: statistics (`/api/statistics/*`, manager — границы дня и дневные бакеты), employee quality, expenses, penalties, history, marketplace referral-лимиты и счётчик отмен, catalog same-day, referral first-visit daily cap (`services/referralBonus.js`), group booking daily limit (филиал → компания), kiosk same-day/дневной лимит брони, verifix shift, промо-окно кэшбэка (`cashback.timezone`, иначе филиал → компания), `checkToday` (раньше — сутки UTC), merchant dashboard «сегодня» (раньше — день сессии БД). По умолчанию вывод совпадает со старым `+05:00` байт-в-байт.
+
+### 11.2. Изменения поведения для клиентов
+
+- **409 `COMPANY_BARBERSHOP_EXISTS`** — попытка создать второй барбершоп компании (marketplace admin, dash).
+- **400 `ORDER_ID_INVALID`** — `order_id` при применении промокода не UUID; **404 `ORDER_NOT_FOUND`** — запись очереди не своей компании.
+- **401 `TOKEN_ROLE_STALE`** — роль пользователя изменилась после выдачи токена → клиент должен разлогинить и попросить войти заново (dash и барбер-приложение обрабатывают 401 как re-login; сокет отклоняется с тем же кодом).
+- **`POST /api/notifications/check-today`** — только `admin_network`, `admin`, `admin_branch`, `super-manager`; `manager`/барберы получают 403. Вызывается только из dash (`app/pages/notifications.vue` → `useNotifications().checkToday`); страница `/notifications` требует `dashboard.access`, который есть и у `manager` → у менеджера кнопка «Проверить заказы» получит 403 и покажет «Не удалось проверить заказы. Проверьте подключение к API.» Барбер-приложение, киоск и marketplace эндпоинт не вызывают.
+- Киоски без токена при 2+ активных компаниях больше не получают ростер барберов филиала.
+- Все «сегодня»/диапазоны дат выше считаются в зоне филиала/компании; для компаний с `Asia/Tashkent` (все текущие) ничего не меняется.
+
+### 11.3. Остатки
+
+- dash: скрыть кнопку `checkToday` для `manager` (или разрешить роль на API) и различать 403 от сетевой ошибки; dash отправляет `date` по локальному времени браузера.
+- `src/utils/employeeSession.js`: сессия сотрудника истекает в полночь `DEFAULT_TIMEZONE`, а не филиала.
+- `src/utils/marketplacePushPolicy.js`: тихие часы marketing-push по `Asia/Tashkent` (marketplace-клиенты глобальные, компании у получателя нет).
+- `src/models/barbers.js` (~1094): дни смен в статистике барбера считаются по дате UTC.
+- `src/models/expenses.js` `validate()`: fallback `spent_at` — дата UTC (на create перекрыт датой филиала, остаётся для частичных апдейтов без даты).
+- `src/utils/timezone.js` (`zonedDayStartIso`, `nextZonedDayStartIso`, `zonedDateString`) дублирует часть `tenantTimezone`; используется киоском и `employeeSession` — свести при следующей правке.
+- `statisticsDate.toTashkentDateKey` — legacy-алиас, в `src/` больше не используется (только тесты).
+
+### 11.4. Исправления по security review Фазы 2 (2026-11-19, не закоммичено)
+
+Тесты: `test/phase2-security-fixes.test.js` (16 тестов). `npm test` — 710 зелёных.
+
+- **M1 — только IANA-имена таймзон.** Значение уходит в SQL `at time zone $n`, а Postgres читает не-имена по-своему: `'+05:00'` — POSIX-смещение, т. е. **UTC−5** (проверено на PG 14: `12:00Z at time zone '+05:00'` = `07:00`), аббревиатуры — по своей таблице. `tenantTimezone.isValidTimeZone`/`pickTimezone`/`timezoneOfBranchRow` теперь принимают только `Area/Location` (Area ∈ Africa, America, Antarctica, Arctic, Asia, Atlantic, Australia, Europe, Indian, Pacific, Etc), `UTC` и `Etc/...`, известные Intl; отклоняются смещения (`+05:00`, `-0500`), аббревиатуры (`EST`, `GMT`), POSIX (`EST5EDT`) и backward-ссылки вроде `US/Eastern` (в slim tzdata Debian их нет). Регистр приводится к каноническому через `Intl…resolvedOptions()` (`asia/tashkent` → `Asia/Tashkent`, `utc` → `UTC`), ICU-алиасы не применяются (`Asia/Kolkata` не превращается в `Asia/Calcutta`, которого нет в PG). Новое: `canonicalTimeZone`, `normalizeTimezoneInput`, `INVALID_TIMEZONE`.
+  Проверка на записи → **400 `INVALID_TIMEZONE`**: marketplace barbershops create/update (и, значит, копия в `branches.timezone` через `syncLinkedBranchSchedule`), `branches` create/update, merchant `createBranch`/`updateBranch`, platform companies (`timezone must be an IANA time zone`, канонический регистр). Пустая строка/`null` очищают поле.
+- **M2 — атомарное создание барбершопа.** Query builder выполняет каждый запрос на отдельном соединении пула, транзакцию держать нельзя, поэтому — компенсация: если `syncBranches`/`syncLinkedBranchSchedule` упали, ссылки филиалов на новый барбершоп снимаются и строка удаляется → повтор даёт 201, а не 409. `syncLinkedBranchSchedule` — один UPDATE, при его ошибке расписание филиалов не менялось. Сбой самой компенсации логируется.
+- **L1 — `employeeAccess`.** Роль токена нормализуется (trim + lowercase) до проверки `TENANT_CHECKED_ROLES` — токен с ролью `Barber` больше не проходит мимо middleware. Привязка к сессии (`SESSION_BOUND_ROLES`, `validateSession({ role })`) и проверка platform_owner берут роль из БД, как `server.js`.
+- **L2 — 23505 при создании барбершопа.** `COMPANY_BARBERSHOP_EXISTS` только при `error.constraint = 'marketplace_barbershops_company_id_key'` (имя из `001_companies.sql`, проверено на копии); любая другая уникальность → 409 `CONFLICT`. `config/postgres.normalizeError` теперь передаёт `constraint`.
+
+Остатки по этим пунктам:
+
+- **dash:** кнопка «Проверить заказы» на `/notifications` видна `manager`, а `POST /api/notifications/check-today` теперь отвечает ему 403 — dash показывает вводящее в заблуждение «Проверьте подключение к API». Скрыть кнопку для `manager` (или разрешить роль на API) и отличать 403 от сетевой ошибки.
+- **dash:** поля таймзоны (барбершоп, филиал, компания) — отдавать выбор из списка IANA-зон и показывать ошибку `INVALID_TIMEZONE`.
+- Уже сохранённые в БД невалидные значения на чтении пропускаются (fallback филиал → компания → `Asia/Tashkent`); перед деплоем проверить: `select id, timezone from branches where timezone !~ '^[A-Za-z]+/' and lower(timezone) <> 'utc'` (и то же для `companies`, `marketplace_barbershops`).
+- Intl принимает 18 устаревших ICU-написаний (`Asia/Calcutta`, `Europe/Kiev`, `America/Buenos_Aires`, …), которых нет в tzdata PG на копии; такое значение даст ошибку PG «time zone not recognized» (500), а не тихий сдвиг времени. Полная гарантия — валидация против `pg_timezone_names` на записи (не сделано).
+- Остальные таймзонные остатки — в 11.3 (`employeeSession`, `marketplacePushPolicy`, `barbers.js` дни смен по UTC, `expenses.validate()` fallback UTC, дубль `utils/timezone.js`).
+
+### 11.5. Управление аккаунтами platform_owner (2026-11-19, не закоммичено)
+
+Тесты: `test/platform-owners.test.js` (15). Контракт — `API.md`, «Platform owner accounts».
+
+- `GET /api/platform/owners` → `{ owners: [{ id, login, created_at }] }`; `POST /api/platform/owners` `{ login, password }` → `201 { owner: { id, login, created_at } }` — строка `users` с `role = 'platform_owner'`, `company_id = NULL` (разрешено `users_company_membership_check` из 004), bcrypt cost 10 как у `createCompanyAdmin`.
+- Доступ — новый guard `requirePlatformOwnersManager`, всё из БД (`users` + `companies`): `platform_owner` без компании, либо `admin_network`/`admin` **default**-компании (`is_default = true`) в статусе `active`. Остальные — `403 PLATFORM_OWNERS_FORBIDDEN`. Нужен, чтобы админ default-компании (Bradobrey) мог завести первого владельца платформы из dash.
+- Изоляция: роуты `/companies*` по-прежнему за `requirePlatformOwner` → админ default-компании получает там `403 PLATFORM_OWNER_REQUIRED`. Глобальный `enforceEmployeeAccess` пропускает tenant-админа на `/api/platform/*` (как и раньше), а `platform_owner` на tenant-роутах всё так же получает `403 PLATFORM_OWNER_NO_TENANT_ACCESS` (покрыто тестом).
+- `409 LOGIN_TAKEN`: предпроверка среди `platform_owner` без компании + частичный уникальный индекс `users_platform_login_uidx` (003) на гонку. `400` — пустой логин/с пробелами, пароль < 8 (или > 128).
+- Миграция **`009_users_created_at.sql`** (+ down; `db/postgres/users.sql` обновлён): `users.created_at timestamptz not null default now()`; у существующих строк — время применения миграции. До её применения API отдаёт `created_at: null` (fallback на 42703), порядок деплоя любой.
+- Остаток: создавать владельцев может любой `admin`/`admin_network` default-компании — это осознанное решение по контракту; аудита (кто создал) нет, удаления/блокировки владельцев через API нет.

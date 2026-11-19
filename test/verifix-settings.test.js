@@ -18,6 +18,7 @@ function setup({ role = 'admin_network', branches = 1, fail = false } = {}) {
   };
   const context = { module: { exports: {} }, process: { env: {} }, require(name) {
     if (name === '../utils/authToken') return { verifyAny: () => ({ role, branchId: id }) };
+    if (name === '../utils/tenantTimezone') return require('../src/utils/tenantTimezone');
     if (name.includes('postgres')) return { db: { query }, pool: { connect: async () => ({ query, release() { calls.push({ sql: 'RELEASE' }); } }) } };
     throw new Error(name);
   }};

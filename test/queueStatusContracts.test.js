@@ -180,7 +180,7 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
       employee_id: 'barber-1', branch_id: 'branch-1', is_on_shift: true,
       updated_at: new Date().toISOString(), session_id: 'session-1',
       session_expires_at: new Date(Date.now() + 60_000).toISOString(),
-    }], error: null }],
+    }], error: null }],
     branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [{ data: [{ id: 'service-1', company_id: 'company-1', branch_id: null, duration_minutes: 10 }], error: null }],
     clients: [{ data: [], error: null }],
@@ -188,7 +188,9 @@ test('GET /api/kiosk/barbers/:branch_id counts only canonical active queue statu
 
   try {
     const res = createResponse();
-    await kiosk.barbers({ params: { branch_id: 'branch-1' } }, res);
+    // Authenticated kiosk of the branch's company (Phase 2 M2 compares it with
+    // branches.company_id; a token-less call needs single-company mode).
+    await kiosk.barbers({ params: { branch_id: 'branch-1' }, kiosk: { companyId: 'company-1', branchId: 'branch-1' } }, res);
 
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.payload.barbers.map((barber) => barber.id), ['barber-1']);
@@ -221,7 +223,7 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete enriches services and em
     queue_entries: [
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: new Date().toISOString(), service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: new Date().toISOString(), service_id: 'service-1', service_ids: ['service-1', 'service-2'], price_override: null }, error: null },
-    ],
+    ],
     branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [
       { data: services, error: null },
@@ -264,7 +266,7 @@ test('PATCH /api/barbers/queue/:id/edit-before-complete accepts a positive manua
     queue_entries: [
       { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-low-price', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', service_id: 'service-1', service_ids: ['service-1'], price_override: 1, price_override_reason: 'Округление' }, error: null },
-    ],
+    ],
     branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [{ data: [{ id: 'service-1', company_id: 'company-1', branch_id: null, name: 'Haircut', base_price: 40000, duration_minutes: 20, is_active: true }], error: null }],
   });
@@ -297,7 +299,7 @@ test('PATCH /api/barbers/queue/:id validates in-progress services and returns en
     queue_entries: [
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: startedAt, service_id: 'service-1', service_ids: ['service-1'] }, error: null },
       { data: { id: 'queue-1', barber_id: 'barber-1', branch_id: 'branch-1', status: 'in_progress', started_at: startedAt, service_id: 'service-1', service_ids: ['service-1', 'service-2'], price_override: null }, error: null },
-    ],
+    ],
     branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [
       { data: services, error: null },
@@ -416,7 +418,7 @@ test('generic queue PATCH treats a repeated terminal status as a read-only no-op
     service_ids: ['service-1'],
   };
   const mock = installSessionDbMock({
-    queue_entries: [{ data: entry, error: null }],
+    queue_entries: [{ data: entry, error: null }],
     branches: Array.from({ length: 10 }, () => ({ data: { id: 'branch-1', company_id: 'company-1' }, error: null })),
     services: [{ data: [{ id: 'service-1', company_id: 'company-1', branch_id: null, name: 'Haircut', base_price: 100, duration_minutes: 30 }], error: null }],
   });
@@ -466,7 +468,7 @@ test('generic queue PATCH detects a concurrent status transition', async () => {
 
 test('dedicated complete endpoint rejects every conflicting terminal state', async () => {
   const conflictingTerminalStatuses = ['cancelled', 'rejected', 'no_show', 'not_in_time'];
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: conflictingTerminalStatuses.map((status) => ({
       data: {
         id: `complete-${status}`,
@@ -478,7 +480,7 @@ test('dedicated complete endpoint rejects every conflicting terminal state', asy
       error: null,
     })),
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     for (const status of conflictingTerminalStatuses) {
@@ -500,7 +502,7 @@ test('dedicated complete endpoint rejects every conflicting terminal state', asy
 
 test('dedicated complete endpoint accepts only in_progress as a non-idempotent source status', async () => {
   const invalidSourceStatuses = ['waiting', 'called', 'swapped'];
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: invalidSourceStatuses.map((status) => ({
       data: {
         id: `complete-source-${status}`,
@@ -512,7 +514,7 @@ test('dedicated complete endpoint accepts only in_progress as a non-idempotent s
       error: null,
     })),
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     for (const status of invalidSourceStatuses) {
@@ -544,7 +546,7 @@ test('dedicated complete endpoint preserves completed retry without rewriting qu
     payment_method: null,
     price_override: null,
   };
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [{ data: entry, error: null }],
     payments: [{ data: [], error: null }],
     marketplace_booking_persons: [{ data: [], error: null }],
@@ -554,7 +556,7 @@ test('dedicated complete endpoint preserves completed retry without rewriting qu
     query: async () => ({ rows: [] }),
     release() {},
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     const res = createResponse();
@@ -582,13 +584,13 @@ test('dedicated complete endpoint uses prior status as CAS and rejects a concurr
     status: 'in_progress',
     price_override: 100,
   };
-  const mock = installDbMock({
+  const mock = installSessionDbMock({
     queue_entries: [
       { data: entry, error: null },
       { data: null, error: null },
     ],
   });
-  const token = jwt.sign({ sub: 'barber-1', role: 'barber' }, process.env.JWT_SECRET);
+  const token = sessionToken();
 
   try {
     const res = createResponse();
@@ -756,7 +758,12 @@ test('GET /api/barbers/queue/:id/barber-history returns an ordered PII-free barb
 
   try {
     const token = jwt.sign({ sub: 'barber-c', role: 'barber', branch_id: 'branch-1' }, process.env.JWT_SECRET);
-    const req = { headers: { authorization: `Bearer ${token}` }, params: { id: 'queue-1' } };
+    const req = {
+      headers: { authorization: `Bearer ${token}` },
+      params: { id: 'queue-1' },
+      // Set by middleware/employeeAccess after the DB/session check (Phase 2 M3).
+      employeeAccess: { user: { id: 'barber-c', role: 'barber' }, sessionValid: true },
+    };
     const res = createResponse();
     await queueTransfers.history(req, res);
 

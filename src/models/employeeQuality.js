@@ -12,7 +12,9 @@ const {
   requireAccessCompanyId,
 } = require('../utils/employeeQualityAccess');
 
-const TIMEZONE = 'Asia/Tashkent';
+// Phase 2 M5: reported timezone = the one the range was computed in
+// (authenticateStatistics: branch -> company -> default).
+const { DEFAULT_TIMEZONE } = require('../utils/tenantTimezone');
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DRILLDOWN_CATEGORIES = new Set(['suspicious', 'employee_failure', 'unclassified']);
 
@@ -343,7 +345,7 @@ class EmployeeQuality {
 
       return res.json({
         formula_version: FORMULA_VERSION,
-        timezone: TIMEZONE,
+        timezone: access.timeZone || DEFAULT_TIMEZONE,
         range: { start_date: access.range.startDate, end_date: access.range.endDate },
         scope: {
           type: access.scope.type,
@@ -450,7 +452,7 @@ class EmployeeQuality {
 
       return res.json({
         formula_version: FORMULA_VERSION,
-        timezone: TIMEZONE,
+        timezone: access.timeZone || DEFAULT_TIMEZONE,
         range: { start_date: access.range.startDate, end_date: access.range.endDate },
         scope: {
           type: access.scope.type,

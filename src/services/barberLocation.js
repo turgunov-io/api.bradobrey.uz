@@ -107,6 +107,20 @@ const LOCATION_ACTOR_SQL = `select u.id, u.role, u.branch_id, u.company_id, c.st
     where u.id = $1
     limit 1`;
 
+// Phase 2 LOW: the branch of a branch-scoped administrator comes from the DB
+// (users.branch_id). Only for the session-bound manager role is it the session
+// branch, and only when middleware/employeeAccess validated that session for
+// this very account; the bare token claim is never trusted.
+const SESSION_BRANCH_ROLES = new Set(['manager', 'super-manager']);
+function resolveActorBranchId({ req, payload, user, role }) {
+  if (SESSION_BRANCH_ROLES.has(role)) {
+    const access = req?.employeeAccess;
+    const validated = access?.sessionValid === true && String(access?.user?.id || '') === String(user.id);
+    return validated ? (String(payload?.branchId || '').trim() || null) : null;
+  }
+  return String(user.branch_id || '').trim() || null;
+}
+
 // MULTI_TENANCY B2: role and company come from the database (never the
 // token). Returns { role, branchId (session branch), companyId } or null after
 // an error response. Branch-scoped roles stay pinned to their session branch.
@@ -134,7 +148,7 @@ async function authenticateLocationUser(req, res) {
   if (!ADMIN_ROLES.has(role)) { res.status(403).json({ error: 'Location administration is not allowed' }); return null; }
   return {
     role,
-    branchId: String(payload.branchId || payload.branch_id || user.branch_id || '').trim() || null,
+    branchId: resolveActorBranchId({ req, payload, user, role }),
     companyId: tenantCheck.tenant.companyId,
   };
 }

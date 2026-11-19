@@ -1,9 +1,9 @@
 const { verifyAny } = require('../utils/authToken');
 const { db, pool } = require('../config/postgres');
+const { timezoneOfBranchRow } = require('../utils/tenantTimezone');
 
 const ADMIN_ROLES = new Set(['admin_network', 'admin_branch', 'admin', 'merchant']);
 const BARBER_ROLES = new Set(['barber', 'super-barber']);
-const DEFAULT_TIMEZONE = 'Asia/Tashkent';
 const EVENT_TYPES = new Set([
   'login',
   'logout',
@@ -128,17 +128,6 @@ const getFormatter = (timeZone) => new Intl.DateTimeFormat('en-CA', {
   year: 'numeric',
 });
 
-const normalizeTimeZone = (value) => {
-  const timeZone = normalizeText(value) || DEFAULT_TIMEZONE;
-
-  try {
-    getFormatter(timeZone).format(new Date());
-    return timeZone;
-  } catch (_error) {
-    return DEFAULT_TIMEZONE;
-  }
-};
-
 const getTimeZoneParts = (date, timeZone) => {
   const parts = getFormatter(timeZone).formatToParts(date);
   const values = {};
@@ -249,7 +238,7 @@ const getBranch = async (branchId) => {
 
   const { data, error } = await db
     .from('branches')
-    .select('id, name, timezone')
+    .select('id, name, timezone, company_id')
     .eq('id', branchId)
     .maybeSingle();
 
@@ -257,14 +246,20 @@ const getBranch = async (branchId) => {
   return data || null;
 };
 
-const getBarber = async (barberId) => {
+// Phase 2 H2: with a companyId the barber is only found inside that company
+// (handlers always pass the DB-loaded actor's company; a null company finds
+// nothing). Internal callers acting on the token subject itself (barbers.js
+// presence events) omit it.
+const getBarber = async (barberId, companyId = undefined) => {
   if (!barberId) return null;
+  if (companyId !== undefined && !companyId) return null;
 
-  const { data, error } = await db
+  let query = db
     .from('barbers')
     .select('id, name, branch_id')
-    .eq('id', barberId)
-    .maybeSingle();
+    .eq('id', barberId);
+  if (companyId) query = query.eq('company_id', companyId);
+  const { data, error } = await query.maybeSingle();
 
   if (error) throw new Error(error.message);
   return data || null;
@@ -352,6 +347,7 @@ async function recordActivityEvent({
   penaltyAmount = 0,
   penaltyReason = null,
   source = 'barber_kiosk',
+  companyId = undefined,
 } = {}) {
   const normalizedEventType = normalizeEventType(eventType);
   if (!normalizedEventType) {
@@ -363,7 +359,7 @@ async function recordActivityEvent({
     throw new Error('occurred_at must be a valid date/time');
   }
 
-  const barber = await getBarber(barberId);
+  const barber = await getBarber(barberId, companyId);
   if (!barber) {
     throw new Error('Barber not found');
   }
@@ -379,7 +375,8 @@ async function recordActivityEvent({
     throw new Error('Barber is not allowed to work in this branch');
   }
 
-  const timeZone = normalizeTimeZone(branch.timezone);
+  // Phase 2 M5: branch timezone -> company timezone -> default.
+  const timeZone = await timezoneOfBranchRow(branch);
   const schedule = await findSchedule({
     barberId: barber.id,
     branchId: finalBranchId,
@@ -563,7 +560,7 @@ class Verifix {
       }
 
       if (isAdmin && auth.branchScope !== null) {
-        const targetBarber = await getBarber(barberId);
+        const targetBarber = await getBarber(barberId, auth.companyId);
         if (!targetBarber) return res.status(404).json({ error: 'Barber not found' });
         if (!inScope(auth.branchScope, normalizeId(body.branch_id) || targetBarber.branch_id)) {
           return res.status(403).json(SCOPE_FORBIDDEN);
@@ -582,6 +579,7 @@ class Verifix {
         penaltyAmount: body.penalty_amount,
         penaltyReason: body.penalty_reason,
         source: normalizeSource(body.source, isAdmin ? 'dashboard' : 'barber_kiosk'),
+        companyId: auth.companyId,
       });
 
       return res.status(201).json({ event });
@@ -622,7 +620,8 @@ class Verifix {
       const barberId = isAdmin ? normalizeId(body.barber_id) : auth.id;
       if (!barberId) return res.status(400).json({ error: 'barber_id is required' });
 
-      const currentBarber = await getBarber(barberId);
+      if (!auth.companyId) return res.status(403).json({ code: 'COMPANY_REQUIRED', error: 'Company context is required' });
+      const currentBarber = await getBarber(barberId, auth.companyId);
       if (!currentBarber) return res.status(404).json({ error: 'Barber not found' });
 
       const branchId = normalizeId(body.branch_id) || auth.branchId || currentBarber.branch_id;
@@ -634,7 +633,9 @@ class Verifix {
       if (!branch) return res.status(404).json({ error: 'Branch not found' });
 
       const { employeeCanUseBranch, setActiveEmployeeBranch } = require('../utils/employeeBranches');
-      if (!isAdmin && !(await employeeCanUseBranch(barberId, branchId, currentBarber.branch_id))) {
+      // Admins too (Phase 2 H2): the barber must be allowed to work in the
+      // in-scope branch; listEmployeeBranches never leaves the barber's company.
+      if (!(await employeeCanUseBranch(barberId, branchId, currentBarber.branch_id))) {
         return res.status(403).json({ error: 'Employee is not allowed to work in this branch' });
       }
 
@@ -644,6 +645,7 @@ class Verifix {
         .from('barbers')
         .update(barberUpdate)
         .eq('id', barberId)
+        .eq('company_id', auth.companyId)
         .select('id, name, branch_id, is_on_shift')
         .maybeSingle();
 
@@ -665,6 +667,7 @@ class Verifix {
         },
         occurredAt: normalizeDateTime(body.occurred_at, new Date()),
         source: normalizeSource(body.source, isAdmin ? 'dashboard' : 'barber_kiosk'),
+        companyId: auth.companyId,
       });
 
       return res.json({ barber: updatedBarber, event });
