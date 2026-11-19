@@ -15,6 +15,7 @@ const { LOCATION_ROLES, verifyAndRecordLoginLocation } = require('../services/ba
 const { getActiveEmployeeBranch, listEmployeeBranches, logoutEmployeePresence, resolveEmployeeBranch, setActiveEmployeeBranch, touchActiveEmployeeBranch } = require('../utils/employeeBranches');
 const { getEmployeeSessionExpiry, getEmployeeTokenTtlSeconds, validatePersistedEmployeeSession } = require('../utils/employeeSession');
 const { resolveLoginCompany } = require('../utils/tenant');
+const { canManagePlatform } = require('../utils/platformAccess');
 const queueTransfers = require('./queueTransfers');
 const { loadBranchServices, loadServicesForEntries } = require('../utils/serviceScope');
 const {
@@ -404,6 +405,32 @@ const syncUserPermissions = async (userId, permissions) => {
     }
 
     return null;
+};
+
+// UI hints for GET /me (MULTI_TENANCY 12): the dash shows its "Платформа"
+// section when can_manage_platform. The /api/platform guards re-check in the
+// DB on every call; a lookup failure only hides the section.
+const loadPlatformFlags = async (user) => {
+    if (!user?.company_id) return { company_is_default: false, can_manage_platform: false };
+    try {
+        const { data: company, error } = await db
+            .from('companies')
+            .select('is_default, status')
+            .eq('id', user.company_id)
+            .maybeSingle();
+        if (error || !company) return { company_is_default: false, can_manage_platform: false };
+        return {
+            company_is_default: company.is_default === true,
+            can_manage_platform: canManagePlatform({
+                role: user.role,
+                company_id: user.company_id,
+                company_is_default: company.is_default === true,
+                company_status: company.status,
+            }),
+        };
+    } catch (_error) {
+        return { company_is_default: false, can_manage_platform: false };
+    }
 };
 
 const fetchPermissionsByUserIds = async (userIds) => {
@@ -2238,7 +2265,8 @@ class Barbers {
         }
 
         if (barber?.branches) user.branches = barber.branches;
-        return res.json({ user: { ...user, permissions }, barber });
+        const platformFlags = await loadPlatformFlags(user);
+        return res.json({ user: { ...user, permissions, ...platformFlags }, barber });
     }
 
     async switchBranch(req, res) {

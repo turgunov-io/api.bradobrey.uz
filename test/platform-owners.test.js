@@ -3,7 +3,7 @@
 //   POST /api/platform/owners  { login, password } -> 201 { owner: { id, login, created_at } }
 // Allowed (DB-checked, never from the token): platform_owner, or
 // admin_network/admin of the active DEFAULT company. Everyone else 403.
-// The default-company admin reaches only these two routes, not companies.
+// The same audience manages /companies* (platform-default-admin.test.js).
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
@@ -14,7 +14,7 @@ process.env.JWT_SECRET ||= 'platform-owners-test-secret';
 
 const {
   createPlatformController,
-  createPlatformOwnerGuard,
+  createPlatformCompaniesGuard,
   createPlatformOwnersManagerGuard,
   platformRepo,
 } = require('../src/models/platform');
@@ -87,19 +87,20 @@ test('owners guard: a load failure is 500, not a pass', async () => {
   assert.equal(res.statusCode, 500);
 });
 
-test('companies guard still refuses a default-company admin', async () => {
-  const guard = createPlatformOwnerGuard({ loadUser: async (userId) => CANDIDATES[userId] || null });
-  const res = makeRes();
-  let nextCalled = false;
-  await guard(bearer({ sub: id(1), role: 'admin' }), res, () => { nextCalled = true; });
-  assert.equal(nextCalled, false);
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.body.code, 'PLATFORM_OWNER_REQUIRED');
+test('companies guard has the same audience as the owners guard (MULTI_TENANCY 12)', async () => {
+  const guard = createPlatformCompaniesGuard({ loadUser: async (userId) => CANDIDATES[userId] || null });
+  for (const [userId, allowed] of [[OWNER, true], [id(1), true], [id(2), true], [id(3), false], [id(4), false], [id(6), false]]) {
+    const res = makeRes();
+    let nextCalled = false;
+    await guard(bearer({ sub: userId, role: 'admin' }), res, () => { nextCalled = true; });
+    assert.equal(nextCalled, allowed, userId);
+    if (!allowed) assert.equal(res.body.code, 'PLATFORM_OWNER_REQUIRED', userId);
+  }
 });
 
 // ----------------------------------------------------------------- router
 
-test('router: /owners uses the owners guard; every /companies route keeps requirePlatformOwner', () => {
+test('router: /owners uses the owners guard; every /companies route uses the companies guard', () => {
   const routes = platformRouter.stack.filter((entry) => entry.route).map((entry) => ({
     key: `${Object.keys(entry.route.methods)[0]} ${entry.route.path}`,
     guard: entry.route.stack[0].handle.name,
@@ -108,7 +109,7 @@ test('router: /owners uses the owners guard; every /companies route keeps requir
   assert.deepEqual(owners.map((route) => route.key).sort(), ['get /owners', 'post /owners']);
   for (const route of owners) assert.equal(route.guard, 'requirePlatformOwnersManager', route.key);
   for (const route of routes.filter((r) => r.key.includes('/companies'))) {
-    assert.equal(route.guard, 'requirePlatformOwner', route.key);
+    assert.equal(route.guard, 'requirePlatformCompaniesManager', route.key);
   }
 });
 

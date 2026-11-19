@@ -12,17 +12,23 @@
 //   GET   /api/platform/owners                platform owners [{ id, login, created_at }]
 //   POST  /api/platform/owners                new platform owner { login, password }
 //
-// /owners is guarded by requirePlatformOwnersManager (DB-checked): the
-// platform owner, or admin_network/admin of the active DEFAULT company (it
-// bootstraps the first owner). Those admins get nothing else under /platform.
+// /companies* (requirePlatformCompaniesManager) and /owners
+// (requirePlatformOwnersManager) share one DB-checked audience
+// (utils/platformAccess.canManagePlatform): the platform owner, or
+// admin_network/admin of the active DEFAULT company (MULTI_TENANCY 12).
+// Management only — this grant reads no tenant data of any company. Refused
+// codes stay 403 PLATFORM_OWNER_REQUIRED / PLATFORM_OWNERS_FORBIDDEN.
+// A default-company admin cannot create admins of the default company itself
+// (403 DEFAULT_COMPANY_ADMIN_FORBIDDEN). Mutations log one `[platform-audit]`
+// console.info line (actor, action, field names; never values or passwords).
 //
 // Multi-company gate (security review H2/M1): creating a company, or
 // re-activating a suspended non-default one, is 409 MULTI_COMPANY_PRECONDITIONS
 // unless kiosk auth is enforced (KIOSK_AUTH_ENFORCE) and the DB runs with
 // app.tenant_strict = 'on' (MULTI_TENANCY 9.9). The response lists `failed`.
 //
-// requirePlatformOwner loads the caller from the DB: role platform_owner and
-// no company (users_company_membership_check). The token's role is ignored.
+// Guards load the caller from the DB (role + company flags); the token's
+// role is ignored (a stale one is refused earlier by enforceEmployeeAccess).
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
@@ -31,6 +37,7 @@ const { PLATFORM_OWNER_ROLE, normalizeCompanyCode } = require('../utils/tenant')
 const { isKioskAuthEnforced } = require('../middleware/kioskAuth');
 const { hashEnrollmentCode, validateEnrollmentCode } = require('../utils/kioskEnrollmentCode');
 const { canonicalTimeZone } = require('../utils/tenantTimezone');
+const { canManagePlatform, isPlatformOwnerUser } = require('../utils/platformAccess');
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COLOR_PATTERN = /^#[0-9A-Fa-f]{6}$/;
@@ -201,7 +208,7 @@ const platformRepo = {
     return result.rows[0] || null;
   },
 
-  // Caller of /owners with the company flags requirePlatformOwnersManager needs.
+  // Caller of /companies* and /owners with the company flags the guards need.
   async findOwnersManagerCandidate(id) {
     const result = await pool().query(
       `select u.id, u.role, u.company_id, c.is_default as company_is_default, c.status as company_status
@@ -242,11 +249,6 @@ const platformRepo = {
     ));
     return rows[0];
   },
-
-  async findUserById(id) {
-    const result = await pool().query('select id, role, company_id from users where id = $1 limit 1', [id]);
-    return result.rows[0] || null;
-  },
 };
 
 const isUniqueViolation = (error) => String(error?.code || '') === '23505';
@@ -281,8 +283,16 @@ const publicCompany = (row) => {
   return company;
 };
 
-function createPlatformOwnerGuard({ loadUser = (id) => platformRepo.findUserById(id), secret } = {}) {
-  return async function requirePlatformOwner(req, res, next) {
+/**
+ * Guard for platform management routes (MULTI_TENANCY 11.5, 12): the caller is
+ * loaded from the DB with its company flags and must pass canManagePlatform
+ * (platform_owner, or admin_network/admin of the active default company).
+ * The token's role/company are ignored here; a stale token role is already
+ * refused by the global enforceEmployeeAccess (401 TOKEN_ROLE_STALE).
+ * Sets req.platformActor = { id, role, isPlatformOwner } from the DB row.
+ */
+function createPlatformManagerGuard({ name, forbidden, label, onPass, loadUser, secret }) {
+  const guard = async (req, res, next) => {
     const token = getBearerToken(req);
     if (!token) return res.status(401).json({ error: 'Authorization token is required' });
     let payload;
@@ -298,59 +308,50 @@ function createPlatformOwnerGuard({ loadUser = (id) => platformRepo.findUserById
     try {
       user = await loadUser(userId);
     } catch (error) {
-      console.error('[platform] authorization failed:', error?.code || error?.message);
+      console.error(`[platform] ${label} authorization failed:`, error?.code || error?.message);
       return res.status(500).json({ error: 'Failed to authorize request' });
     }
     if (!user) return res.status(401).json({ error: 'Session is no longer valid' });
-    if (String(user.role || '').trim().toLowerCase() !== PLATFORM_OWNER_ROLE || user.company_id) {
-      return res.status(403).json({ code: 'PLATFORM_OWNER_REQUIRED', error: 'Only the platform owner can manage companies' });
-    }
-    req.platformOwner = { id: user.id };
-    req.tenant = { companyId: null, isPlatformOwner: true };
+    if (!canManagePlatform(user)) return res.status(403).json({ ...forbidden });
+
+    const isPlatformOwner = isPlatformOwnerUser(user);
+    req.platformActor = { id: user.id, role: String(user.role || '').trim().toLowerCase(), isPlatformOwner };
+    onPass(req, user, isPlatformOwner);
     return next();
   };
+  Object.defineProperty(guard, 'name', { value: name });
+  return guard;
 }
 
-// Default-company roles that may manage platform owners (besides platform_owner).
-const OWNERS_MANAGER_ROLES = new Set(['admin_network', 'admin']);
+const loadPlatformManagerCandidate = (id) => platformRepo.findOwnersManagerCandidate(id);
 
-/** True when the DB-loaded caller may list/create platform owners. */
-function canManagePlatformOwners(user) {
-  const role = String(user?.role || '').trim().toLowerCase();
-  if (role === PLATFORM_OWNER_ROLE) return !user.company_id;
-  return OWNERS_MANAGER_ROLES.has(role)
-    && Boolean(user.company_id)
-    && user.company_is_default === true
-    && user.company_status === 'active';
+function createPlatformOwnersManagerGuard({ loadUser = loadPlatformManagerCandidate, secret } = {}) {
+  return createPlatformManagerGuard({
+    name: 'requirePlatformOwnersManager',
+    label: 'owners',
+    forbidden: { code: 'PLATFORM_OWNERS_FORBIDDEN', error: 'Not allowed to manage platform owners' },
+    onPass: (req, user) => { req.platformOwnersManager = { id: user.id }; },
+    loadUser,
+    secret,
+  });
 }
 
-function createPlatformOwnersManagerGuard({ loadUser = (id) => platformRepo.findOwnersManagerCandidate(id), secret } = {}) {
-  return async function requirePlatformOwnersManager(req, res, next) {
-    const token = getBearerToken(req);
-    if (!token) return res.status(401).json({ error: 'Authorization token is required' });
-    let payload;
-    try {
-      payload = verifyStaffToken(token, { secret });
-    } catch (_error) {
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
-    const userId = String(payload?.sub || payload?.id || '');
-    if (!UUID_PATTERN.test(userId)) return res.status(401).json({ error: 'Invalid token payload' });
-
-    let user;
-    try {
-      user = await loadUser(userId);
-    } catch (error) {
-      console.error('[platform] owners authorization failed:', error?.code || error?.message);
-      return res.status(500).json({ error: 'Failed to authorize request' });
-    }
-    if (!user) return res.status(401).json({ error: 'Session is no longer valid' });
-    if (!canManagePlatformOwners(user)) {
-      return res.status(403).json({ code: 'PLATFORM_OWNERS_FORBIDDEN', error: 'Not allowed to manage platform owners' });
-    }
-    req.platformOwnersManager = { id: user.id };
-    return next();
-  };
+// /companies*: same audience as /owners; the 403 keeps its historic code.
+// Only the real platform owner gets req.platformOwner / the owner tenant
+// marker; a default-company admin keeps the tenant set by enforceEmployeeAccess.
+function createPlatformCompaniesGuard({ loadUser = loadPlatformManagerCandidate, secret } = {}) {
+  return createPlatformManagerGuard({
+    name: 'requirePlatformCompaniesManager',
+    label: 'companies',
+    forbidden: { code: 'PLATFORM_OWNER_REQUIRED', error: 'Only the platform owner or a main-company network admin can manage companies' },
+    onPass: (req, user, isPlatformOwner) => {
+      if (!isPlatformOwner) return;
+      req.platformOwner = { id: user.id };
+      req.tenant = { companyId: null, isPlatformOwner: true };
+    },
+    loadUser,
+    secret,
+  });
 }
 
 // Same login/password rules as the first company admin.
@@ -375,10 +376,20 @@ function createPlatformController({
   comparePassword = (password, hash) => bcrypt.compareSync(password, hash),
   signToken = (claims) => jwt.sign(claims, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '12h' }),
   env = process.env,
+  logAudit = (entry) => console.info('[platform-audit]', JSON.stringify(entry)),
 } = {}) {
   const internalError = (res, action, error) => {
     console.error(`[platform] ${action} failed:`, error?.code || error?.message);
     return res.status(500).json({ error: `Failed to ${action}` });
+  };
+
+  // Who changed what (no values: field names only, never passwords/codes).
+  const audit = (req, action, details) => {
+    try {
+      logAudit({ action, actorId: req.platformActor?.id ?? null, actorRole: req.platformActor?.role ?? null, ...details });
+    } catch (error) {
+      console.error('[platform] audit log failed:', error?.message);
+    }
   };
 
   // Responds 409 and returns true when a second active company is not allowed yet.
@@ -422,7 +433,9 @@ function createPlatformController({
     if (error) return res.status(400).json({ error });
     try {
       if (await refuseMultiCompany(res)) return res;
-      return res.status(201).json({ company: publicCompany(await repo.createCompany(fields)) });
+      const company = publicCompany(await repo.createCompany(fields));
+      audit(req, 'company.create', { companyId: company?.id ?? null, code: company?.code ?? null });
+      return res.status(201).json({ company });
     } catch (dbError) {
       if (isUniqueViolation(dbError)) return res.status(409).json({ code: 'COMPANY_CODE_TAKEN', error: 'Company code is already taken' });
       return internalError(res, 'create company', dbError);
@@ -446,6 +459,7 @@ function createPlatformController({
       if (reactivates && await refuseMultiCompany(res)) return res;
       const company = await repo.updateCompany(id, fields);
       if (!company) return res.status(404).json({ error: 'Company not found' });
+      audit(req, 'company.update', { companyId: id, fields: Object.keys(fields) });
       return res.status(200).json({ company: publicCompany(company) });
     } catch (dbError) {
       if (isUniqueViolation(dbError)) return res.status(409).json({ code: 'COMPANY_CODE_TAKEN', error: 'Company code is already taken' });
@@ -467,10 +481,20 @@ function createPlatformController({
     try {
       const company = await repo.findCompanyById(id);
       if (!company) return res.status(404).json({ error: 'Company not found' });
+      // A main-company admin must not mint more admins of their own company
+      // here: that would bypass employee management (permissions, branch
+      // scope, audit). Fails closed when no guard-provided actor is present.
+      if (company.is_default && req.platformActor?.isPlatformOwner !== true) {
+        return res.status(403).json({
+          code: 'DEFAULT_COMPANY_ADMIN_FORBIDDEN',
+          error: 'Only the platform owner can create admins of the main company here; use employee management',
+        });
+      }
       if (await repo.loginTakenInCompany(company.id, login)) {
         return res.status(409).json({ code: 'LOGIN_TAKEN', error: 'login already taken' });
       }
       const user = await repo.createCompanyAdmin({ companyId: company.id, login, passwordHash: hashPassword(password) });
+      audit(req, 'company.admin.create', { companyId: company.id, userId: user.id, login: user.login });
       return res.status(201).json({ user: { id: user.id, login: user.login, role: user.role, company_id: user.company_id } });
     } catch (dbError) {
       // Logins are still globally unique until 007_drop_global_uniques is applied.
@@ -493,6 +517,7 @@ function createPlatformController({
     try {
       if (await repo.platformOwnerLoginTaken(login)) return res.status(409).json({ ...LOGIN_TAKEN });
       const owner = await repo.createPlatformOwner({ login, passwordHash: hashPassword(password) });
+      audit(req, 'platform_owner.create', { userId: owner.id, login: owner.login });
       return res.status(201).json({ owner: publicOwner(owner) });
     } catch (dbError) {
       if (isUniqueViolation(dbError)) return res.status(409).json({ ...LOGIN_TAKEN });
@@ -505,12 +530,12 @@ function createPlatformController({
 
 module.exports = {
   createPlatformController,
-  createPlatformOwnerGuard,
+  createPlatformCompaniesGuard,
   createPlatformOwnersManagerGuard,
   multiCompanyPreconditions,
   platform: createPlatformController(),
   platformRepo,
-  requirePlatformOwner: createPlatformOwnerGuard(),
+  requirePlatformCompaniesManager: createPlatformCompaniesGuard(),
   requirePlatformOwnersManager: createPlatformOwnersManagerGuard(),
   validateCompanyFields,
 };

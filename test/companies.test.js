@@ -10,7 +10,7 @@ process.env.DATABASE_URL ||= 'postgres://test:test@127.0.0.1:5432/test';
 process.env.JWT_SECRET ||= 'companies-test-secret';
 
 const { createCompaniesController } = require('../src/models/companies');
-const { createPlatformController, createPlatformOwnerGuard, validateCompanyFields } = require('../src/models/platform');
+const { createPlatformController, createPlatformCompaniesGuard, validateCompanyFields } = require('../src/models/platform');
 const { resolveLoginCompany } = require('../src/utils/tenant');
 const companiesRouter = require('../src/routers/companies');
 const platformRouter = require('../src/routers/platform');
@@ -133,12 +133,12 @@ test('resolveLoginCompany: no code -> default company with a warning while it is
 
 const bearer = (claims) => ({ headers: { authorization: `Bearer ${jwt.sign(claims, process.env.JWT_SECRET)}` }, params: {}, body: {} });
 
-test('platform guard admits only a DB platform_owner without company', async () => {
+test('platform companies guard: DB platform_owner passes; a non-default company admin does not', async () => {
   const users = {
     [OWNER_ID]: { id: OWNER_ID, role: 'platform_owner', company_id: null },
-    [ADMIN_ID]: { id: ADMIN_ID, role: 'admin', company_id: COMPANY_A },
+    [ADMIN_ID]: { id: ADMIN_ID, role: 'admin', company_id: COMPANY_A, company_is_default: false, company_status: 'active' },
   };
-  const guard = createPlatformOwnerGuard({ loadUser: async (id) => users[id] || null });
+  const guard = createPlatformCompaniesGuard({ loadUser: async (id) => users[id] || null });
   const run = async (req) => { const response = res(); let next = false; await guard(req, response, () => { next = true; }); return { response, next }; };
 
   assert.equal((await run({ headers: {} })).response.statusCode, 401);
@@ -150,7 +150,7 @@ test('platform guard admits only a DB platform_owner without company', async () 
   assert.equal((await run(bearer({ sub: OWNER_ID, role: 'marketplace' }))).response.statusCode, 401);
 });
 
-test('every platform company route is behind the platform-owner guard; login is rate-limited', () => {
+test('every platform company route is behind the companies guard; login is rate-limited', () => {
   const routes = platformRouter.stack.filter((entry) => entry.route).map((entry) => ({
     path: entry.route.path,
     methods: Object.keys(entry.route.methods),
@@ -161,7 +161,7 @@ test('every platform company route is behind the platform-owner guard; login is 
     companyRoutes.map((route) => `${route.methods[0]} ${route.path}`).sort(),
     ['get /companies', 'patch /companies/:id', 'post /companies', 'post /companies/:id/admins'],
   );
-  for (const route of companyRoutes) assert.equal(route.names[0], 'requirePlatformOwner', route.path);
+  for (const route of companyRoutes) assert.equal(route.names[0], 'requirePlatformCompaniesManager', route.path);
   const login = routes.find((route) => route.path === '/login');
   assert.equal(login.names.length, 2);
 });
@@ -261,17 +261,19 @@ test('platform: the default company cannot be suspended', async () => {
 
 test('platform: create the first admin of a company with a bcrypt-hashed password', async () => {
   const repo = platformRepo();
-  const controller = createPlatformController({ repo, env: { KIOSK_AUTH_ENFORCE: 'true' } });
+  const controller = createPlatformController({ repo, env: { KIOSK_AUTH_ENFORCE: 'true' }, logAudit: () => {} });
+  // COMPANY_A is the default company: only the platform owner may add its admins here.
+  const platformActor = { id: OWNER_ID, role: 'platform_owner', isPlatformOwner: true };
 
   const created = res();
-  await controller.createCompanyAdmin({ params: { id: COMPANY_A }, body: { login: 'boss', password: 'long-enough-1' } }, created);
+  await controller.createCompanyAdmin({ platformActor, params: { id: COMPANY_A }, body: { login: 'boss', password: 'long-enough-1' } }, created);
   assert.equal(created.statusCode, 201);
   assert.deepEqual(created.body.user, { id: 'u1', login: 'boss', role: 'admin', company_id: COMPANY_A });
   assert.ok(bcrypt.compareSync('long-enough-1', repo.users[0].password_hash));
   assert.equal(JSON.stringify(created.body).includes('password'), false);
 
   const again = res();
-  await controller.createCompanyAdmin({ params: { id: COMPANY_A }, body: { login: 'boss', password: 'long-enough-1' } }, again);
+  await controller.createCompanyAdmin({ platformActor, params: { id: COMPANY_A }, body: { login: 'boss', password: 'long-enough-1' } }, again);
   assert.equal(again.statusCode, 409);
 
   const weak = res();

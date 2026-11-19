@@ -357,14 +357,26 @@ branch scopes). Socket `join_branch` for a branch of another company answers
 
 `platform_owner` (no company) manages companies only — no statistics, clients
 or company data. With a platform-owner token every other `/api/*` staff route
-answers `403 PLATFORM_OWNER_NO_TENANT_ACCESS`. All company routes check the
-role in the DB (`403 PLATFORM_OWNER_REQUIRED` otherwise).
+answers `403 PLATFORM_OWNER_NO_TENANT_ACCESS`.
+
+**Who may call `/api/platform/companies*`** (MULTI_TENANCY.md 12): role and
+company are loaded from the DB, the token's role is ignored —
+`platform_owner` (no company), **or** `admin_network` / `admin` of the
+**default** company (`companies.is_default = true`) in status `active`, with
+their normal company token. Everyone else (incl. `admin_branch`, managers,
+barbers of the default company, any admin of another company) →
+`403 PLATFORM_OWNER_REQUIRED`; no/invalid token or unknown account → `401`.
+A token whose role no longer matches the DB is refused earlier with
+`401 TOKEN_ROLE_STALE`. The grant is management only: default-company admins
+still see only their own company's tenant data on every other route.
+Mutations log one `[platform-audit]` `console.info` line
+(`{ action, actorId, actorRole, companyId, fields | userId, login }`, never values/passwords).
 
 - `POST /api/platform/login` `{ login, password }` → `200 { token, user: { id, login, role: "platform_owner" } }`; wrong credentials → `400 Invalid credentials`. Rate-limited per IP (20 / 15 min).
 - `GET /api/platform/companies` → `{ companies: [{ id, name, code, status, currency, timezone, logo_url, primary_color, is_default, has_kiosk_enrollment_code, created_at, updated_at }] }` (the enrollment code / its hash are never returned).
 - `POST /api/platform/companies` `{ name, code, currency?, timezone?, logo_url?, primary_color? }` → `201 { company }`. **Gate:** `409 { code: "MULTI_COMPANY_PRECONDITIONS", failed: ["KIOSK_AUTH_ENFORCE"?, "TENANT_STRICT"?] }` unless kiosk auth is enforced and `current_setting('app.tenant_strict')` is `on` (MULTI_TENANCY.md 9.9). `code` is stored upper-case, `^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$`; duplicate (case-insensitive) → `409 COMPANY_CODE_TAKEN`; unknown fields → `400`.
 - `PATCH /api/platform/companies/:id` — any of `name, code, status (active|suspended), currency, timezone, logo_url, primary_color` (`logo_url`/`primary_color` accept `null`), plus `kiosk_enrollment_code` (8–128 chars → stored as SHA-256 hash; `null` clears it; never returned). Unknown id → `404`; suspending the default company → `409 DEFAULT_COMPANY_SUSPEND_FORBIDDEN`; re-activating a suspended non-default company is subject to the same `409 MULTI_COMPANY_PRECONDITIONS` gate as creation.
-- `POST /api/platform/companies/:id/admins` `{ login, password }` → `201 { user: { id, login, role: "admin", company_id } }`. Password 8–128 chars, bcrypt (cost 10). Login taken in the company → `409 LOGIN_TAKEN` (logins are unique per company after migration 007).
+- `POST /api/platform/companies/:id/admins` `{ login, password }` → `201 { user: { id, login, role: "admin", company_id } }`. Password 8–128 chars, bcrypt (cost 10). Login taken in the company → `409 LOGIN_TAKEN` (logins are unique per company after migration 007). For the **default** company only the `platform_owner` may call it; a default-company admin gets `403 DEFAULT_COMPANY_ADMIN_FORBIDDEN` (use employee management instead).
 - `timezone` (create/patch) must be an IANA zone name (`Area/Location`, `UTC`, `Etc/…`); offsets like `+05:00` and abbreviations like `EST` → `400`. Stored in canonical case.
 
 ### Platform owner accounts: `/api/platform/owners`
@@ -372,8 +384,12 @@ role in the DB (`403 PLATFORM_OWNER_REQUIRED` otherwise).
 Allowed for (checked in the DB, the token's role is ignored): `platform_owner`,
 or `admin_network` / `admin` whose company is the **default** company
 (`companies.is_default = true`) and `active`. Everyone else → `403 PLATFORM_OWNERS_FORBIDDEN`;
-no/invalid token or unknown account → `401`. A default-company admin can use
-only these two routes — `/api/platform/companies*` stays `403 PLATFORM_OWNER_REQUIRED`.
+no/invalid token or unknown account → `401`. Same audience as
+`/api/platform/companies*` (see above).
+
+`GET /api/barbers/me` → `user` additionally carries `company_is_default`
+(boolean) and `can_manage_platform` (boolean, same rule as above) — a UI hint
+for the dash "Платформа" section; the platform routes re-check in the DB.
 
 - `GET /api/platform/owners` → `200 { owners: [{ id, login, created_at }] }` (sorted by login; `created_at` is `null` until migration `009_users_created_at` is applied).
 - `POST /api/platform/owners` `{ login, password }` → `201 { owner: { id, login, created_at } }`. Creates a `users` row with `role = 'platform_owner'`, `company_id = NULL`; password bcrypt (cost 10, as company admins). Login 1–64 chars without spaces (trimmed), password 8–128 chars, else `400`. A platform owner with that login exists → `409 LOGIN_TAKEN` (also on a concurrent duplicate via `users_platform_login_uidx`).

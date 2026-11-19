@@ -440,7 +440,7 @@ test('login and session responses expose authoritative database permissions', ()
   assert.match(barbersModel, /permissions: loginPermissions/);
   assert.match(barbersModel, /const adminPermissions = \(await fetchPermissionsByUserIds\(\[adminUser\.id\]\)\)/);
   assert.match(barbersModel, /permissions: adminPermissions/);
-  assert.match(barbersModel, /return res\.json\(\{ user: \{ \.\.\.user, permissions \}, barber \}\)/);
+  assert.match(barbersModel, /return res\.json\(\{ user: \{ \.\.\.user, permissions, \.\.\.platformFlags \}, barber \}\)/);
 });
 
 test('existing employee quality permissions are provisioned once without defeating later revocation', () => {
